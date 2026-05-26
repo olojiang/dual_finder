@@ -62,8 +62,4 @@ public struct PaneState: Sendable {
         tabs[index].url = url
         selectedItemURLs.removeAll()
     }
-
-    public mutating func selectSingleItem(_ url: URL) {
-        selectedItemURLs = [url]
-    }
 }

@@ -36,10 +36,10 @@
 
 修改：
 
-- `FilePaneView` 给每行增加单击处理，调用 `model.clickItem(...)`。
-- `DualFinderViewModel.clickItem` 每次单击都写 `selection item.clicked` 日志。
+- `FilePaneView` 给每行增加非拦截式单击记录，调用 `model.recordItemClick(...)`。
+- `DualFinderViewModel.recordItemClick` 每次单击都写 `selection item.clicked` 日志。
 - `FileRow` 增加 `frame(maxWidth: .infinity, alignment: .leading)`，配合 `contentShape(Rectangle())` 扩大整行命中范围。
-- `PaneState` 增加 `selectSingleItem(_:)`，把选择规则收敛到核心状态层。
+- 单击记录使用 `simultaneousGesture`，选择和焦点仍交给原生 `List(selection:)` 处理，避免程序化 selection 导致非焦点灰色选中态。
 
 ### 第二轮：文件操作边界
 
@@ -101,16 +101,17 @@
 
 - ViewModel 新增 `setSelection(_:for:)`，避免左右 pane selection 赋值重复。
 - `mutatePane` 和 `pane(for:)` 继续作为左右 pane 访问的统一入口。
-- 选择逻辑下沉到 `PaneState.selectSingleItem(_:)`，避免 UI 层直接拼状态规则。
+- 选择逻辑由 SwiftUI `List(selection:)` 和 ViewModel selection binding 统一处理，点击日志不再直接改 selection，避免重复职责。
 
 ## 数据流动图
 
 ```mermaid
 flowchart LR
     Click[用户单击文件行] --> Row[FilePaneView / FileRow]
-    Row --> VM[DualFinderViewModel.clickItem]
-    VM --> Pane[PaneState.selectSingleItem]
+    Row --> VM[DualFinderViewModel.recordItemClick]
+    Row --> List[SwiftUI List selection and focus]
     VM --> Log[AppLogger item.clicked]
+    List --> Pane[PaneState.selectedItemURLs]
     Pane --> UI[SwiftUI Published 状态刷新]
     Log --> File[~/Library/Logs/DualFinder/yyyy-MM-dd.log]
 ```
@@ -126,8 +127,9 @@ sequenceDiagram
     participant L as AppLogger
 
     U->>V: 单击文件行
-    V->>VM: clickItem(url, side)
-    VM->>P: selectSingleItem(url)
+    V->>VM: recordItemClick(url, side)
+    V->>V: request List focus
+    V->>P: List selection binding updates selectedItemURLs
     VM->>L: debug selection item.clicked
     VM-->>V: Published 状态变更
     V-->>U: 行选中状态更新
@@ -231,7 +233,7 @@ swift test
 
 本轮新增或加强：
 
-- `PaneState.selectSingleItem(_:)`。
+- `PaneState` 导航清空已有 selection 的不变量。
 - `PaneState.closeTab(id:) -> Bool` 成功/失败返回值。
 - `FileOperationService.trash(_:)` macOS 废纸篓路径。
 

@@ -4,6 +4,7 @@ import DualFinderCore
 struct FilePaneView: View {
     let side: PaneSide
     @ObservedObject var model: DualFinderViewModel
+    @FocusState private var isFileListFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -74,14 +75,17 @@ struct FilePaneView: View {
                 FileRow(item: item)
                     .tag(item.url)
                     .contentShape(Rectangle())
-                    .onTapGesture {
-                        model.clickItem(item.url, on: side)
+                    .simultaneousGesture(TapGesture().onEnded {
+                        isFileListFocused = true
+                        model.recordItemClick(item.url, on: side)
                     }
+                    )
                     .onTapGesture(count: 2) {
                         model.navigate(side, to: item.url)
                     }
             }
         }
+        .focused($isFileListFocused)
         .contextMenu(forSelectionType: URL.self) { selection in
             Button("Copy to Other Pane") { model.copySelection(from: side) }
             Button("Move to Other Pane") { model.moveSelection(from: side) }

@@ -52,8 +52,7 @@ final class DualFinderViewModel: ObservableObject {
         )
     }
 
-    func clickItem(_ url: URL, on side: PaneSide) {
-        mutatePane(side) { $0.selectSingleItem(url) }
+    func recordItemClick(_ url: URL, on side: PaneSide) {
         logger.debug("selection", "item.clicked", metadata: [
             "side": side.rawValue,
             "path": url.path

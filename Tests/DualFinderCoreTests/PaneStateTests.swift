@@ -23,12 +23,12 @@ struct PaneStateTests {
         #expect(pane.tabs.count == 1)
     }
 
-    @Test("selects exactly one item and clears selection on navigation")
+    @Test("clears selection on navigation")
     func managesSelection() {
         var pane = PaneState(side: .left, initialURL: URL(fileURLWithPath: "/tmp"))
         let selected = URL(fileURLWithPath: "/tmp/selected.txt")
 
-        pane.selectSingleItem(selected)
+        pane.selectedItemURLs = [selected]
         #expect(pane.selectedItemURLs == [selected])
 
         pane.navigateSelectedTab(to: URL(fileURLWithPath: "/Users"))
