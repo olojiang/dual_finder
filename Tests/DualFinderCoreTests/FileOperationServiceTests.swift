@@ -51,4 +51,19 @@ struct FileOperationServiceTests {
         #expect(original == "existing")
         #expect(copied == "new")
     }
+
+    #if os(macOS)
+    @Test("moves files to the macOS Trash")
+    func movesFilesToTrash() throws {
+        let root = try TemporaryDirectory()
+        let source = root.url.appendingPathComponent("discard.txt")
+        try "discard".write(to: source, atomically: true, encoding: .utf8)
+        let logger = CapturingLogger()
+
+        try FileOperationService(logger: logger).trash([source])
+
+        #expect(!FileManager.default.fileExists(atPath: source.path))
+        #expect(logger.messages.contains { $0.contains("trash.completed") })
+    }
+    #endif
 }

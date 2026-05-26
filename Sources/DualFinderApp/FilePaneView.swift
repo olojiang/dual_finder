@@ -74,6 +74,9 @@ struct FilePaneView: View {
                 FileRow(item: item)
                     .tag(item.url)
                     .contentShape(Rectangle())
+                    .onTapGesture {
+                        model.clickItem(item.url, on: side)
+                    }
                     .onTapGesture(count: 2) {
                         model.navigate(side, to: item.url)
                     }
@@ -132,6 +135,7 @@ private struct FileRow: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 126, alignment: .trailing)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 2)
     }
 

@@ -1,7 +1,15 @@
 import Foundation
-#if canImport(AppKit)
-import AppKit
-#endif
+
+public enum FileOperationError: LocalizedError, Equatable {
+    case trashUnsupported
+
+    public var errorDescription: String? {
+        switch self {
+        case .trashUnsupported:
+            "Moving files to Trash is only supported on macOS."
+        }
+    }
+}
 
 public struct FileOperationService {
     private let fileManager: FileManager
@@ -48,10 +56,10 @@ public struct FileOperationService {
     public func trash(_ sources: [URL]) throws {
         logger?.info("file-operation", "trash.started", metadata: ["count": "\(sources.count)"])
         for source in sources {
-            #if canImport(AppKit)
-            try FileManager.default.trashItem(at: source, resultingItemURL: nil)
+            #if os(macOS)
+            try fileManager.trashItem(at: source, resultingItemURL: nil)
             #else
-            try fileManager.removeItem(at: source)
+            throw FileOperationError.trashUnsupported
             #endif
             logger?.warning("file-operation", "trash.item.completed", metadata: ["source": source.path])
         }

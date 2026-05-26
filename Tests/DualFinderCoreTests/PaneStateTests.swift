@@ -13,11 +13,25 @@ struct PaneStateTests {
         #expect(pane.tabs.count == 2)
         #expect(pane.selectedTabID == second)
 
-        pane.closeTab(id: second)
+        let didCloseSecond = pane.closeTab(id: second)
+        #expect(didCloseSecond)
         #expect(pane.tabs.count == 1)
         #expect(pane.selectedTab?.url == first)
 
-        pane.closeTab(id: pane.tabs[0].id)
+        let didCloseLastTab = pane.closeTab(id: pane.tabs[0].id)
+        #expect(!didCloseLastTab)
         #expect(pane.tabs.count == 1)
+    }
+
+    @Test("selects exactly one item and clears selection on navigation")
+    func managesSelection() {
+        var pane = PaneState(side: .left, initialURL: URL(fileURLWithPath: "/tmp"))
+        let selected = URL(fileURLWithPath: "/tmp/selected.txt")
+
+        pane.selectSingleItem(selected)
+        #expect(pane.selectedItemURLs == [selected])
+
+        pane.navigateSelectedTab(to: URL(fileURLWithPath: "/Users"))
+        #expect(pane.selectedItemURLs.isEmpty)
     }
 }

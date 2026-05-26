@@ -43,17 +43,21 @@ final class DualFinderViewModel: ObservableObject {
         Binding(
             get: { self.pane(for: side).selectedItemURLs },
             set: { newValue in
-                if side == .left {
-                    self.leftPane.selectedItemURLs = newValue
-                } else {
-                    self.rightPane.selectedItemURLs = newValue
-                }
+                self.setSelection(newValue, for: side)
                 self.logger.debug("selection", "selection.changed", metadata: [
                     "side": side.rawValue,
                     "count": "\(newValue.count)"
                 ])
             }
         )
+    }
+
+    func clickItem(_ url: URL, on side: PaneSide) {
+        mutatePane(side) { $0.selectSingleItem(url) }
+        logger.debug("selection", "item.clicked", metadata: [
+            "side": side.rawValue,
+            "path": url.path
+        ])
     }
 
     func refreshAll() {
@@ -116,9 +120,13 @@ final class DualFinderViewModel: ObservableObject {
 
     func closeSelectedTab(on side: PaneSide) {
         let tabID = pane(for: side).selectedTabID
-        mutatePane(side) { $0.closeTab(id: tabID) }
-        logger.info("tab", "tab.closed", metadata: ["side": side.rawValue, "tab": tabID.uuidString])
-        refresh(side)
+        let didClose = mutatePane(side) { $0.closeTab(id: tabID) }
+        if didClose {
+            logger.info("tab", "tab.closed", metadata: ["side": side.rawValue, "tab": tabID.uuidString])
+            refresh(side)
+        } else {
+            logger.debug("tab", "tab.close.ignored", metadata: ["side": side.rawValue, "tab": tabID.uuidString])
+        }
     }
 
     func selectTab(_ id: UUID, on side: PaneSide) {
@@ -221,10 +229,14 @@ final class DualFinderViewModel: ObservableObject {
     }
 
     private func clearSelection(_ side: PaneSide) {
+        setSelection([], for: side)
+    }
+
+    private func setSelection(_ selection: Set<URL>, for side: PaneSide) {
         if side == .left {
-            leftPane.selectedItemURLs.removeAll()
+            leftPane.selectedItemURLs = selection
         } else {
-            rightPane.selectedItemURLs.removeAll()
+            rightPane.selectedItemURLs = selection
         }
     }
 

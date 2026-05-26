@@ -46,18 +46,24 @@ public struct PaneState: Sendable {
         return tab.id
     }
 
-    public mutating func closeTab(id: UUID) {
-        guard tabs.count > 1, let index = tabs.firstIndex(where: { $0.id == id }) else { return }
+    @discardableResult
+    public mutating func closeTab(id: UUID) -> Bool {
+        guard tabs.count > 1, let index = tabs.firstIndex(where: { $0.id == id }) else { return false }
         tabs.remove(at: index)
         if selectedTabID == id {
             selectedTabID = tabs[min(index, tabs.count - 1)].id
             selectedItemURLs.removeAll()
         }
+        return true
     }
 
     public mutating func navigateSelectedTab(to url: URL) {
         guard let index = tabs.firstIndex(where: { $0.id == selectedTabID }) else { return }
         tabs[index].url = url
         selectedItemURLs.removeAll()
+    }
+
+    public mutating func selectSingleItem(_ url: URL) {
+        selectedItemURLs = [url]
     }
 }
