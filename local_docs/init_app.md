@@ -1,4 +1,4 @@
-# Dual Finder 初始应用说明
+# Dual Finder 纪 初始应用说明
 
 ## 问题是什么
 
@@ -144,12 +144,12 @@ swift test
 
 1. `swift test`
 2. `swift build -c release`
-3. 创建 `release/Dual Finder.app`
+3. 创建 `release/Dual Finder 纪.app`
 4. 生成透明背景圆角图标并写入 `.icns`
 5. `codesign --force --deep --sign -`
-6. 杀掉已有 `Dual Finder` 进程
+6. 杀掉已有 `Dual Finder 纪` 和旧版 `Dual Finder` 进程
 7. 复制到 `/Applications`
-8. 从 `/Applications/Dual Finder.app` 启动
+8. 从 `/Applications/Dual Finder 纪.app` 启动
 
 ### 清理 release
 

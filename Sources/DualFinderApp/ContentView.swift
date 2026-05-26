@@ -17,6 +17,18 @@ struct ContentView: View {
             StatusBar(message: model.statusMessage)
         }
         .background(.background)
+        .alert(item: $model.diskAccessPrompt) { prompt in
+            Alert(
+                title: Text("Full Disk Access Required"),
+                message: Text("\(prompt.message)\n\nBlocked path: \(prompt.path)"),
+                primaryButton: .default(Text("Open Settings")) {
+                    model.openFullDiskAccessSettings()
+                },
+                secondaryButton: .cancel(Text("Later")) {
+                    model.dismissDiskAccessPrompt()
+                }
+            )
+        }
     }
 }
 
@@ -66,6 +78,9 @@ private struct AppToolbar: View {
 
             IconButton(systemName: "doc.text.magnifyingglass", help: "Open log folder") {
                 model.openLogFolder()
+            }
+            IconButton(systemName: "lock.shield", help: "Open Full Disk Access settings") {
+                model.openFullDiskAccessSettings()
             }
         }
         .padding(.horizontal, 10)

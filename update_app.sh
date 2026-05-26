@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_NAME="Dual Finder"
+APP_NAME="Dual Finder 纪"
 BUNDLE_ID="com.local.dualfinder"
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RELEASE_DIR="$ROOT_DIR/release"
@@ -12,6 +12,32 @@ RESOURCES_DIR="$CONTENTS/Resources"
 INSTALL_PATH="/Applications/$APP_NAME.app"
 ICONSET="$RELEASE_DIR/DualFinder.iconset"
 ICNS="$RESOURCES_DIR/DualFinder.icns"
+
+select_codesign_identity() {
+    if [[ -n "${DUAL_FINDER_CODESIGN_IDENTITY:-}" ]]; then
+        printf '%s\n' "$DUAL_FINDER_CODESIGN_IDENTITY"
+        return
+    fi
+
+    local identities
+    identities="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+
+    local identity
+    identity="$(
+        printf '%s\n' "$identities" |
+            sed -nE 's/^ *[0-9]+\) [A-F0-9]+ "([^"]*Apple Development[^"]*)".*/\1/p' |
+            head -n 1
+    )"
+    if [[ -z "$identity" ]]; then
+        identity="$(
+            printf '%s\n' "$identities" |
+                sed -nE 's/^ *[0-9]+\) [A-F0-9]+ "([^"]*Developer ID Application[^"]*)".*/\1/p' |
+                head -n 1
+        )"
+    fi
+
+    printf '%s\n' "${identity:--}"
+}
 
 echo "[1/7] Running tests"
 swift test --package-path "$ROOT_DIR"
@@ -58,12 +84,20 @@ echo "[4/7] Generating transparent rounded icon"
 swift "$ROOT_DIR/tools/generate_icon.swift" "$ICONSET"
 iconutil --convert icns "$ICONSET" --output "$ICNS"
 
-echo "[5/7] Signing app ad-hoc"
-codesign --force --deep --sign - "$APP_BUNDLE"
+SIGNING_IDENTITY="$(select_codesign_identity)"
+if [[ "$SIGNING_IDENTITY" == "-" ]]; then
+    echo "[5/7] Signing app ad-hoc"
+    echo "warning: no stable codesigning identity found; macOS privacy permissions may need re-approval after each build."
+else
+    echo "[5/7] Signing app with: $SIGNING_IDENTITY"
+fi
+
+codesign --force --deep --timestamp=none --sign "$SIGNING_IDENTITY" "$APP_BUNDLE"
 codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
 
 echo "[6/7] Replacing /Applications build"
 pkill -x "$APP_NAME" 2>/dev/null || true
+pkill -x "Dual Finder" 2>/dev/null || true
 pkill -x "DualFinderApp" 2>/dev/null || true
 rm -rf "$INSTALL_PATH"
 cp -R "$APP_BUNDLE" "$INSTALL_PATH"

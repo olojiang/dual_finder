@@ -34,4 +34,37 @@ struct PaneStateTests {
         pane.navigateSelectedTab(to: URL(fileURLWithPath: "/Users"))
         #expect(pane.selectedItemURLs.isEmpty)
     }
+
+    @Test("can select a child item while navigating")
+    func selectsChildOnNavigation() {
+        var pane = PaneState(side: .left, initialURL: URL(fileURLWithPath: "/Users/hunter/Documents"))
+        let child = pane.selectedURL
+
+        pane.navigateSelectedTab(to: URL(fileURLWithPath: "/Users/hunter"), selecting: child)
+
+        #expect(pane.selectedURL == URL(fileURLWithPath: "/Users/hunter"))
+        #expect(pane.selectedItemURLs == [child])
+    }
+
+    @Test("restores selected tab from saved tabs")
+    func restoresSelectedTab() {
+        let first = FileTab(id: UUID(), url: URL(fileURLWithPath: "/tmp/first"))
+        let second = FileTab(id: UUID(), url: URL(fileURLWithPath: "/tmp/second"))
+
+        let pane = PaneState(side: .right, tabs: [first, second], selectedTabID: second.id)
+
+        #expect(pane.tabs == [first, second])
+        #expect(pane.selectedTabID == second.id)
+        #expect(pane.selectedURL == second.url)
+        #expect(pane.selectedItemURLs.isEmpty)
+    }
+
+    @Test("falls back to first tab when restored selected tab is missing")
+    func restoresMissingSelectedTabToFirstTab() {
+        let first = FileTab(id: UUID(), url: URL(fileURLWithPath: "/tmp/first"))
+        let pane = PaneState(side: .left, tabs: [first], selectedTabID: UUID())
+
+        #expect(pane.selectedTabID == first.id)
+        #expect(pane.selectedURL == first.url)
+    }
 }

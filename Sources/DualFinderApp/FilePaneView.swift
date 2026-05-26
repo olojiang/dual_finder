@@ -1,9 +1,13 @@
+import AppKit
 import SwiftUI
 import DualFinderCore
 
 struct FilePaneView: View {
     let side: PaneSide
     @ObservedObject var model: DualFinderViewModel
+    @State private var renamingURL: URL?
+    @State private var pendingRenameURL: URL?
+    @State private var renameText = ""
     @FocusState private var isFileListFocused: Bool
 
     var body: some View {
@@ -70,70 +74,315 @@ struct FilePaneView: View {
     }
 
     private var fileList: some View {
-        List(selection: model.bindingForSelection(side: side)) {
-            ForEach(model.items(for: side)) { item in
-                FileRow(item: item)
-                    .tag(item.url)
-                    .contentShape(Rectangle())
-                    .simultaneousGesture(TapGesture().onEnded {
-                        isFileListFocused = true
-                        model.recordItemClick(item.url, on: side)
-                    }
+        VStack(spacing: 0) {
+            sortHeader
+            List(selection: model.bindingForSelection(side: side)) {
+                ForEach(model.items(for: side)) { item in
+                    FileRow(
+                        item: item,
+                        isRenaming: renamingURL == item.url,
+                        renameText: $renameText,
+                        commitRename: commitRename,
+                        cancelRename: cancelRename
                     )
-                    .onTapGesture(count: 2) {
-                        model.navigate(side, to: item.url)
-                    }
-            }
-        }
-        .focused($isFileListFocused)
-        .contextMenu(forSelectionType: URL.self) { selection in
-            Button("Copy to Other Pane") { model.copySelection(from: side) }
-            Button("Move to Other Pane") { model.moveSelection(from: side) }
-            Button("Move to Trash", role: .destructive) { model.trashSelection(from: side) }
-        } primaryAction: { selection in
-            if let first = selection.first {
-                model.navigate(side, to: first)
-            }
-        }
-        .safeAreaInset(edge: .bottom) {
-            HStack(spacing: 8) {
-                IconButton(systemName: "folder.badge.plus", help: "Create folder") {
-                    model.createFolder(in: side)
+                        .tag(item.url)
+                        .contentShape(Rectangle())
+                        .overlay {
+                            if renamingURL != item.url {
+                                RowMouseHandler(
+                                    mouseDown: { modifierFlags in
+                                        selectItemFromRowMouseDown(item.url, modifierFlags: modifierFlags)
+                                    },
+                                    doubleClick: {
+                                        activateItem(item.url)
+                                    }
+                                )
+                            }
+                        }
                 }
-                IconButton(systemName: "trash", help: "Move selection to Trash") {
+            }
+            .focused($isFileListFocused)
+            .onKeyPress(.return, phases: .down) { keyPress in
+                guard keyPress.modifiers.isEmpty else { return .ignored }
+                return beginRenamingSelectedItem() ? .handled : .ignored
+            }
+            .onKeyPress(KeyEquivalent("o"), phases: .down) { keyPress in
+                guard keyPress.modifiers.contains(.command) else { return .ignored }
+                model.openSelectionWithDefaultApp(on: side)
+                return .handled
+            }
+            .onKeyPress(KeyEquivalent("c"), phases: .down) { keyPress in
+                guard keyPress.modifiers.contains(.command),
+                      keyPress.modifiers.contains(.option),
+                      renamingURL == nil
+                else { return .ignored }
+                model.copyAbsolutePaths(model.pane(for: side).selectedItemURLs, on: side)
+                return .handled
+            }
+            .onKeyPress(keys: [.delete, .deleteForward], phases: .down) { keyPress in
+                guard keyPress.modifiers.contains(.command), renamingURL == nil else { return .ignored }
+                if keyPress.modifiers.contains(.shift) {
+                    model.emptyTrash()
+                } else {
                     model.trashSelection(from: side)
                 }
-                IconButton(systemName: "arrow.clockwise", help: "Refresh pane") {
-                    model.refresh(side)
-                }
-                Spacer()
-                Text("\(model.items(for: side).count)")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                return .handled
             }
-            .padding(8)
-            .background(.bar)
+            .onKeyPress(.space) {
+                guard renamingURL == nil else { return .ignored }
+                model.previewSelection(on: side)
+                return .handled
+            }
+            .onKeyPress(keys: [.upArrow, .downArrow], phases: .down) { keyPress in
+                guard keyPress.modifiers.contains(.command) else { return .ignored }
+                switch keyPress.key {
+                case .upArrow:
+                    model.navigateUp(side)
+                    return .handled
+                case .downArrow:
+                    model.navigateIntoSelectedDirectory(side)
+                    return .handled
+                default:
+                    return .ignored
+                }
+            }
+            .contextMenu(forSelectionType: URL.self) { selection in
+                Button("Copy Absolute Path") { model.copyAbsolutePaths(selection, on: side) }
+                Button("Open in Ghostty or Terminal") { model.openInTerminal(selection, on: side) }
+                Divider()
+                Button("Copy to Other Pane") { model.copySelection(from: side) }
+                Button("Move to Other Pane") { model.moveSelection(from: side) }
+                Button("Move to Trash", role: .destructive) { model.trashSelection(from: side) }
+            } primaryAction: { selection in
+                model.activateFirstItem(in: selection, on: side)
+            }
+            .safeAreaInset(edge: .bottom) {
+                HStack(spacing: 8) {
+                    IconButton(systemName: "folder.badge.plus", help: "Create folder") {
+                        if let created = model.createFolder(in: side) {
+                            queueRename(created)
+                        }
+                    }
+                    IconButton(systemName: "trash", help: "Move selection to Trash") {
+                        model.trashSelection(from: side)
+                    }
+                    IconButton(systemName: "arrow.clockwise", help: "Refresh pane") {
+                        model.refresh(side)
+                    }
+                    IconButton(systemName: "ruler", help: "Calculate selected folder size") {
+                        model.calculateSelectedFolderSizes(on: side)
+                    }
+                    Spacer()
+                    Text("\(model.items(for: side).count)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(8)
+                .background(.bar)
+            }
+        }
+        .onChange(of: model.items(for: side)) { _, _ in
+            beginPendingRenameIfReady()
+        }
+        .onChange(of: model.pane(for: side).selectedItemURLs) { _, selection in
+            guard let renamingURL, !selection.contains(renamingURL) else { return }
+            clearRenameState()
+        }
+    }
+
+    private var sortHeader: some View {
+        HStack(spacing: 8) {
+            SortHeaderButton(title: "Name", field: .name, rule: model.sortRule(for: side)) {
+                model.selectSortField(.name, for: side)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            SortHeaderButton(title: "Type", field: .type, rule: model.sortRule(for: side)) {
+                model.selectSortField(.type, for: side)
+            }
+            .frame(width: 112, alignment: .leading)
+            SortHeaderButton(title: "Size", field: .size, rule: model.sortRule(for: side)) {
+                model.selectSortField(.size, for: side)
+            }
+            .frame(width: 86, alignment: .trailing)
+            SortHeaderButton(title: "Modified", field: .modifiedAt, rule: model.sortRule(for: side)) {
+                model.selectSortField(.modifiedAt, for: side)
+            }
+            .frame(width: 126, alignment: .trailing)
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 4)
+        .background(.bar)
+    }
+
+    private func beginRenamingSelectedItem() -> Bool {
+        guard renamingURL == nil else { return false }
+        let selected = model.pane(for: side).selectedItemURLs
+        guard selected.count == 1,
+              let item = model.items(for: side).first(where: { selected.contains($0.url) }) else {
+            return false
+        }
+
+        beginRenaming(item)
+        model.isInlineRenaming = true
+        return true
+    }
+
+    private func beginRenaming(_ url: URL) {
+        if let item = model.items(for: side).first(where: { $0.url == url }) {
+            beginRenaming(item)
+        } else {
+            renamingURL = url
+            renameText = url.lastPathComponent
+        }
+        model.isInlineRenaming = true
+    }
+
+    private func queueRename(_ url: URL) {
+        pendingRenameURL = url
+        DispatchQueue.main.async {
+            beginPendingRenameIfReady()
+        }
+    }
+
+    private func beginPendingRenameIfReady() {
+        guard let pendingRenameURL,
+              model.items(for: side).contains(where: { $0.url == pendingRenameURL }) else {
+            return
+        }
+        self.pendingRenameURL = nil
+        beginRenaming(pendingRenameURL)
+    }
+
+    private func beginRenaming(_ item: FileItem) {
+        renamingURL = item.url
+        renameText = item.name
+    }
+
+    private func commitRename() {
+        guard let renamingURL else { return }
+        let newName = renameText
+        clearRenameState()
+        model.renameItem(renamingURL, to: newName, on: side)
+        restoreFileListFocus()
+    }
+
+    private func cancelRename() {
+        clearRenameState()
+        restoreFileListFocus()
+    }
+
+    private func clearRenameState() {
+        renamingURL = nil
+        pendingRenameURL = nil
+        renameText = ""
+        model.isInlineRenaming = false
+    }
+
+    private func activateItem(_ url: URL) {
+        guard renamingURL == nil else { return }
+        model.activateItem(url, on: side)
+        restoreFileListFocus()
+    }
+
+    private func selectItemFromRowMouseDown(_ url: URL, modifierFlags: NSEvent.ModifierFlags) {
+        guard renamingURL == nil else { return }
+
+        isFileListFocused = true
+        model.activatePane(side)
+
+        if modifierFlags.contains(.command) {
+            model.toggleItemSelection(url, on: side)
+            return
+        }
+
+        if modifierFlags.contains(.shift) {
+            model.extendSelection(to: url, on: side)
+            return
+        }
+
+        model.selectItem(url, on: side)
+    }
+
+    private func restoreFileListFocus() {
+        DispatchQueue.main.async {
+            isFileListFocused = true
+        }
+    }
+}
+
+private struct RowMouseHandler: NSViewRepresentable {
+    let mouseDown: (NSEvent.ModifierFlags) -> Void
+    let doubleClick: () -> Void
+
+    func makeNSView(context: Context) -> MouseHandlingView {
+        let view = MouseHandlingView()
+        view.mouseDownAction = mouseDown
+        view.doubleClickAction = doubleClick
+        return view
+    }
+
+    func updateNSView(_ nsView: MouseHandlingView, context: Context) {
+        nsView.mouseDownAction = mouseDown
+        nsView.doubleClickAction = doubleClick
+    }
+
+    final class MouseHandlingView: NSView {
+        var mouseDownAction: ((NSEvent.ModifierFlags) -> Void)?
+        var doubleClickAction: (() -> Void)?
+
+        override var acceptsFirstResponder: Bool { true }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            bounds.contains(point) ? self : nil
+        }
+
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+            true
+        }
+
+        override func mouseDown(with event: NSEvent) {
+            if event.clickCount >= 2 {
+                doubleClickAction?()
+            } else {
+                mouseDownAction?(event.modifierFlags)
+            }
+        }
+
+        override func rightMouseDown(with event: NSEvent) {
+            mouseDownAction?(event.modifierFlags)
+            super.rightMouseDown(with: event)
         }
     }
 }
 
 private struct FileRow: View {
     let item: FileItem
+    let isRenaming: Bool
+    @Binding var renameText: String
+    let commitRename: () -> Void
+    let cancelRename: () -> Void
+    @FocusState private var isRenameFocused: Bool
 
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: iconName)
                 .foregroundStyle(item.isDirectoryLike ? Color.accentColor : Color.secondary)
                 .frame(width: 20)
-            Text(item.name)
+            nameView
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text(item.type)
+                .font(.caption)
+                .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
-            Spacer()
+                .frame(width: 112, alignment: .leading)
             Text(sizeText)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
-                .frame(width: 76, alignment: .trailing)
+                .frame(width: 86, alignment: .trailing)
             Text(dateText)
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -141,6 +390,30 @@ private struct FileRow: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 2)
+    }
+
+    @ViewBuilder
+    private var nameView: some View {
+        if isRenaming {
+            TextField("Name", text: $renameText)
+                .textFieldStyle(.plain)
+                .focused($isRenameFocused)
+                .onSubmit(commitRename)
+                .onKeyPress(.escape, phases: .down) { _ in
+                    cancelRename()
+                    return .handled
+                }
+                .onAppear {
+                    isRenameFocused = true
+                    DispatchQueue.main.async {
+                        NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: nil)
+                    }
+                }
+        } else {
+            Text(item.name)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
     }
 
     private var iconName: String {
@@ -153,12 +426,46 @@ private struct FileRow: View {
     }
 
     private var sizeText: String {
-        guard let size = item.size, !item.isDirectoryLike else { return "--" }
+        guard let size = item.size else { return "--" }
         return ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
     }
 
     private var dateText: String {
         guard let modifiedAt = item.modifiedAt else { return "--" }
         return modifiedAt.formatted(date: .numeric, time: .shortened)
+    }
+}
+
+private struct SortHeaderButton: View {
+    let title: String
+    let field: FileSortField
+    let rule: FileSortRule
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 3) {
+                Text(title)
+                    .lineLimit(1)
+                Image(systemName: iconName)
+                    .font(.caption2)
+                    .opacity(rule.field == field ? 1 : 0)
+            }
+            .frame(maxWidth: .infinity, alignment: alignment)
+        }
+        .buttonStyle(.plain)
+        .help(helpText)
+    }
+
+    private var iconName: String {
+        rule.direction == .ascending ? "chevron.up" : "chevron.down"
+    }
+
+    private var alignment: Alignment {
+        field == .size || field == .modifiedAt ? .trailing : .leading
+    }
+
+    private var helpText: String {
+        "Sort by \(title)"
     }
 }

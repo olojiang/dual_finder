@@ -1,4 +1,4 @@
-# Dual Finder 协作记忆
+# Dual Finder 纪 协作记忆
 
 ## 编码与发布偏好
 

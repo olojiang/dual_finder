@@ -52,6 +52,51 @@ struct FileOperationServiceTests {
         #expect(copied == "new")
     }
 
+    @Test("renames files in place")
+    func renamesFilesInPlace() throws {
+        let root = try TemporaryDirectory()
+        let source = root.url.appendingPathComponent("old.txt")
+        try "payload".write(to: source, atomically: true, encoding: .utf8)
+        let logger = CapturingLogger()
+
+        let renamed = try FileOperationService(logger: logger).rename(source, to: "new.txt")
+
+        #expect(!FileManager.default.fileExists(atPath: source.path))
+        #expect(FileManager.default.fileExists(atPath: root.url.appendingPathComponent("new.txt").path))
+        #expect(renamed.lastPathComponent == "new.txt")
+        #expect(logger.messages.contains { $0.contains("rename.completed") })
+    }
+
+    @Test("rejects empty rename names")
+    func rejectsEmptyRenameNames() throws {
+        let root = try TemporaryDirectory()
+        let source = root.url.appendingPathComponent("source.txt")
+        try "payload".write(to: source, atomically: true, encoding: .utf8)
+
+        #expect(throws: FileOperationError.emptyName) {
+            try FileOperationService(logger: CapturingLogger()).rename(source, to: "   ")
+        }
+        #expect(FileManager.default.fileExists(atPath: source.path))
+    }
+
+    @Test("empties trash directory contents")
+    func emptiesTrashDirectoryContents() throws {
+        let root = try TemporaryDirectory()
+        let trash = root.url.appendingPathComponent("Trash", isDirectory: true)
+        let file = trash.appendingPathComponent("discard.txt")
+        let folder = trash.appendingPathComponent("discard-folder", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try "discard".write(to: file, atomically: true, encoding: .utf8)
+        let logger = CapturingLogger()
+
+        let removedCount = try FileOperationService(logger: logger).emptyTrash(at: trash)
+
+        #expect(removedCount == 2)
+        #expect(FileManager.default.fileExists(atPath: trash.path))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: trash.path).isEmpty)
+        #expect(logger.messages.contains { $0.contains("trash.empty.completed") })
+    }
+
     #if os(macOS)
     @Test("moves files to the macOS Trash")
     func movesFilesToTrash() throws {

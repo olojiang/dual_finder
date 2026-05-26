@@ -1,11 +1,11 @@
 import Foundation
 
-public enum PaneSide: String, Sendable {
+public enum PaneSide: String, Codable, Sendable {
     case left
     case right
 }
 
-public struct FileTab: Identifiable, Hashable, Sendable {
+public struct FileTab: Identifiable, Hashable, Codable, Sendable {
     public let id: UUID
     public var url: URL
 
@@ -26,6 +26,18 @@ public struct PaneState: Sendable {
         let tab = FileTab(url: initialURL)
         tabs = [tab]
         selectedTabID = tab.id
+        selectedItemURLs = []
+    }
+
+    public init(side: PaneSide, tabs: [FileTab], selectedTabID: UUID?) {
+        precondition(!tabs.isEmpty, "PaneState requires at least one tab")
+        self.side = side
+        self.tabs = tabs
+        if let selectedTabID, tabs.contains(where: { $0.id == selectedTabID }) {
+            self.selectedTabID = selectedTabID
+        } else {
+            self.selectedTabID = tabs[0].id
+        }
         selectedItemURLs = []
     }
 
@@ -57,9 +69,9 @@ public struct PaneState: Sendable {
         return true
     }
 
-    public mutating func navigateSelectedTab(to url: URL) {
+    public mutating func navigateSelectedTab(to url: URL, selecting selection: URL? = nil) {
         guard let index = tabs.firstIndex(where: { $0.id == selectedTabID }) else { return }
         tabs[index].url = url
-        selectedItemURLs.removeAll()
+        selectedItemURLs = selection.map { Set([$0]) } ?? []
     }
 }

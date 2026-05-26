@@ -2,11 +2,14 @@ import Foundation
 
 public enum FileOperationError: LocalizedError, Equatable {
     case trashUnsupported
+    case emptyName
 
     public var errorDescription: String? {
         switch self {
         case .trashUnsupported:
             "Moving files to Trash is only supported on macOS."
+        case .emptyName:
+            "Name cannot be empty."
         }
     }
 }
@@ -53,6 +56,28 @@ public struct FileOperationService {
         return destination
     }
 
+    public func rename(_ source: URL, to newName: String) throws -> URL {
+        guard !newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw FileOperationError.emptyName
+        }
+
+        let destination = source.deletingLastPathComponent().appendingPathComponent(newName)
+        guard destination != source else {
+            return source
+        }
+
+        logger?.info("file-operation", "rename.started", metadata: [
+            "source": source.path,
+            "destination": destination.path
+        ])
+        try fileManager.moveItem(at: source, to: destination)
+        logger?.info("file-operation", "rename.completed", metadata: [
+            "source": source.path,
+            "destination": destination.path
+        ])
+        return destination
+    }
+
     public func trash(_ sources: [URL]) throws {
         logger?.info("file-operation", "trash.started", metadata: ["count": "\(sources.count)"])
         for source in sources {
@@ -64,6 +89,29 @@ public struct FileOperationService {
             logger?.warning("file-operation", "trash.item.completed", metadata: ["source": source.path])
         }
         logger?.info("file-operation", "trash.completed", metadata: ["count": "\(sources.count)"])
+    }
+
+    public func emptyTrash(at trashDirectory: URL = .trashDirectory) throws -> Int {
+        let trashedItems = try fileManager.contentsOfDirectory(
+            at: trashDirectory,
+            includingPropertiesForKeys: nil
+        )
+
+        logger?.warning("file-operation", "trash.empty.started", metadata: [
+            "path": trashDirectory.path,
+            "count": "\(trashedItems.count)"
+        ])
+        for item in trashedItems {
+            try fileManager.removeItem(at: item)
+            logger?.warning("file-operation", "trash.empty.item.removed", metadata: [
+                "path": item.path
+            ])
+        }
+        logger?.warning("file-operation", "trash.empty.completed", metadata: [
+            "path": trashDirectory.path,
+            "count": "\(trashedItems.count)"
+        ])
+        return trashedItems.count
     }
 
     private func uniqueDestination(for name: String, in directory: URL) -> URL {

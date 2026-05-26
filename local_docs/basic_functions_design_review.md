@@ -1,4 +1,4 @@
-# Dual Finder 基础功能设计复审
+# Dual Finder 纪 基础功能设计复审
 
 ## 问题是什么
 
