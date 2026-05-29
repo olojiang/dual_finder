@@ -53,7 +53,7 @@ public struct FileOperationService {
         let destination = uniqueDestination(for: name, in: directory)
         try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
         logger?.info("file-operation", "folder.created", metadata: ["path": destination.path])
-        return destination
+        return destination.standardizedFileURL
     }
 
     public func rename(_ source: URL, to newName: String) throws -> URL {
@@ -62,8 +62,10 @@ public struct FileOperationService {
         }
 
         let destination = source.deletingLastPathComponent().appendingPathComponent(newName)
-        guard destination != source else {
-            return source
+        let standardizedSource = source.standardizedFileURL
+        let standardizedDestination = destination.standardizedFileURL
+        guard standardizedDestination != standardizedSource else {
+            return standardizedSource
         }
 
         logger?.info("file-operation", "rename.started", metadata: [
@@ -75,7 +77,7 @@ public struct FileOperationService {
             "source": source.path,
             "destination": destination.path
         ])
-        return destination
+        return standardizedDestination
     }
 
     public func trash(_ sources: [URL]) throws {

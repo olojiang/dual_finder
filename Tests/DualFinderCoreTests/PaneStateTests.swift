@@ -46,6 +46,48 @@ struct PaneStateTests {
         #expect(pane.selectedItemURLs == [child])
     }
 
+    @Test("tracks back and forward directory history for selected tab")
+    func tracksDirectoryHistory() {
+        let first = URL(fileURLWithPath: "/tmp/first")
+        let second = URL(fileURLWithPath: "/tmp/second")
+        let third = URL(fileURLWithPath: "/tmp/third")
+        var pane = PaneState(side: .left, initialURL: first)
+
+        pane.navigateSelectedTab(to: second)
+        pane.navigateSelectedTab(to: third)
+
+        #expect(pane.canNavigateSelectedTabBack)
+        #expect(!pane.canNavigateSelectedTabForward)
+        #expect(pane.navigateSelectedTabBack() == second)
+        #expect(pane.selectedURL == second)
+        #expect(pane.canNavigateSelectedTabForward)
+        #expect(pane.navigateSelectedTabBack() == first)
+        #expect(pane.selectedURL == first)
+        #expect(!pane.canNavigateSelectedTabBack)
+
+        #expect(pane.navigateSelectedTabForward() == second)
+        #expect(pane.selectedURL == second)
+        pane.navigateSelectedTab(to: third)
+        #expect(!pane.canNavigateSelectedTabForward)
+    }
+
+    @Test("keeps directory history per tab")
+    func keepsHistoryPerTab() {
+        let first = URL(fileURLWithPath: "/tmp/first")
+        let second = URL(fileURLWithPath: "/tmp/second")
+        let other = URL(fileURLWithPath: "/tmp/other")
+        var pane = PaneState(side: .left, initialURL: first)
+
+        let otherTabID = pane.addTab(url: other)
+        pane.navigateSelectedTab(to: URL(fileURLWithPath: "/tmp/other/deeper"))
+        pane.selectedTabID = pane.tabs[0].id
+        pane.navigateSelectedTab(to: second)
+
+        #expect(pane.navigateSelectedTabBack() == first)
+        pane.selectedTabID = otherTabID
+        #expect(pane.navigateSelectedTabBack() == other)
+    }
+
     @Test("restores selected tab from saved tabs")
     func restoresSelectedTab() {
         let first = FileTab(id: UUID(), url: URL(fileURLWithPath: "/tmp/first"))

@@ -22,6 +22,18 @@ struct FileSystemServiceTests {
         #expect(items[2].kind == .file)
     }
 
+    @Test("standardizes listed item URLs")
+    func standardizesListedItemURLs() throws {
+        let root = try TemporaryDirectory()
+        let folder = root.url.appendingPathComponent("New Folder")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+
+        let item = try #require(FileSystemService().contents(of: root.url).first)
+
+        #expect(item.url == folder.standardizedFileURL)
+        #expect(item.id == item.url)
+    }
+
     @Test("sorts by size in both directions")
     func sortsBySize() throws {
         let root = try TemporaryDirectory()

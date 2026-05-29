@@ -3,6 +3,15 @@ import Foundation
 import SwiftUI
 import DualFinderCore
 
+struct PathEditRequest: Equatable {
+    let id = UUID()
+    let side: PaneSide
+}
+
+struct FolderBookmarkDialogRequest: Identifiable, Equatable {
+    let id = UUID()
+}
+
 @MainActor
 final class DualFinderViewModel: ObservableObject {
     @Published var leftPane: PaneState
@@ -12,6 +21,8 @@ final class DualFinderViewModel: ObservableObject {
     @Published var statusMessage: String = ""
     @Published var diskAccessPrompt: DiskAccessPrompt?
     @Published private(set) var activePaneSide: PaneSide = .left
+    @Published var pathEditRequest: PathEditRequest?
+    @Published var folderBookmarkDialogRequest: FolderBookmarkDialogRequest?
     @Published var isInlineRenaming = false
     @Published var showHiddenFiles = false {
         didSet { refreshAll() }
@@ -21,6 +32,7 @@ final class DualFinderViewModel: ObservableObject {
     private let operationService: FileOperationService
     private let sortRuleStore: FolderSortRuleStore
     private let paneSessionStore: PaneSessionStore
+    private let folderBookmarkStore: FolderBookmarkStore
     private let folderSizeCache: FolderSizeCache
     private let permissionGuide: PrivacyPermissionGuide
     private let quickLookPreviewService: QuickLookPreviewService
@@ -32,6 +44,7 @@ final class DualFinderViewModel: ObservableObject {
         fileSystem: FileSystemService = FileSystemService(),
         sortRuleStore: FolderSortRuleStore = FolderSortRuleStore(),
         paneSessionStore: PaneSessionStore = PaneSessionStore(),
+        folderBookmarkStore: FolderBookmarkStore = FolderBookmarkStore(),
         folderSizeCache: FolderSizeCache = FolderSizeCache(),
         permissionGuide: PrivacyPermissionGuide = PrivacyPermissionGuide(),
         quickLookPreviewService: QuickLookPreviewService = QuickLookPreviewService(),
@@ -40,6 +53,7 @@ final class DualFinderViewModel: ObservableObject {
         self.fileSystem = fileSystem
         self.sortRuleStore = sortRuleStore
         self.paneSessionStore = paneSessionStore
+        self.folderBookmarkStore = folderBookmarkStore
         self.folderSizeCache = folderSizeCache
         self.permissionGuide = permissionGuide
         self.quickLookPreviewService = quickLookPreviewService
@@ -89,6 +103,47 @@ final class DualFinderViewModel: ObservableObject {
 
     func activatePane(_ side: PaneSide) {
         activePaneSide = side
+    }
+
+    func requestPathEditing(on side: PaneSide) {
+        activatePane(side)
+        pathEditRequest = PathEditRequest(side: side)
+    }
+
+    func requestFolderBookmarkDialog(on side: PaneSide) {
+        guard !isInlineRenaming else { return }
+        activatePane(side)
+        folderBookmarkDialogRequest = FolderBookmarkDialogRequest()
+    }
+
+    func folderBookmarkEntries() -> [FolderBookmarkEntry] {
+        folderBookmarkStore.entries()
+    }
+
+    func logFolderBookmarkDialogEvent(_ message: String, metadata: [String: String] = [:]) {
+        logger.debug("folder-bookmark-dialog", message, metadata: metadata)
+    }
+
+    func addActiveFolderToFavorites() {
+        let url = pane(for: activePaneSide).selectedURL
+        folderBookmarkStore.addFavorite(url)
+        statusMessage = "Added favorite: \(url.path)"
+        logger.info("folder-bookmark", "favorite.added", metadata: [
+            "side": activePaneSide.rawValue,
+            "path": url.path
+        ])
+    }
+
+    func removeFolderFavorite(_ url: URL) {
+        folderBookmarkStore.removeFavorite(url)
+        statusMessage = "Removed favorite: \(url.path)"
+        logger.info("folder-bookmark", "favorite.removed", metadata: [
+            "path": url.path
+        ])
+    }
+
+    func navigateToBookmarkedFolder(_ url: URL) {
+        navigate(activePaneSide, to: url)
     }
 
     func selectItem(_ url: URL, on side: PaneSide) {
@@ -217,12 +272,77 @@ final class DualFinderViewModel: ObservableObject {
             return
         }
         mutatePane(side) { $0.navigateSelectedTab(to: url, selecting: selection) }
+        folderBookmarkStore.recordRecentFolder(url)
         persistPaneSession()
         logger.info("navigation", "directory.changed", metadata: [
             "side": side.rawValue,
             "path": url.path
         ])
         refresh(side)
+    }
+
+    func navigateBack(_ side: PaneSide) {
+        guard !isInlineRenaming else { return }
+        guard let url = mutatePane(side, { $0.navigateSelectedTabBack() }) else {
+            logger.debug("navigation", "history.back.ignored", metadata: ["side": side.rawValue])
+            return
+        }
+
+        folderBookmarkStore.recordRecentFolder(url)
+        persistPaneSession()
+        logger.info("navigation", "history.back", metadata: [
+            "side": side.rawValue,
+            "path": url.path
+        ])
+        refresh(side)
+    }
+
+    func navigateForward(_ side: PaneSide) {
+        guard !isInlineRenaming else { return }
+        guard let url = mutatePane(side, { $0.navigateSelectedTabForward() }) else {
+            logger.debug("navigation", "history.forward.ignored", metadata: ["side": side.rawValue])
+            return
+        }
+
+        folderBookmarkStore.recordRecentFolder(url)
+        persistPaneSession()
+        logger.info("navigation", "history.forward", metadata: [
+            "side": side.rawValue,
+            "path": url.path
+        ])
+        refresh(side)
+    }
+
+    @discardableResult
+    func navigateToFolderPath(_ pathText: String, on side: PaneSide) -> Bool {
+        let trimmedPath = pathText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPath.isEmpty else {
+            statusMessage = "Enter a folder path"
+            return false
+        }
+
+        let url = folderURL(fromPathText: trimmedPath, relativeTo: pane(for: side).selectedURL)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
+            statusMessage = "Folder not found: \(url.path)"
+            logger.warning("navigation", "path.entry.missing", metadata: [
+                "side": side.rawValue,
+                "path": url.path
+            ])
+            return false
+        }
+
+        guard isDirectory.boolValue else {
+            statusMessage = "Not a folder: \(url.path)"
+            logger.warning("navigation", "path.entry.not-folder", metadata: [
+                "side": side.rawValue,
+                "path": url.path
+            ])
+            return false
+        }
+
+        navigate(side, to: url)
+        return true
     }
 
     func navigateUp(_ side: PaneSide) {
@@ -536,6 +656,26 @@ final class DualFinderViewModel: ObservableObject {
 
     private func persistPaneSession() {
         paneSessionStore.save(left: leftPane, right: rightPane)
+    }
+
+    private func folderURL(fromPathText pathText: String, relativeTo baseURL: URL) -> URL {
+        let expandedPath: String
+        if pathText == "~" {
+            expandedPath = FileManager.default.homeDirectoryForCurrentUser.path
+        } else if pathText.hasPrefix("~/") {
+            let suffix = String(pathText.dropFirst(2))
+            expandedPath = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(suffix)
+                .path
+        } else {
+            expandedPath = pathText
+        }
+
+        if expandedPath.hasPrefix("/") {
+            return URL(fileURLWithPath: expandedPath).standardizedFileURL
+        }
+
+        return baseURL.appendingPathComponent(expandedPath).standardizedFileURL
     }
 
     private func orderedSelection(_ selection: Set<URL>, on side: PaneSide) -> [URL] {

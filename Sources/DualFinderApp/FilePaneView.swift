@@ -8,7 +8,10 @@ struct FilePaneView: View {
     @State private var renamingURL: URL?
     @State private var pendingRenameURL: URL?
     @State private var renameText = ""
+    @State private var isEditingPath = false
+    @State private var pathText = ""
     @FocusState private var isFileListFocused: Bool
+    @FocusState private var isPathFieldFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -17,6 +20,14 @@ struct FilePaneView: View {
             fileList
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onChange(of: model.pathEditRequest) { _, request in
+            guard request?.side == side else { return }
+            beginPathEditing()
+        }
+        .onChange(of: model.pane(for: side).selectedURL) { _, url in
+            guard !isEditingPath else { return }
+            pathText = url.path
+        }
     }
 
     private var paneHeader: some View {
@@ -30,11 +41,7 @@ struct FilePaneView: View {
             IconButton(systemName: "folder.badge.plus", help: "Choose folder") {
                 model.chooseFolder(for: side)
             }
-            Text(model.pane(for: side).selectedURL.path)
-                .font(.system(.caption, design: .monospaced))
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            pathControl
             IconButton(systemName: "plus.square.on.square", help: "New tab") {
                 model.addTab(on: side)
             }
@@ -44,6 +51,35 @@ struct FilePaneView: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
+    }
+
+    @ViewBuilder
+    private var pathControl: some View {
+        if isEditingPath {
+            TextField("Folder path", text: $pathText)
+                .textFieldStyle(.plain)
+                .font(.system(.caption, design: .monospaced))
+                .focused($isPathFieldFocused)
+                .onSubmit(commitPathEditing)
+                .onKeyPress(.escape, phases: .down) { _ in
+                    cancelPathEditing()
+                    return .handled
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .onAppear {
+                    isPathFieldFocused = true
+                }
+        } else {
+            Text(model.pane(for: side).selectedURL.path)
+                .font(.system(.caption, design: .monospaced))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    beginPathEditing()
+                }
+        }
     }
 
     private var tabStrip: some View {
@@ -128,8 +164,13 @@ struct FilePaneView: View {
                 }
                 return .handled
             }
-            .onKeyPress(.space) {
+            .onKeyPress(.space, phases: .down) { keyPress in
                 guard renamingURL == nil else { return .ignored }
+                if keyPress.modifiers.contains(.control) {
+                    model.calculateSelectedFolderSizes(on: side)
+                    return .handled
+                }
+                guard keyPress.modifiers.isEmpty else { return .ignored }
                 model.previewSelection(on: side)
                 return .handled
             }
@@ -169,7 +210,7 @@ struct FilePaneView: View {
                     IconButton(systemName: "arrow.clockwise", help: "Refresh pane") {
                         model.refresh(side)
                     }
-                    IconButton(systemName: "ruler", help: "Calculate selected folder size") {
+                    IconButton(systemName: "ruler", help: "Calculate selected folder size (Ctrl-Space)") {
                         model.calculateSelectedFolderSizes(on: side)
                     }
                     Spacer()
@@ -278,6 +319,34 @@ struct FilePaneView: View {
         pendingRenameURL = nil
         renameText = ""
         model.isInlineRenaming = false
+    }
+
+    private func beginPathEditing() {
+        model.activatePane(side)
+        if !isEditingPath {
+            pathText = model.pane(for: side).selectedURL.path
+            isEditingPath = true
+        }
+        DispatchQueue.main.async {
+            isPathFieldFocused = true
+        }
+    }
+
+    private func commitPathEditing() {
+        guard model.navigateToFolderPath(pathText, on: side) else {
+            isPathFieldFocused = true
+            return
+        }
+
+        isEditingPath = false
+        pathText = model.pane(for: side).selectedURL.path
+        restoreFileListFocus()
+    }
+
+    private func cancelPathEditing() {
+        isEditingPath = false
+        pathText = model.pane(for: side).selectedURL.path
+        restoreFileListFocus()
     }
 
     private func activateItem(_ url: URL) {

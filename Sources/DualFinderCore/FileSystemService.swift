@@ -46,6 +46,7 @@ public struct FileSystemService {
     }
 
     private func item(for url: URL, folderSizeCache: FolderSizeCache?) throws -> FileItem {
+        let itemURL = url.standardizedFileURL
         let values = try url.resourceValues(forKeys: [
             .isDirectoryKey,
             .isPackageKey,
@@ -69,10 +70,10 @@ public struct FileSystemService {
         let size = values.fileSize.map(Int64.init)
             ?? folderSizeCache?.size(for: url, modifiedAt: values.contentModificationDate)
         return FileItem(
-            url: url,
-            name: values.localizedName ?? url.lastPathComponent,
+            url: itemURL,
+            name: values.localizedName ?? itemURL.lastPathComponent,
             kind: kind,
-            type: Self.typeDescription(for: url, kind: kind, localizedType: values.localizedTypeDescription),
+            type: Self.typeDescription(for: itemURL, kind: kind, localizedType: values.localizedTypeDescription),
             size: size,
             modifiedAt: values.contentModificationDate,
             isHidden: values.isHidden ?? false

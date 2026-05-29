@@ -28,6 +28,43 @@ struct PaneSessionStoreTests {
         #expect(restored.right.selectedURL == URL(fileURLWithPath: "/tmp/right"))
     }
 
+    @Test("restores old sessions without directory history")
+    func restoresSessionWithoutHistoryFields() {
+        let sessionJSON = """
+        {
+          "left": {
+            "tabs": [
+              {
+                "id": "00000000-0000-0000-0000-000000000001",
+                "url": "file:///tmp/left"
+              }
+            ],
+            "selectedTabID": "00000000-0000-0000-0000-000000000001"
+          },
+          "right": {
+            "tabs": [
+              {
+                "id": "00000000-0000-0000-0000-000000000002",
+                "url": "file:///tmp/right"
+              }
+            ],
+            "selectedTabID": "00000000-0000-0000-0000-000000000002"
+          }
+        }
+        """
+        let suiteName = "PaneSessionStoreTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(Data(sessionJSON.utf8), forKey: "paneSession")
+
+        let restored = PaneSessionStore(defaults: defaults).load(fallbackURL: URL(fileURLWithPath: "/tmp/fallback"))
+
+        #expect(restored.left.selectedURL == URL(fileURLWithPath: "/tmp/left"))
+        #expect(restored.right.selectedURL == URL(fileURLWithPath: "/tmp/right"))
+        #expect(!restored.left.canNavigateSelectedTabBack)
+        #expect(!restored.left.canNavigateSelectedTabForward)
+    }
+
     @Test("falls back to one tab per pane when no session exists")
     func fallsBackWithoutSession() {
         let suiteName = "PaneSessionStoreTests-\(UUID().uuidString)"

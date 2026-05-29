@@ -52,6 +52,16 @@ struct FileOperationServiceTests {
         #expect(copied == "new")
     }
 
+    @Test("returns standardized created folder URL")
+    func returnsStandardizedCreatedFolderURL() throws {
+        let root = try TemporaryDirectory()
+
+        let created = try FileOperationService(logger: CapturingLogger()).createFolder(named: "New Folder", in: root.url)
+        let listed = try #require(FileSystemService().contents(of: root.url).first)
+
+        #expect(created == listed.url)
+    }
+
     @Test("renames files in place")
     func renamesFilesInPlace() throws {
         let root = try TemporaryDirectory()
