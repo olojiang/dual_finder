@@ -737,7 +737,8 @@ final class DualFinderViewModel: ObservableObject {
         refresh(side)
     }
 
-    func closeSelectedTab(on side: PaneSide) {
+    @discardableResult
+    func closeSelectedTab(on side: PaneSide) -> Bool {
         let tabID = pane(for: side).selectedTabID
         let didClose = mutatePane(side) { $0.closeTab(id: tabID) }
         if didClose {
@@ -747,6 +748,7 @@ final class DualFinderViewModel: ObservableObject {
         } else {
             logger.debug("tab", "tab.close.ignored", metadata: ["side": side.rawValue, "tab": tabID.uuidString])
         }
+        return didClose
     }
 
     @discardableResult
@@ -922,10 +924,22 @@ final class DualFinderViewModel: ObservableObject {
         switch direction {
         case .left:
             guard let source = entry.rightURL else { return }
-            enqueueFileOperation(.copy, sources: [source], destination: leftPane.selectedURL)
+            enqueueDirectoryComparisonCopy(source: source, relativePath: entry.relativePath, destinationRoot: leftPane.selectedURL)
         case .right:
             guard let source = entry.leftURL else { return }
-            enqueueFileOperation(.copy, sources: [source], destination: rightPane.selectedURL)
+            enqueueDirectoryComparisonCopy(source: source, relativePath: entry.relativePath, destinationRoot: rightPane.selectedURL)
+        }
+    }
+
+    private func enqueueDirectoryComparisonCopy(source: URL, relativePath: String, destinationRoot: URL) {
+        let destinationParent = destinationRoot
+            .appendingPathComponent(relativePath)
+            .deletingLastPathComponent()
+        do {
+            try FileManager.default.createDirectory(at: destinationParent, withIntermediateDirectories: true)
+            enqueueFileOperation(.copy, sources: [source], destination: destinationParent)
+        } catch {
+            reportOperationFailure("directory.sync.prepare.failed", error: error)
         }
     }
 
@@ -948,6 +962,7 @@ final class DualFinderViewModel: ObservableObject {
                     cancellation: cancellation,
                     progress: { scannedCount in
                         Task { @MainActor [weak self] in
+                            guard self?.globalSearchCancellation === cancellation else { return }
                             self?.statusMessage = "Searching \(root.path)... \(scannedCount) scanned"
                         }
                     }

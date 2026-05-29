@@ -19,7 +19,7 @@ struct ContentView: View {
             StatusBar(message: model.statusMessage)
         }
         .background(.background)
-        .background(AppShortcutHandler {
+        .background(AppShortcutHandler(isSuspended: isGlobalShortcutSuspended) {
             model.requestPathEditing(on: model.activePaneSide)
         } showFileSearch: {
             model.requestFileSearch(on: model.activePaneSide)
@@ -27,6 +27,8 @@ struct ContentView: View {
             model.requestFolderBookmarkDialog(on: model.activePaneSide)
         } showBatchRename: {
             model.requestBatchRenameDialog(on: model.activePaneSide)
+        } closeActiveTab: {
+            model.closeSelectedTab(on: model.activePaneSide)
         } focusPane: { side, requestID in
             model.requestPaneFocus(side, requestID: requestID, source: "cmd-arrow")
         } selectTab: { index, requestID in
@@ -72,6 +74,14 @@ struct ContentView: View {
                 }
             )
         }
+    }
+
+    private var isGlobalShortcutSuspended: Bool {
+        model.folderBookmarkDialogRequest != nil
+            || model.batchRenameDialogRequest != nil
+            || model.fileConflictDialogRequest != nil
+            || model.directoryComparisonDialogRequest != nil
+            || model.globalSearchDialogRequest != nil
     }
 }
 
@@ -338,10 +348,12 @@ private struct GlobalSearchDialog: View {
 }
 
 private struct AppShortcutHandler: NSViewRepresentable {
+    let isSuspended: Bool
     let goToFolder: () -> Void
     let showFileSearch: () -> Void
     let showFolderBookmarks: () -> Void
     let showBatchRename: () -> Void
+    let closeActiveTab: () -> Bool
     let focusPane: (PaneSide, String) -> Void
     let selectTab: (Int, String) -> Void
     let logShortcutEvent: (String, [String: String]) -> Void
@@ -356,13 +368,15 @@ private struct AppShortcutHandler: NSViewRepresentable {
             showFileSearch: showFileSearch,
             showFolderBookmarks: showFolderBookmarks,
             showBatchRename: showBatchRename,
+            closeActiveTab: closeActiveTab,
             focusPane: focusPane,
             selectTab: selectTab,
             logShortcutEvent: logShortcutEvent,
             navigateBack: navigateBack,
             navigateForward: navigateForward,
             moveLeftSelectionToRight: moveLeftSelectionToRight,
-            moveRightSelectionToLeft: moveRightSelectionToLeft
+            moveRightSelectionToLeft: moveRightSelectionToLeft,
+            isSuspended: isSuspended
         )
     }
 
@@ -376,6 +390,7 @@ private struct AppShortcutHandler: NSViewRepresentable {
         context.coordinator.showFileSearch = showFileSearch
         context.coordinator.showFolderBookmarks = showFolderBookmarks
         context.coordinator.showBatchRename = showBatchRename
+        context.coordinator.closeActiveTab = closeActiveTab
         context.coordinator.focusPane = focusPane
         context.coordinator.selectTab = selectTab
         context.coordinator.logShortcutEvent = logShortcutEvent
@@ -383,6 +398,7 @@ private struct AppShortcutHandler: NSViewRepresentable {
         context.coordinator.navigateForward = navigateForward
         context.coordinator.moveLeftSelectionToRight = moveLeftSelectionToRight
         context.coordinator.moveRightSelectionToLeft = moveRightSelectionToLeft
+        context.coordinator.isSuspended = isSuspended
     }
 
     static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
@@ -394,6 +410,7 @@ private struct AppShortcutHandler: NSViewRepresentable {
         var showFileSearch: () -> Void
         var showFolderBookmarks: () -> Void
         var showBatchRename: () -> Void
+        var closeActiveTab: () -> Bool
         var focusPane: (PaneSide, String) -> Void
         var selectTab: (Int, String) -> Void
         var logShortcutEvent: (String, [String: String]) -> Void
@@ -401,6 +418,7 @@ private struct AppShortcutHandler: NSViewRepresentable {
         var navigateForward: () -> Void
         var moveLeftSelectionToRight: () -> Void
         var moveRightSelectionToLeft: () -> Void
+        var isSuspended: Bool
         private var monitor: Any?
 
         init(
@@ -408,18 +426,21 @@ private struct AppShortcutHandler: NSViewRepresentable {
             showFileSearch: @escaping () -> Void,
             showFolderBookmarks: @escaping () -> Void,
             showBatchRename: @escaping () -> Void,
+            closeActiveTab: @escaping () -> Bool,
             focusPane: @escaping (PaneSide, String) -> Void,
             selectTab: @escaping (Int, String) -> Void,
             logShortcutEvent: @escaping (String, [String: String]) -> Void,
             navigateBack: @escaping () -> Void,
             navigateForward: @escaping () -> Void,
             moveLeftSelectionToRight: @escaping () -> Void,
-            moveRightSelectionToLeft: @escaping () -> Void
+            moveRightSelectionToLeft: @escaping () -> Void,
+            isSuspended: Bool
         ) {
             self.goToFolder = goToFolder
             self.showFileSearch = showFileSearch
             self.showFolderBookmarks = showFolderBookmarks
             self.showBatchRename = showBatchRename
+            self.closeActiveTab = closeActiveTab
             self.focusPane = focusPane
             self.selectTab = selectTab
             self.logShortcutEvent = logShortcutEvent
@@ -427,12 +448,15 @@ private struct AppShortcutHandler: NSViewRepresentable {
             self.navigateForward = navigateForward
             self.moveLeftSelectionToRight = moveLeftSelectionToRight
             self.moveRightSelectionToLeft = moveRightSelectionToLeft
+            self.isSuspended = isSuspended
         }
 
         func install() {
             guard monitor == nil else { return }
 
             monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard self?.isSuspended != true else { return event }
+
                 if Self.isGoToFolderShortcut(event) {
                     self?.goToFolder()
                     return nil
@@ -450,6 +474,11 @@ private struct AppShortcutHandler: NSViewRepresentable {
 
                 if Self.isBatchRenameShortcut(event) {
                     self?.showBatchRename()
+                    return nil
+                }
+
+                if Self.isCloseWindowShortcut(event) {
+                    guard self?.closeActiveTab() == true else { return event }
                     return nil
                 }
 
@@ -549,6 +578,12 @@ private struct AppShortcutHandler: NSViewRepresentable {
             let flags = shortcutModifierFlags(for: event)
             return flags == .control
                 && event.charactersIgnoringModifiers?.lowercased() == "m"
+        }
+
+        private static func isCloseWindowShortcut(_ event: NSEvent) -> Bool {
+            let flags = shortcutModifierFlags(for: event)
+            return flags == .command
+                && event.charactersIgnoringModifiers?.lowercased() == "w"
         }
 
         private static func isNavigateBackShortcut(_ event: NSEvent) -> Bool {
@@ -684,7 +719,8 @@ private struct FolderBookmarkDialog: View {
                                 ForEach(Array(filteredEntries.enumerated()), id: \.element.id) { index, entry in
                                     FolderBookmarkRow(
                                         entry: entry,
-                                        isSelected: index == selectedIndex
+                                        isSelected: index == selectedIndex,
+                                        shortcutLabel: shortcutLabel(for: index)
                                     )
                                     .id(entry.id)
                                     .contentShape(Rectangle())
@@ -758,6 +794,7 @@ private struct FolderBookmarkDialog: View {
                 addCurrentFolder: addCurrentFolder,
                 removeSelectedFavorite: removeSelectedFavorite,
                 focusSearch: focusSearch,
+                openShortcutIndex: openShortcutIndex,
                 logEvent: logDialogEvent
             )
         )
@@ -789,6 +826,11 @@ private struct FolderBookmarkDialog: View {
 
     private var selectedEntryIsFavorite: Bool {
         selectedEntry?.isFavorite == true
+    }
+
+    private func shortcutLabel(for index: Int) -> String? {
+        guard (0..<9).contains(index) else { return nil }
+        return "⌘\(index + 1)"
     }
 
     private func moveSelection(_ delta: Int) {
@@ -848,6 +890,27 @@ private struct FolderBookmarkDialog: View {
         dismiss()
     }
 
+    private func openShortcutIndex(_ index: Int) {
+        guard filteredEntries.indices.contains(index) else {
+            logDialogEvent("shortcut.open.ignored.out-of-range", metadata: [
+                "index": "\(index)",
+                "filteredCount": "\(filteredEntries.count)"
+            ])
+            return
+        }
+
+        let entry = filteredEntries[index]
+        selectedIndex = index
+        isListSelectionActive = true
+        logDialogEvent("shortcut.open.confirmed", metadata: [
+            "shortcut": "cmd+\(index + 1)",
+            "selectedIndex": "\(index)",
+            "path": entry.url.path
+        ])
+        model.navigateToBookmarkedFolder(entry.url)
+        dismiss()
+    }
+
     private func addCurrentFolder() {
         let currentURL = model.pane(for: model.activePaneSide).selectedURL
         model.addActiveFolderToFavorites()
@@ -891,6 +954,7 @@ private struct FolderBookmarkDialogKeyHandler: NSViewRepresentable {
     let addCurrentFolder: () -> Void
     let removeSelectedFavorite: () -> Void
     let focusSearch: () -> Void
+    let openShortcutIndex: (Int) -> Void
     let logEvent: (String, [String: String]) -> Void
 
     func makeCoordinator() -> Coordinator {
@@ -903,6 +967,7 @@ private struct FolderBookmarkDialogKeyHandler: NSViewRepresentable {
             addCurrentFolder: addCurrentFolder,
             removeSelectedFavorite: removeSelectedFavorite,
             focusSearch: focusSearch,
+            openShortcutIndex: openShortcutIndex,
             logEvent: logEvent
         )
     }
@@ -924,6 +989,7 @@ private struct FolderBookmarkDialogKeyHandler: NSViewRepresentable {
         context.coordinator.addCurrentFolder = addCurrentFolder
         context.coordinator.removeSelectedFavorite = removeSelectedFavorite
         context.coordinator.focusSearch = focusSearch
+        context.coordinator.openShortcutIndex = openShortcutIndex
         context.coordinator.logEvent = logEvent
     }
 
@@ -952,6 +1018,7 @@ private struct FolderBookmarkDialogKeyHandler: NSViewRepresentable {
         var addCurrentFolder: () -> Void
         var removeSelectedFavorite: () -> Void
         var focusSearch: () -> Void
+        var openShortcutIndex: (Int) -> Void
         var logEvent: (String, [String: String]) -> Void
         private var monitor: Any?
 
@@ -964,6 +1031,7 @@ private struct FolderBookmarkDialogKeyHandler: NSViewRepresentable {
             addCurrentFolder: @escaping () -> Void,
             removeSelectedFavorite: @escaping () -> Void,
             focusSearch: @escaping () -> Void,
+            openShortcutIndex: @escaping (Int) -> Void,
             logEvent: @escaping (String, [String: String]) -> Void
         ) {
             self.isListSelectionActive = isListSelectionActive
@@ -974,6 +1042,7 @@ private struct FolderBookmarkDialogKeyHandler: NSViewRepresentable {
             self.addCurrentFolder = addCurrentFolder
             self.removeSelectedFavorite = removeSelectedFavorite
             self.focusSearch = focusSearch
+            self.openShortcutIndex = openShortcutIndex
             self.logEvent = logEvent
         }
 
@@ -1051,6 +1120,16 @@ private struct FolderBookmarkDialogKeyHandler: NSViewRepresentable {
                 }
             }
 
+            if inputFlags == .command,
+               let shortcutIndex = Self.commandNumberIndex(for: event) {
+                logEvent("key-handler.command-number.open", [
+                    "characters": event.charactersIgnoringModifiers ?? "",
+                    "index": "\(shortcutIndex)"
+                ])
+                openShortcutIndex(shortcutIndex)
+                return nil
+            }
+
             guard flags == .control else { return event }
 
             switch event.charactersIgnoringModifiers?.lowercased() {
@@ -1078,8 +1157,19 @@ private struct FolderBookmarkDialogKeyHandler: NSViewRepresentable {
                 return true
             default:
                 let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-                return flags == .control
+                let inputFlags = flags.subtracting([.function, .numericPad])
+                return inputFlags == .control || inputFlags == .command
             }
+        }
+
+        private static func commandNumberIndex(for event: NSEvent) -> Int? {
+            guard let characters = event.charactersIgnoringModifiers,
+                  let digit = Int(characters),
+                  (1...9).contains(digit)
+            else {
+                return nil
+            }
+            return digit - 1
         }
     }
 }
@@ -1087,6 +1177,7 @@ private struct FolderBookmarkDialogKeyHandler: NSViewRepresentable {
 private struct FolderBookmarkRow: View {
     let entry: FolderBookmarkEntry
     let isSelected: Bool
+    let shortcutLabel: String?
 
     var body: some View {
         HStack(spacing: 8) {
@@ -1103,6 +1194,17 @@ private struct FolderBookmarkRow: View {
                     .truncationMode(.middle)
             }
             Spacer()
+            if let shortcutLabel {
+                Text(shortcutLabel)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .monospaced()
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(Color.secondary.opacity(isSelected ? 0.18 : 0.10))
+                    .clipShape(RoundedRectangle(cornerRadius: 5))
+                    .accessibilityLabel("Shortcut \(shortcutLabel)")
+            }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)

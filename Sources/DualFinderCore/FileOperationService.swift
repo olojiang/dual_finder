@@ -4,6 +4,7 @@ public enum FileOperationError: LocalizedError, Equatable {
     case trashUnsupported
     case emptyName
     case cancelled
+    case invalidDestination
 
     public var errorDescription: String? {
         switch self {
@@ -13,6 +14,8 @@ public enum FileOperationError: LocalizedError, Equatable {
             "Name cannot be empty."
         case .cancelled:
             "Operation cancelled."
+        case .invalidDestination:
+            "Destination cannot be the source item or one of its children."
         }
     }
 }
@@ -310,6 +313,21 @@ public struct FileOperationService {
         options: FileOperationOptions,
         conflictResolver: ((FileOperationConflict) -> FileOperationConflictResolution)?
     ) throws -> URL? {
+        guard source.standardizedFileURL != requestedDestination.standardizedFileURL else {
+            let resolution = conflictResolver?(FileOperationConflict(source: source, destination: requestedDestination))
+                ?? options.defaultConflictResolution
+            switch resolution {
+            case .overwrite:
+                throw FileOperationError.invalidDestination
+            case .skip:
+                return nil
+            case .keepBoth:
+                return uniqueDestination(for: requestedDestination.lastPathComponent, in: requestedDestination.deletingLastPathComponent())
+            }
+        }
+
+        try validateDestination(requestedDestination, forCopying: source)
+
         guard fileManager.fileExists(atPath: requestedDestination.path) else {
             return requestedDestination
         }
@@ -325,6 +343,16 @@ public struct FileOperationService {
         case .keepBoth:
             return uniqueDestination(for: requestedDestination.lastPathComponent, in: requestedDestination.deletingLastPathComponent())
         }
+    }
+
+    private func validateDestination(_ destination: URL, forCopying source: URL) throws {
+        let values = try source.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        guard values.isDirectory == true && values.isSymbolicLink != true else { return }
+
+        let sourcePath = source.standardizedFileURL.path
+        let destinationPath = destination.standardizedFileURL.path
+        guard destinationPath == sourcePath || destinationPath.hasPrefix(sourcePath + "/") else { return }
+        throw FileOperationError.invalidDestination
     }
 
     public func emptyTrash(at trashDirectory: URL = .trashDirectory) throws -> Int {

@@ -90,6 +90,54 @@ struct FileOperationServiceTests {
         #expect(!FileManager.default.fileExists(atPath: destination.appendingPathComponent("source 2.txt").path))
     }
 
+    @Test("rejects overwrite when source and destination are the same file")
+    func rejectsOverwriteWhenSourceAndDestinationAreSameFile() throws {
+        let root = try TemporaryDirectory()
+        let source = root.url.appendingPathComponent("source.txt")
+        try "payload".write(to: source, atomically: true, encoding: .utf8)
+
+        #expect(throws: FileOperationError.invalidDestination) {
+            try FileOperationService(logger: CapturingLogger()).copy(
+                [source],
+                to: root.url,
+                conflictResolver: { _ in .overwrite }
+            )
+        }
+
+        #expect(try String(contentsOf: source, encoding: .utf8) == "payload")
+    }
+
+    @Test("rejects copying a folder into one of its children")
+    func rejectsCopyingFolderIntoChild() throws {
+        let root = try TemporaryDirectory()
+        let source = root.url.appendingPathComponent("source", isDirectory: true)
+        let child = source.appendingPathComponent("child", isDirectory: true)
+        try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
+        try "payload".write(to: source.appendingPathComponent("file.txt"), atomically: true, encoding: .utf8)
+
+        #expect(throws: FileOperationError.invalidDestination) {
+            try FileOperationService(logger: CapturingLogger()).copy([source], to: child)
+        }
+
+        #expect(!FileManager.default.fileExists(atPath: child.appendingPathComponent("source").path))
+    }
+
+    @Test("rejects moving a folder into one of its children")
+    func rejectsMovingFolderIntoChild() throws {
+        let root = try TemporaryDirectory()
+        let source = root.url.appendingPathComponent("source", isDirectory: true)
+        let child = source.appendingPathComponent("child", isDirectory: true)
+        try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
+        try "payload".write(to: source.appendingPathComponent("file.txt"), atomically: true, encoding: .utf8)
+
+        #expect(throws: FileOperationError.invalidDestination) {
+            try FileOperationService(logger: CapturingLogger()).move([source], to: child)
+        }
+
+        #expect(FileManager.default.fileExists(atPath: source.path))
+        #expect(!FileManager.default.fileExists(atPath: child.appendingPathComponent("source").path))
+    }
+
     @Test("skips files with skip conflict resolution")
     func skipsConflictResolution() throws {
         let root = try TemporaryDirectory()
