@@ -56,6 +56,17 @@ public struct FileOperationService {
         return destination.standardizedFileURL
     }
 
+    public func createEmptyFile(named name: String, in directory: URL) throws -> URL {
+        guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw FileOperationError.emptyName
+        }
+
+        let destination = uniqueDestination(for: name, in: directory)
+        try Data().write(to: destination, options: .withoutOverwriting)
+        logger?.info("file-operation", "file.created", metadata: ["path": destination.path])
+        return destination.standardizedFileURL
+    }
+
     public func rename(_ source: URL, to newName: String) throws -> URL {
         guard !newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw FileOperationError.emptyName

@@ -1,15 +1,24 @@
 import AppKit
 import Quartz
 
+enum PreviewNavigationDirection {
+    case previous
+    case next
+}
+
 @MainActor
 final class QuickLookPreviewService: NSObject, @preconcurrency QLPreviewPanelDataSource, QLPreviewPanelDelegate {
     private var previewURLs: [URL] = []
+    private var keyDownMonitor: Any?
+
+    var navigationHandler: ((PreviewNavigationDirection) -> Bool)?
 
     func togglePreview(for urls: [URL]) {
         guard !urls.isEmpty, let panel = QLPreviewPanel.shared() else { return }
 
         if panel.isVisible, previewURLs == urls {
             panel.orderOut(nil)
+            removeKeyDownMonitor()
             return
         }
 
@@ -18,6 +27,7 @@ final class QuickLookPreviewService: NSObject, @preconcurrency QLPreviewPanelDat
         panel.delegate = self
         panel.reloadData()
         panel.currentPreviewItemIndex = 0
+        installKeyDownMonitor()
         panel.makeKeyAndOrderFront(nil)
     }
 
@@ -33,5 +43,44 @@ final class QuickLookPreviewService: NSObject, @preconcurrency QLPreviewPanelDat
         previewURLs = []
         panel.dataSource = nil
         panel.delegate = nil
+        removeKeyDownMonitor()
+    }
+
+    private func installKeyDownMonitor() {
+        guard keyDownMonitor == nil else { return }
+
+        keyDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            let keyCode = event.keyCode
+            let blockedModifiers: NSEvent.ModifierFlags = [.command, .option, .control, .shift]
+            let hasBlockedModifiers = !event.modifierFlags.intersection(blockedModifiers).isEmpty
+            let handled = MainActor.assumeIsolated {
+                guard let self,
+                      let panel = QLPreviewPanel.shared(),
+                      panel.isVisible,
+                      !hasBlockedModifiers
+                else {
+                    return false
+                }
+
+                let direction: PreviewNavigationDirection
+                switch keyCode {
+                case 126:
+                    direction = .previous
+                case 125:
+                    direction = .next
+                default:
+                    return false
+                }
+
+                return self.navigationHandler?(direction) == true
+            }
+            return handled ? nil : event
+        }
+    }
+
+    private func removeKeyDownMonitor() {
+        guard let keyDownMonitor else { return }
+        NSEvent.removeMonitor(keyDownMonitor)
+        self.keyDownMonitor = nil
     }
 }

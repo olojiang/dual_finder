@@ -81,6 +81,9 @@ final class DualFinderViewModel: ObservableObject {
         leftPane = restoredPanes.left
         rightPane = restoredPanes.right
         operationService = FileOperationService(logger: logger)
+        self.quickLookPreviewService.navigationHandler = { [weak self] direction in
+            self?.previewAdjacentSelection(direction) ?? false
+        }
         logger.info("view-model", "initialized", metadata: [
             "initialURL": initialURL.path,
             "leftURL": leftPane.selectedURL.path,
@@ -602,6 +605,51 @@ final class DualFinderViewModel: ObservableObject {
         ])
     }
 
+    @discardableResult
+    func previewAdjacentSelection(_ direction: PreviewNavigationDirection) -> Bool {
+        let side = activePaneSide
+        let itemURLs = items(for: side).map(\.url)
+        let selected = pane(for: side).selectedItemURLs
+        guard let nextURL = adjacentSelectionURL(
+            in: itemURLs,
+            selected: selected,
+            direction: direction
+        ) else {
+            return false
+        }
+
+        setSelection([nextURL], for: side)
+        quickLookPreviewService.togglePreview(for: [nextURL])
+        statusMessage = "Previewing \(nextURL.lastPathComponent)"
+        logger.info("quick-look", "selection.previewed.adjacent", metadata: [
+            "side": side.rawValue,
+            "direction": direction == .previous ? "previous" : "next",
+            "path": nextURL.path
+        ])
+        return true
+    }
+
+    func adjacentSelectionURL(
+        in itemURLs: [URL],
+        selected: Set<URL>,
+        direction: PreviewNavigationDirection
+    ) -> URL? {
+        guard !itemURLs.isEmpty else { return nil }
+
+        let selectedIndexes = selected.compactMap { itemURLs.firstIndex(of: $0) }
+        let currentIndex: Int
+        switch direction {
+        case .previous:
+            currentIndex = selectedIndexes.min() ?? itemURLs.count
+        case .next:
+            currentIndex = selectedIndexes.max() ?? -1
+        }
+
+        let nextIndex = direction == .previous ? currentIndex - 1 : currentIndex + 1
+        guard itemURLs.indices.contains(nextIndex) else { return nil }
+        return itemURLs[nextIndex]
+    }
+
     func navigateHome(_ side: PaneSide) {
         navigate(side, to: FileManager.default.homeDirectoryForCurrentUser)
     }
@@ -660,6 +708,21 @@ final class DualFinderViewModel: ObservableObject {
             return created
         } catch {
             reportOperationFailure("folder.create.failed", error: error)
+            return nil
+        }
+    }
+
+    @discardableResult
+    func createEmptyFile(named name: String, in side: PaneSide) -> URL? {
+        let directory = pane(for: side).selectedURL
+        do {
+            let created = try operationService.createEmptyFile(named: name, in: directory)
+            statusMessage = "Created \(created.lastPathComponent)"
+            refresh(side)
+            setSelection([created], for: side)
+            return created
+        } catch {
+            reportOperationFailure("file.create.failed", error: error)
             return nil
         }
     }

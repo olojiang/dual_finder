@@ -62,6 +62,20 @@ struct FileOperationServiceTests {
         #expect(created == listed.url)
     }
 
+    @Test("creates empty files with unique names")
+    func createsEmptyFilesWithUniqueNames() throws {
+        let root = try TemporaryDirectory()
+        try "existing".write(to: root.url.appendingPathComponent("New File.txt"), atomically: true, encoding: .utf8)
+        let logger = CapturingLogger()
+
+        let created = try FileOperationService(logger: logger).createEmptyFile(named: "New File.txt", in: root.url)
+
+        #expect(created.lastPathComponent == "New File 2.txt")
+        #expect(FileManager.default.fileExists(atPath: created.path))
+        #expect(try Data(contentsOf: created).isEmpty)
+        #expect(logger.messages.contains { $0.contains("file.created") })
+    }
+
     @Test("renames files in place")
     func renamesFilesInPlace() throws {
         let root = try TemporaryDirectory()
