@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import DualFinderCore
+import UniformTypeIdentifiers
 
 struct FilePaneView: View {
     let side: PaneSide
@@ -11,8 +12,12 @@ struct FilePaneView: View {
     @State private var renameText = ""
     @State private var isEditingPath = false
     @State private var pathText = ""
+    @State private var isFileSearchPresented = false
+    @State private var fileSearchQuery = ""
+    @State private var isDropTargeted = false
     @FocusState private var isFileListFocused: Bool
     @FocusState private var isPathFieldFocused: Bool
+    @FocusState private var isFileSearchFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -25,18 +30,25 @@ struct FilePaneView: View {
             guard request?.side == side else { return }
             beginPathEditing()
         }
+        .onChange(of: model.fileSearchRequest) { _, request in
+            guard request?.side == side else { return }
+            beginFileSearch()
+        }
         .onChange(of: model.paneFocusRequest) { _, request in
             guard let request, request.side == side else { return }
             model.logPaneFocusEvent("file-list.focus-request.observed", metadata: [
                 "requestID": request.requestID,
                 "side": side.rawValue,
-                "source": request.source
+                "source": request.source,
+                "revealPath": request.revealURL?.path ?? ""
             ])
-            restoreFileListFocus(requestID: request.requestID, reason: request.source)
+            restoreFileListFocus(requestID: request.requestID, reason: request.source, revealURL: request.revealURL)
         }
         .onChange(of: model.pane(for: side).selectedURL) { _, url in
-            guard !isEditingPath else { return }
-            pathText = url.path
+            if !isEditingPath {
+                pathText = url.path
+            }
+            dismissFileSearch(restoreFocus: false)
         }
     }
 
@@ -132,154 +144,200 @@ struct FilePaneView: View {
     private var fileList: some View {
         VStack(spacing: 0) {
             sortHeader
-            ScrollViewReader { scrollProxy in
-                List(selection: model.bindingForSelection(side: side)) {
-                    ForEach(model.items(for: side)) { item in
-                        FileRow(
-                            item: item,
-                            isRenaming: renamingURL == item.url,
-                            renameText: $renameText,
-                            commitRename: commitRename,
-                            cancelRename: cancelRename
-                        )
-                            .id(item.url)
-                            .tag(item.url)
-                            .contentShape(Rectangle())
-                            .overlay {
-                                if renamingURL != item.url {
-                                    RowMouseHandler(
-                                        mouseDown: { modifierFlags in
-                                            selectItemFromRowMouseDown(item.url, modifierFlags: modifierFlags)
-                                        },
-                                        doubleClick: {
-                                            activateItem(item.url)
-                                        }
-                                    )
+            ZStack(alignment: .top) {
+                ScrollViewReader { scrollProxy in
+                    List(selection: model.bindingForSelection(side: side)) {
+                        ForEach(visibleItems) { item in
+                            FileRow(
+                                item: item,
+                                isRenaming: renamingURL == item.url,
+                                renameText: $renameText,
+                                commitRename: commitRename,
+                                cancelRename: cancelRename
+                            )
+                                .id(item.url)
+                                .tag(item.url)
+                                .contentShape(Rectangle())
+                                .overlay {
+                                    if renamingURL != item.url {
+                                        RowMouseHandler(
+                                            mouseDown: { modifierFlags in
+                                                selectItemFromRowMouseDown(item.url, modifierFlags: modifierFlags)
+                                            },
+                                            doubleClick: {
+                                                activateItem(item.url)
+                                            }
+                                        )
+                                    }
                                 }
-                            }
+                                .onDrag {
+                                    let urls = dragURLs(startingWith: item.url)
+                                    return NSItemProvider(object: urls.first! as NSURL)
+                                }
+                        }
                     }
-                }
-                .focused($isFileListFocused)
-                .onChange(of: isFileListFocused) { _, isFocused in
-                    model.logPaneFocusEvent("file-list.focus-state.changed", metadata: [
-                        "side": side.rawValue,
-                        "focused": "\(isFocused)"
-                    ])
-                }
-                .onKeyPress(.return, phases: .down) { keyPress in
-                    guard keyPress.modifiers.isEmpty else { return .ignored }
-                    return beginRenamingSelectedItem() ? .handled : .ignored
-                }
-                .onKeyPress(KeyEquivalent("o"), phases: .down) { keyPress in
-                    guard keyPress.modifiers.contains(.command) else { return .ignored }
-                    model.openSelectionWithDefaultApp(on: side)
-                    return .handled
-                }
-                .onKeyPress(KeyEquivalent("c"), phases: .down) { keyPress in
-                    guard keyPress.modifiers.contains(.command), renamingURL == nil else { return .ignored }
-                    if keyPress.modifiers.contains(.option) {
-                        guard !keyPress.modifiers.contains(.shift), !keyPress.modifiers.contains(.control) else { return .ignored }
-                        model.copyAbsolutePaths(model.pane(for: side).selectedItemURLs, on: side)
+                    .focused($isFileListFocused)
+                    .onChange(of: isFileListFocused) { _, isFocused in
+                        model.logPaneFocusEvent("file-list.focus-state.changed", metadata: [
+                            "side": side.rawValue,
+                            "focused": "\(isFocused)"
+                        ])
+                    }
+                    .onKeyPress(.escape, phases: .down) { _ in
+                        guard isFileSearchPresented, renamingURL == nil else { return .ignored }
+                        dismissFileSearch()
                         return .handled
                     }
-                    guard !keyPress.modifiers.contains(.shift), !keyPress.modifiers.contains(.control) else { return .ignored }
-                    let requestID = logFileClipboardShortcut("copy", modifiers: "command")
-                    model.copySelectionToFileClipboard(on: side, requestID: requestID)
-                    return .handled
-                }
-                .onKeyPress(KeyEquivalent("v"), phases: .down) { keyPress in
-                    guard keyPress.modifiers.contains(.command), renamingURL == nil else { return .ignored }
-                    guard !keyPress.modifiers.contains(.shift), !keyPress.modifiers.contains(.control) else { return .ignored }
-                    if keyPress.modifiers.contains(.option) {
-                        let requestID = logFileClipboardShortcut("paste.move", modifiers: "command+option")
-                        model.pasteFileClipboard(into: side, operation: .move, requestID: requestID)
-                        return .handled
-                    }
+                    .onKeyPress(KeyEquivalent("e"), phases: .down) { keyPress in
+                        guard isFileSearchPresented,
+                              isControlOnly(keyPress.modifiers),
+                              renamingURL == nil else {
+                            return .ignored
+                        }
 
-                    let requestID = logFileClipboardShortcut("paste.copy", modifiers: "command")
-                    model.pasteFileClipboard(into: side, operation: .copy, requestID: requestID)
-                    return .handled
-                }
-                .onKeyPress(keys: [.delete, .deleteForward], phases: .down) { keyPress in
-                    guard keyPress.modifiers.contains(.command), renamingURL == nil else { return .ignored }
-                    if keyPress.modifiers.contains(.shift) {
-                        model.emptyTrash()
-                    } else {
-                        model.trashSelection(from: side)
-                    }
-                    return .handled
-                }
-                .onKeyPress(.space, phases: .down) { keyPress in
-                    guard renamingURL == nil else { return .ignored }
-                    if keyPress.modifiers.contains(.control) {
-                        model.calculateSelectedFolderSizes(on: side)
+                        focusFileSearchInput(selectAll: false)
                         return .handled
                     }
-                    guard keyPress.modifiers.isEmpty else { return .ignored }
-                    model.previewSelection(on: side)
-                    return .handled
-                }
-                .onKeyPress(keys: [.upArrow, .downArrow], phases: .down) { keyPress in
-                    guard keyPress.modifiers.contains(.command) else { return .ignored }
-                    switch keyPress.key {
-                    case .upArrow:
-                        model.navigateUp(side)
-                        return .handled
-                    case .downArrow:
-                        model.navigateIntoSelectedDirectory(side)
-                        return .handled
-                    default:
-                        return .ignored
+                    .onKeyPress(.return, phases: .down) { keyPress in
+                        guard keyPress.modifiers.isEmpty else { return .ignored }
+                        return beginRenamingSelectedItem() ? .handled : .ignored
                     }
-                }
-                .contextMenu(forSelectionType: URL.self) { selection in
-                    Button("Copy Absolute Path") { model.copyAbsolutePaths(selection, on: side) }
-                    Button("Open in Ghostty or Terminal") { model.openInTerminal(selection, on: side) }
-                    Divider()
-                    Button("Batch Rename...") { model.requestBatchRenameDialog(on: side) }
-                    Button("Copy to Other Pane") { model.copySelection(from: side) }
-                    Button("Move to Other Pane") { model.moveSelection(from: side) }
-                    Button("Move to Trash", role: .destructive) { model.trashSelection(from: side) }
-                } primaryAction: { selection in
-                    model.activateFirstItem(in: selection, on: side)
-                }
-                .safeAreaInset(edge: .bottom) {
-                    HStack(spacing: 8) {
-                        IconButton(systemName: "folder.badge.plus", help: "Create folder") {
-                            if let created = model.createFolder(in: side) {
-                                queueRename(created)
-                            }
+                    .onKeyPress(KeyEquivalent("o"), phases: .down) { keyPress in
+                        guard keyPress.modifiers.contains(.command) else { return .ignored }
+                        model.openSelectionWithDefaultApp(on: side)
+                        return .handled
+                    }
+                    .onKeyPress(KeyEquivalent("c"), phases: .down) { keyPress in
+                        guard keyPress.modifiers.contains(.command), renamingURL == nil else { return .ignored }
+                        if keyPress.modifiers.contains(.option) {
+                            guard !keyPress.modifiers.contains(.shift), !keyPress.modifiers.contains(.control) else { return .ignored }
+                            model.copyAbsolutePaths(model.pane(for: side).selectedItemURLs, on: side)
+                            return .handled
                         }
-                        IconButton(systemName: "doc.badge.plus", help: "Create TXT file") {
-                            if let created = model.createEmptyFile(named: "New File.txt", in: side) {
-                                queueRename(created)
-                            }
+                        guard !keyPress.modifiers.contains(.shift), !keyPress.modifiers.contains(.control) else { return .ignored }
+                        let requestID = logFileClipboardShortcut("copy", modifiers: "command")
+                        model.copySelectionToFileClipboard(on: side, requestID: requestID)
+                        return .handled
+                    }
+                    .onKeyPress(KeyEquivalent("v"), phases: .down) { keyPress in
+                        guard keyPress.modifiers.contains(.command), renamingURL == nil else { return .ignored }
+                        guard !keyPress.modifiers.contains(.shift), !keyPress.modifiers.contains(.control) else { return .ignored }
+                        if keyPress.modifiers.contains(.option) {
+                            let requestID = logFileClipboardShortcut("paste.move", modifiers: "command+option")
+                            model.pasteFileClipboard(into: side, operation: .move, requestID: requestID)
+                            return .handled
                         }
-                        IconButton(systemName: "doc.text", help: "Create Markdown file") {
-                            if let created = model.createEmptyFile(named: "New File.md", in: side) {
-                                queueRename(created)
-                            }
-                        }
-                        IconButton(systemName: "trash", help: "Move selection to Trash") {
+
+                        let requestID = logFileClipboardShortcut("paste.copy", modifiers: "command")
+                        model.pasteFileClipboard(into: side, operation: .copy, requestID: requestID)
+                        return .handled
+                    }
+                    .onKeyPress(keys: [.delete, .deleteForward], phases: .down) { keyPress in
+                        guard keyPress.modifiers.contains(.command), renamingURL == nil else { return .ignored }
+                        if keyPress.modifiers.contains(.shift) {
+                            model.emptyTrash()
+                        } else {
                             model.trashSelection(from: side)
                         }
-                        IconButton(systemName: "arrow.clockwise", help: "Refresh pane") {
-                            model.refresh(side)
-                        }
-                        IconButton(systemName: "ruler", help: "Calculate selected folder size (Ctrl-Space)") {
-                            model.calculateSelectedFolderSizes(on: side)
-                        }
-                        Spacer()
-                        footerStats
+                        return .handled
                     }
-                    .padding(8)
-                    .background(.bar)
+                    .onKeyPress(.space, phases: .down) { keyPress in
+                        guard renamingURL == nil else { return .ignored }
+                        if keyPress.modifiers.contains(.control) {
+                            model.calculateSelectedFolderSizes(on: side)
+                            return .handled
+                        }
+                        guard keyPress.modifiers.isEmpty else { return .ignored }
+                        model.previewSelection(on: side)
+                        return .handled
+                    }
+                    .onKeyPress(keys: [.upArrow, .downArrow], phases: .down) { keyPress in
+                        guard keyPress.modifiers.contains(.command) else { return .ignored }
+                        switch keyPress.key {
+                        case .upArrow:
+                            model.navigateUp(side)
+                            return .handled
+                        case .downArrow:
+                            model.navigateIntoSelectedDirectory(side)
+                            return .handled
+                        default:
+                            return .ignored
+                        }
+                    }
+                    .contextMenu(forSelectionType: URL.self) { selection in
+                        Button("Copy Absolute Path") { model.copyAbsolutePaths(selection, on: side) }
+                        Button("Open in Ghostty or Terminal") { model.openInTerminal(selection, on: side) }
+                        Divider()
+                        Button("Batch Rename...") { model.requestBatchRenameDialog(on: side) }
+                        Button("Copy to Other Pane") { model.copySelection(from: side) }
+                        Button("Move to Other Pane") { model.moveSelection(from: side) }
+                        Button("Move to Trash", role: .destructive) { model.trashSelection(from: side) }
+                    } primaryAction: { selection in
+                        model.activateFirstItem(in: selection, on: side)
+                    }
+                    .safeAreaInset(edge: .bottom) {
+                        HStack(spacing: 8) {
+                            IconButton(systemName: "folder.badge.plus", help: "Create folder") {
+                                if let created = model.createFolder(in: side) {
+                                    queueRename(created)
+                                }
+                            }
+                            IconButton(systemName: "doc.badge.plus", help: "Create TXT file") {
+                                if let created = model.createEmptyFile(named: "New File.txt", in: side) {
+                                    queueRename(created)
+                                }
+                            }
+                            IconButton(systemName: "doc.text", help: "Create Markdown file") {
+                                if let created = model.createEmptyFile(named: "New File.md", in: side) {
+                                    queueRename(created)
+                                }
+                            }
+                            IconButton(systemName: "trash", help: "Move selection to Trash") {
+                                model.trashSelection(from: side)
+                            }
+                            IconButton(systemName: "arrow.clockwise", help: "Refresh pane") {
+                                model.refresh(side)
+                            }
+                            IconButton(systemName: "ruler", help: "Calculate selected folder size (Ctrl-Space)") {
+                                model.calculateSelectedFolderSizes(on: side)
+                            }
+                            Spacer()
+                            footerStats
+                        }
+                        .padding(8)
+                        .background(.bar)
+                    }
+                    .onChange(of: pendingRevealURL) { _, _ in
+                        revealPendingItemIfReady(with: scrollProxy)
+                    }
+                    .onChange(of: model.items(for: side)) { _, _ in
+                        revealPendingItemIfReady(with: scrollProxy)
+                        synchronizeFileSearchSelection()
+                    }
+                    .onChange(of: fileSearchQuery) { _, _ in
+                        synchronizeFileSearchSelection()
+                    }
+                    .onChange(of: isFileSearchPresented) { _, _ in
+                        synchronizeFileSearchSelection()
+                    }
+                    .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
+                        receiveDrop(providers)
+                    }
+                    .overlay {
+                        if isDropTargeted {
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(Color.accentColor, lineWidth: 2)
+                                .padding(2)
+                        }
+                    }
+
                 }
-                .onChange(of: pendingRevealURL) { _, _ in
-                    revealPendingItemIfReady(with: scrollProxy)
-                }
-                .onChange(of: model.items(for: side)) { _, _ in
-                    revealPendingItemIfReady(with: scrollProxy)
+
+                if isFileSearchPresented {
+                    fileSearchOverlay
+                        .padding(.top, 8)
+                        .padding(.horizontal, 24)
+                        .transition(.move(edge: .top).combined(with: .opacity))
                 }
             }
         }
@@ -292,8 +350,67 @@ struct FilePaneView: View {
         }
     }
 
+    private var visibleItems: [FileItem] {
+        let allItems = model.items(for: side)
+        guard isFileSearchPresented else { return allItems }
+
+        let query = fileSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return allItems }
+
+        return allItems.filter { item in
+            FileNameSearch.matches(item.name, query: query)
+        }
+    }
+
+    private var fileSearchOverlay: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+            TextField("Filter current folder", text: $fileSearchQuery)
+                .textFieldStyle(.plain)
+                .focused($isFileSearchFocused)
+                .onKeyPress(.return, phases: .down) { keyPress in
+                    guard keyPress.modifiers.isEmpty else { return .ignored }
+                    beginFileSearchListSelection()
+                    return .handled
+                }
+                .onKeyPress(.escape, phases: .down) { _ in
+                    dismissFileSearch()
+                    return .handled
+                }
+                .onKeyPress(keys: [.upArrow, .downArrow], phases: .down) { keyPress in
+                    guard keyPress.modifiers.isEmpty else { return .ignored }
+                    beginFileSearchListSelection()
+                    moveFileSearchSelection(keyPress.key == .upArrow ? -1 : 1)
+                    return .handled
+                }
+            Text("\(visibleItems.count)/\(model.items(for: side).count)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+            Button {
+                dismissFileSearch()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("Close filter")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(maxWidth: 360)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.secondary.opacity(0.16))
+        )
+        .shadow(color: .black.opacity(0.16), radius: 12, x: 0, y: 6)
+        .opacity(0.94)
+    }
+
     private var footerStats: some View {
-        let summary = FilePaneSummary(items: model.items(for: side))
+        let summary = FilePaneSummary(items: visibleItems)
 
         return HStack(spacing: 12) {
             summaryMetric("Files", value: "\(summary.fileCount)")
@@ -345,13 +462,111 @@ struct FilePaneView: View {
         guard renamingURL == nil else { return false }
         let selected = model.pane(for: side).selectedItemURLs
         guard selected.count == 1,
-              let item = model.items(for: side).first(where: { selected.contains($0.url) }) else {
+              let item = visibleItems.first(where: { selected.contains($0.url) }) else {
             return false
         }
 
         beginRenaming(item)
         model.isInlineRenaming = true
         return true
+    }
+
+    private func beginFileSearch() {
+        model.activatePane(side)
+        if !isFileSearchPresented {
+            fileSearchQuery = ""
+            isFileSearchPresented = true
+        }
+
+        dismissPathEditingForFileSearch()
+        synchronizeFileSearchSelection()
+        model.logFileSearchEvent("presented", metadata: [
+            "side": side.rawValue,
+            "path": model.pane(for: side).selectedURL.path
+        ])
+
+        focusFileSearchInput(selectAll: true)
+    }
+
+    private func beginFileSearchListSelection() {
+        guard isFileSearchPresented else { return }
+        synchronizeFileSearchSelection(preferFirstMatch: true)
+        model.logFileSearchEvent("list-selection.begin", metadata: [
+            "side": side.rawValue,
+            "query": fileSearchQuery,
+            "count": "\(visibleItems.count)"
+        ])
+        restoreFileListFocus()
+    }
+
+    private func focusFileSearchInput(selectAll: Bool) {
+        guard isFileSearchPresented else { return }
+
+        model.activatePane(side)
+        dismissPathEditingForFileSearch()
+        model.logFileSearchEvent("input.focus", metadata: [
+            "side": side.rawValue,
+            "query": fileSearchQuery
+        ])
+
+        DispatchQueue.main.async {
+            isFileSearchFocused = true
+            guard selectAll else { return }
+            NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: nil)
+        }
+    }
+
+    private func moveFileSearchSelection(_ delta: Int) {
+        guard !visibleItems.isEmpty else { return }
+
+        let currentSelection = model.pane(for: side).selectedItemURLs
+        let currentIndex = visibleItems.firstIndex { currentSelection.contains($0.url) }
+        let baseIndex = currentIndex ?? (delta < 0 ? visibleItems.count : -1)
+        let nextIndex = min(max(baseIndex + delta, 0), visibleItems.count - 1)
+        model.replaceSelection([visibleItems[nextIndex].url], on: side, source: "file-search")
+    }
+
+    private func synchronizeFileSearchSelection(preferFirstMatch: Bool = false) {
+        guard isFileSearchPresented else { return }
+
+        let visibleURLs = Set(visibleItems.map(\.url))
+        let currentSelection = model.pane(for: side).selectedItemURLs
+        guard currentSelection.isEmpty || !currentSelection.isSubset(of: visibleURLs) || preferFirstMatch else {
+            return
+        }
+
+        if let first = visibleItems.first {
+            model.replaceSelection([first.url], on: side, source: "file-search")
+        } else {
+            model.replaceSelection([], on: side, source: "file-search")
+        }
+    }
+
+    private func dismissFileSearch(restoreFocus: Bool = true) {
+        guard isFileSearchPresented else { return }
+        isFileSearchPresented = false
+        fileSearchQuery = ""
+        isFileSearchFocused = false
+        model.logFileSearchEvent("dismissed", metadata: [
+            "side": side.rawValue
+        ])
+        if restoreFocus {
+            restoreFileListFocus()
+        }
+    }
+
+    private func dismissPathEditingForFileSearch() {
+        guard isEditingPath else { return }
+        isEditingPath = false
+        pathText = model.pane(for: side).selectedURL.path
+        isPathFieldFocused = false
+    }
+
+    private func isControlOnly(_ modifiers: EventModifiers) -> Bool {
+        modifiers.contains(.control)
+            && !modifiers.contains(.command)
+            && !modifiers.contains(.option)
+            && !modifiers.contains(.shift)
     }
 
     private func beginRenaming(_ url: URL) {
@@ -474,6 +689,41 @@ struct FilePaneView: View {
         model.selectItem(url, on: side)
     }
 
+    private func dragURLs(startingWith url: URL) -> [URL] {
+        let selection = model.pane(for: side).selectedItemURLs
+        guard selection.contains(url) else { return [url] }
+        let orderedSelection = model.items(for: side).map(\.url).filter { selection.contains($0) }
+        return orderedSelection.isEmpty ? [url] : orderedSelection
+    }
+
+    private func receiveDrop(_ providers: [NSItemProvider]) -> Bool {
+        let move = NSEvent.modifierFlags.contains(.command)
+        let droppedURLs = DroppedURLAccumulator()
+        let group = DispatchGroup()
+
+        for provider in providers where provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+            group.enter()
+            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+                defer { group.leave() }
+                if let data = item as? Data,
+                   let url = URL(dataRepresentation: data, relativeTo: nil)?.standardizedFileURL {
+                    droppedURLs.append(url)
+                } else if let url = item as? URL {
+                    droppedURLs.append(url.standardizedFileURL)
+                } else if let nsURL = item as? NSURL,
+                          let url = nsURL.filePathURL?.standardizedFileURL {
+                    droppedURLs.append(url)
+                }
+            }
+        }
+
+        group.notify(queue: .main) {
+            let uniqueURLs = Array(Set(droppedURLs.urls)).sorted { $0.path < $1.path }
+            model.receiveDroppedFiles(uniqueURLs, into: side, move: move)
+        }
+        return true
+    }
+
     private func logFileClipboardShortcut(_ operation: String, modifiers: String) -> String {
         let requestID = UUID().uuidString
         model.logShortcutEvent("key-down", metadata: [
@@ -486,8 +736,11 @@ struct FilePaneView: View {
         return requestID
     }
 
-    private func restoreFileListFocus(requestID: String? = nil, reason: String? = nil) {
+    private func restoreFileListFocus(requestID: String? = nil, reason: String? = nil, revealURL: URL? = nil) {
         DispatchQueue.main.async {
+            if let revealURL {
+                pendingRevealURL = revealURL
+            }
             isFileListFocused = true
             guard let requestID else { return }
             var metadata = [
@@ -496,6 +749,9 @@ struct FilePaneView: View {
             ]
             if let reason {
                 metadata["reason"] = reason
+            }
+            if let revealURL {
+                metadata["revealPath"] = revealURL.path
             }
             model.logPaneFocusEvent("file-list.focus-set.requested", metadata: metadata)
         }
@@ -561,6 +817,23 @@ private struct RowMouseHandler: NSViewRepresentable {
             mouseDownAction?(event.modifierFlags)
             super.rightMouseDown(with: event)
         }
+    }
+}
+
+private final class DroppedURLAccumulator: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [URL] = []
+
+    var urls: [URL] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    func append(_ url: URL) {
+        lock.lock()
+        storage.append(url)
+        lock.unlock()
     }
 }
 

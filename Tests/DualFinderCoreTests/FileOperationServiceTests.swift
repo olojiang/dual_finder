@@ -35,6 +35,25 @@ struct FileOperationServiceTests {
         #expect(logger.messages.contains { $0.contains("move.completed") })
     }
 
+    @Test("move skip conflict keeps original source")
+    func moveSkipConflictKeepsOriginalSource() throws {
+        let root = try TemporaryDirectory()
+        let source = root.url.appendingPathComponent("source.txt")
+        let destination = root.url.appendingPathComponent("destination", isDirectory: true)
+        try "new".write(to: source, atomically: true, encoding: .utf8)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        try "existing".write(to: destination.appendingPathComponent("source.txt"), atomically: true, encoding: .utf8)
+
+        try FileOperationService(logger: CapturingLogger()).move(
+            [source],
+            to: destination,
+            conflictResolver: { _ in .skip }
+        )
+
+        #expect(FileManager.default.fileExists(atPath: source.path))
+        #expect(try String(contentsOf: destination.appendingPathComponent("source.txt"), encoding: .utf8) == "existing")
+    }
+
     @Test("copies files to a unique destination without overwriting existing files")
     func copiesToUniqueDestination() throws {
         let root = try TemporaryDirectory()
@@ -50,6 +69,62 @@ struct FileOperationServiceTests {
         let copied = try String(contentsOf: destination.appendingPathComponent("source 2.txt"), encoding: .utf8)
         #expect(original == "existing")
         #expect(copied == "new")
+    }
+
+    @Test("copies files with overwrite conflict resolution")
+    func copiesWithOverwriteConflictResolution() throws {
+        let root = try TemporaryDirectory()
+        let source = root.url.appendingPathComponent("source.txt")
+        let destination = root.url.appendingPathComponent("destination", isDirectory: true)
+        try "new".write(to: source, atomically: true, encoding: .utf8)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        try "existing".write(to: destination.appendingPathComponent("source.txt"), atomically: true, encoding: .utf8)
+
+        try FileOperationService(logger: CapturingLogger()).copy(
+            [source],
+            to: destination,
+            conflictResolver: { _ in .overwrite }
+        )
+
+        #expect(try String(contentsOf: destination.appendingPathComponent("source.txt"), encoding: .utf8) == "new")
+        #expect(!FileManager.default.fileExists(atPath: destination.appendingPathComponent("source 2.txt").path))
+    }
+
+    @Test("skips files with skip conflict resolution")
+    func skipsConflictResolution() throws {
+        let root = try TemporaryDirectory()
+        let source = root.url.appendingPathComponent("source.txt")
+        let destination = root.url.appendingPathComponent("destination", isDirectory: true)
+        try "new".write(to: source, atomically: true, encoding: .utf8)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        try "existing".write(to: destination.appendingPathComponent("source.txt"), atomically: true, encoding: .utf8)
+
+        try FileOperationService(logger: CapturingLogger()).copy(
+            [source],
+            to: destination,
+            conflictResolver: { _ in .skip }
+        )
+
+        #expect(try String(contentsOf: destination.appendingPathComponent("source.txt"), encoding: .utf8) == "existing")
+        #expect(!FileManager.default.fileExists(atPath: destination.appendingPathComponent("source 2.txt").path))
+    }
+
+    @Test("reports copy progress")
+    func reportsCopyProgress() throws {
+        let root = try TemporaryDirectory()
+        let source = root.url.appendingPathComponent("source.bin")
+        let destination = root.url.appendingPathComponent("destination", isDirectory: true)
+        try Data(repeating: 7, count: 3 * 1024 * 1024).write(to: source)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        var progressEvents: [FileOperationProgress] = []
+
+        try FileOperationService(logger: CapturingLogger()).copy([source], to: destination, progress: { progress in
+            progressEvents.append(progress)
+        })
+
+        #expect(progressEvents.count >= 2)
+        #expect(progressEvents.last?.completedBytes == Int64(3 * 1024 * 1024))
+        #expect(progressEvents.last?.completedItems == 1)
     }
 
     @Test("returns standardized created folder URL")

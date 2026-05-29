@@ -12,15 +12,23 @@ final class QuickLookPreviewService: NSObject, @preconcurrency QLPreviewPanelDat
     private var keyDownMonitor: Any?
 
     var navigationHandler: ((PreviewNavigationDirection) -> Bool)?
+    var isPreviewVisible: Bool {
+        QLPreviewPanel.shared()?.isVisible == true
+    }
 
     func togglePreview(for urls: [URL]) {
         guard !urls.isEmpty, let panel = QLPreviewPanel.shared() else { return }
 
         if panel.isVisible, previewURLs == urls {
-            panel.orderOut(nil)
-            removeKeyDownMonitor()
+            closePreview()
             return
         }
+
+        showPreview(for: urls)
+    }
+
+    func showPreview(for urls: [URL]) {
+        guard !urls.isEmpty, let panel = QLPreviewPanel.shared() else { return }
 
         previewURLs = urls
         panel.dataSource = self
@@ -29,6 +37,15 @@ final class QuickLookPreviewService: NSObject, @preconcurrency QLPreviewPanelDat
         panel.currentPreviewItemIndex = 0
         installKeyDownMonitor()
         panel.makeKeyAndOrderFront(nil)
+    }
+
+    func closePreview() {
+        guard let panel = QLPreviewPanel.shared(), panel.isVisible else { return }
+        panel.orderOut(nil)
+        previewURLs = []
+        panel.dataSource = nil
+        panel.delegate = nil
+        removeKeyDownMonitor()
     }
 
     func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int {

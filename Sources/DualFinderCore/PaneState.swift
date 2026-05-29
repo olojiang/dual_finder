@@ -76,6 +76,11 @@ public struct PaneState: Sendable {
         !(selectedTab?.forwardHistory.isEmpty ?? true)
     }
 
+    public func tabID(atZeroBasedIndex index: Int) -> UUID? {
+        guard tabs.indices.contains(index) else { return nil }
+        return tabs[index].id
+    }
+
     @discardableResult
     public mutating func addTab(url: URL) -> UUID {
         let tab = FileTab(url: url)

@@ -23,6 +23,18 @@ struct PaneStateTests {
         #expect(pane.tabs.count == 1)
     }
 
+    @Test("resolves tabs by display order")
+    func resolvesTabIDByDisplayOrder() {
+        let first = FileTab(id: UUID(), url: URL(fileURLWithPath: "/tmp/first"))
+        let second = FileTab(id: UUID(), url: URL(fileURLWithPath: "/tmp/second"))
+        let pane = PaneState(side: .left, tabs: [first, second], selectedTabID: first.id)
+
+        #expect(pane.tabID(atZeroBasedIndex: 0) == first.id)
+        #expect(pane.tabID(atZeroBasedIndex: 1) == second.id)
+        #expect(pane.tabID(atZeroBasedIndex: 2) == nil)
+        #expect(pane.tabID(atZeroBasedIndex: -1) == nil)
+    }
+
     @Test("clears selection on navigation")
     func managesSelection() {
         var pane = PaneState(side: .left, initialURL: URL(fileURLWithPath: "/tmp"))

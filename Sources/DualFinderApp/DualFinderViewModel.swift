@@ -13,6 +13,12 @@ struct PaneFocusRequest: Equatable {
     let requestID: String
     let side: PaneSide
     let source: String
+    let revealURL: URL?
+}
+
+struct FileSearchRequest: Equatable {
+    let id = UUID()
+    let side: PaneSide
 }
 
 struct FolderBookmarkDialogRequest: Identifiable, Equatable {
@@ -40,8 +46,16 @@ final class DualFinderViewModel: ObservableObject {
     @Published private(set) var activePaneSide: PaneSide = .left
     @Published var pathEditRequest: PathEditRequest?
     @Published var paneFocusRequest: PaneFocusRequest?
+    @Published var fileSearchRequest: FileSearchRequest?
     @Published var folderBookmarkDialogRequest: FolderBookmarkDialogRequest?
     @Published var batchRenameDialogRequest: BatchRenameDialogRequest?
+    @Published private(set) var fileOperationQueue: [QueuedFileOperation] = []
+    @Published var fileConflictDialogRequest: FileConflictDialogRequest?
+    @Published var directoryComparisonDialogRequest: DirectoryComparisonDialogRequest?
+    @Published var globalSearchDialogRequest: GlobalSearchDialogRequest?
+    @Published private(set) var directoryComparisonResults: [DirectoryComparisonEntry] = []
+    @Published private(set) var globalSearchResults: [RecursiveFileSearchResult] = []
+    @Published private(set) var isGlobalSearchRunning = false
     @Published var isInlineRenaming = false
     @Published var showHiddenFiles = false {
         didSet { refreshAll() }
@@ -57,6 +71,10 @@ final class DualFinderViewModel: ObservableObject {
     private let quickLookPreviewService: QuickLookPreviewService
     private let logger: AppLogging
     private var didAutoOpenDiskAccessSettings = false
+    private var pendingOperationRequests: [QueuedFileOperationRequest] = []
+    private var isProcessingFileOperations = false
+    private var activeConflictAnswerBox: FileConflictAnswerBox?
+    private var globalSearchCancellation: FileOperationCancellation?
 
     init(
         initialURL: URL = FileManager.default.homeDirectoryForCurrentUser,
@@ -141,15 +159,45 @@ final class DualFinderViewModel: ObservableObject {
         ])
 
         activePaneSide = side
-        paneFocusRequest = PaneFocusRequest(requestID: requestID, side: side, source: source)
+        let revealURL = selectionRevealURLForPaneFocus(side, requestID: requestID, source: source)
+        paneFocusRequest = PaneFocusRequest(requestID: requestID, side: side, source: source, revealURL: revealURL)
 
         logger.info("pane-focus", "switch.applied", metadata: [
             "requestID": requestID,
             "from": previousSide.rawValue,
             "to": side.rawValue,
             "source": source,
-            "changed": "\(previousSide != side)"
+            "changed": "\(previousSide != side)",
+            "revealPath": revealURL?.path ?? ""
         ])
+    }
+
+    private func selectionRevealURLForPaneFocus(_ side: PaneSide, requestID: String, source: String) -> URL? {
+        let itemURLs = items(for: side).map(\.url)
+        let selection = pane(for: side).selectedItemURLs
+
+        if let selectedURL = itemURLs.first(where: { selection.contains($0) }) {
+            return selectedURL
+        }
+
+        guard let firstURL = itemURLs.first else {
+            logger.debug("selection", "focus-default.ignored", metadata: [
+                "requestID": requestID,
+                "side": side.rawValue,
+                "source": source,
+                "reason": "empty-directory"
+            ])
+            return nil
+        }
+
+        setSelection([firstURL], for: side)
+        logger.debug("selection", "focus-default.selected", metadata: [
+            "requestID": requestID,
+            "side": side.rawValue,
+            "source": source,
+            "path": firstURL.path
+        ])
+        return firstURL
     }
 
     func logPaneFocusEvent(_ message: String, metadata: [String: String] = [:]) {
@@ -163,6 +211,16 @@ final class DualFinderViewModel: ObservableObject {
     func requestPathEditing(on side: PaneSide) {
         activatePane(side)
         pathEditRequest = PathEditRequest(side: side)
+    }
+
+    func requestFileSearch(on side: PaneSide) {
+        guard !isInlineRenaming else { return }
+        activatePane(side)
+        fileSearchRequest = FileSearchRequest(side: side)
+        logger.debug("file-search", "requested", metadata: [
+            "side": side.rawValue,
+            "path": pane(for: side).selectedURL.path
+        ])
     }
 
     func requestFolderBookmarkDialog(on side: PaneSide) {
@@ -187,12 +245,28 @@ final class DualFinderViewModel: ObservableObject {
         ])
     }
 
+    func requestDirectoryComparison() {
+        guard !isInlineRenaming else { return }
+        directoryComparisonDialogRequest = DirectoryComparisonDialogRequest()
+        compareDirectories()
+    }
+
+    func requestGlobalSearchDialog() {
+        guard !isInlineRenaming else { return }
+        globalSearchDialogRequest = GlobalSearchDialogRequest()
+        globalSearchResults = []
+    }
+
     func folderBookmarkEntries() -> [FolderBookmarkEntry] {
         folderBookmarkStore.entries()
     }
 
     func logFolderBookmarkDialogEvent(_ message: String, metadata: [String: String] = [:]) {
         logger.debug("folder-bookmark-dialog", message, metadata: metadata)
+    }
+
+    func logFileSearchEvent(_ message: String, metadata: [String: String] = [:]) {
+        logger.debug("file-search", message, metadata: metadata)
     }
 
     func addActiveFolderToFavorites() {
@@ -243,6 +317,18 @@ final class DualFinderViewModel: ObservableObject {
             "side": side.rawValue,
             "count": "\(selection.count)",
             "path": url.path
+        ])
+    }
+
+    func replaceSelection(_ selection: Set<URL>, on side: PaneSide, source: String) {
+        activatePane(side)
+        guard pane(for: side).selectedItemURLs != selection else { return }
+
+        setSelection(selection, for: side)
+        logger.debug("selection", "selection.replaced", metadata: [
+            "side": side.rawValue,
+            "count": "\(selection.count)",
+            "source": source
         ])
     }
 
@@ -548,23 +634,11 @@ final class DualFinderViewModel: ObservableObject {
             "sources": operableSources.map(\.path).joined(separator: "|")
         ], requestID: requestID))
 
-        do {
-            switch operation {
-            case .copy:
-                try operationService.copy(operableSources, to: destination)
-            case .move:
-                try operationService.move(operableSources, to: destination)
-            }
-            refreshAll()
-            statusMessage = "\(operation.rawValue.capitalized) completed: \(operableSources.count) item(s)"
-            logger.info("file-operation", "paste.\(operation.rawValue).completed", metadata: metadataWithRequestID([
-                "side": side.rawValue,
-                "count": "\(operableSources.count)",
-                "destination": destination.path
-            ], requestID: requestID))
-        } catch {
-            reportOperationFailure("paste.\(operation.rawValue).failed", error: error)
-        }
+        enqueueFileOperation(
+            operation == .copy ? .copy : .move,
+            sources: operableSources,
+            destination: destination
+        )
     }
 
     func openInTerminal(_ urls: Set<URL>, on side: PaneSide) {
@@ -675,15 +749,72 @@ final class DualFinderViewModel: ObservableObject {
         }
     }
 
-    func selectTab(_ id: UUID, on side: PaneSide) {
-        guard pane(for: side).tabs.contains(where: { $0.id == id }) else { return }
+    @discardableResult
+    func selectTab(_ id: UUID, on side: PaneSide) -> Bool {
+        selectTab(id, on: side, requestID: nil, source: "ui", displayIndex: nil)
+    }
+
+    @discardableResult
+    func selectTab(
+        atZeroBasedIndex index: Int,
+        on side: PaneSide,
+        requestID: String,
+        source: String
+    ) -> Bool {
+        logger.debug("tab", "tab.index-select.requested", metadata: [
+            "requestID": requestID,
+            "side": side.rawValue,
+            "source": source,
+            "index": "\(index)",
+            "displayIndex": "\(index + 1)",
+            "tabCount": "\(pane(for: side).tabs.count)"
+        ])
+
+        guard let tabID = pane(for: side).tabID(atZeroBasedIndex: index) else {
+            logger.debug("tab", "tab.index-select.ignored", metadata: [
+                "requestID": requestID,
+                "side": side.rawValue,
+                "source": source,
+                "index": "\(index)",
+                "displayIndex": "\(index + 1)",
+                "tabCount": "\(pane(for: side).tabs.count)",
+                "reason": "out-of-range"
+            ])
+            return false
+        }
+
+        return selectTab(tabID, on: side, requestID: requestID, source: source, displayIndex: index + 1)
+    }
+
+    @discardableResult
+    private func selectTab(
+        _ id: UUID,
+        on side: PaneSide,
+        requestID: String?,
+        source: String,
+        displayIndex: Int?
+    ) -> Bool {
+        guard pane(for: side).tabs.contains(where: { $0.id == id }) else { return false }
+        activePaneSide = side
         mutatePane(side) { pane in
             pane.selectedTabID = id
             pane.selectedItemURLs.removeAll()
         }
         persistPaneSession()
-        logger.info("tab", "tab.selected", metadata: ["side": side.rawValue, "tab": id.uuidString])
+        var metadata = [
+            "side": side.rawValue,
+            "tab": id.uuidString,
+            "source": source
+        ]
+        if let requestID {
+            metadata["requestID"] = requestID
+        }
+        if let displayIndex {
+            metadata["displayIndex"] = "\(displayIndex)"
+        }
+        logger.info("tab", "tab.selected", metadata: metadata)
         refresh(side)
+        return true
     }
 
     func chooseFolder(for side: PaneSide) {
@@ -770,29 +901,112 @@ final class DualFinderViewModel: ObservableObject {
         }
     }
 
-    func copySelection(from sourceSide: PaneSide) {
-        performSelectionOperation(from: sourceSide, operationName: "copy") { sources, destination in
-            try operationService.copy(sources, to: destination)
+    func compareDirectories() {
+        let left = leftPane.selectedURL
+        let right = rightPane.selectedURL
+        do {
+            let results = try DirectoryComparisonService().compare(
+                left: left,
+                right: right,
+                includeHidden: showHiddenFiles
+            )
+            directoryComparisonResults = results
+            let changedCount = results.filter { $0.status != .same }.count
+            statusMessage = "Compared folders: \(changedCount) difference(s)"
+        } catch {
+            reportOperationFailure("directory.compare.failed", error: error)
         }
+    }
+
+    func syncComparisonEntry(_ entry: DirectoryComparisonEntry, direction: PaneSide) {
+        switch direction {
+        case .left:
+            guard let source = entry.rightURL else { return }
+            enqueueFileOperation(.copy, sources: [source], destination: leftPane.selectedURL)
+        case .right:
+            guard let source = entry.leftURL else { return }
+            enqueueFileOperation(.copy, sources: [source], destination: rightPane.selectedURL)
+        }
+    }
+
+    func startGlobalSearch(query: String, searchContents: Bool) {
+        let root = pane(for: activePaneSide).selectedURL
+        let includeHidden = showHiddenFiles
+        let cancellation = FileOperationCancellation()
+        globalSearchCancellation?.cancel()
+        globalSearchCancellation = cancellation
+        isGlobalSearchRunning = true
+        globalSearchResults = []
+        statusMessage = "Searching \(root.path)..."
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                let results = try RecursiveFileSearchService().search(
+                    root: root,
+                    query: query,
+                    options: RecursiveFileSearchOptions(includeHidden: includeHidden, searchContents: searchContents),
+                    cancellation: cancellation,
+                    progress: { scannedCount in
+                        Task { @MainActor [weak self] in
+                            self?.statusMessage = "Searching \(root.path)... \(scannedCount) scanned"
+                        }
+                    }
+                )
+                Task { @MainActor [weak self] in
+                    guard self?.globalSearchCancellation === cancellation else { return }
+                    self?.globalSearchResults = results
+                    self?.isGlobalSearchRunning = false
+                    self?.statusMessage = "Search completed: \(results.count) result(s)"
+                }
+            } catch FileOperationError.cancelled {
+                Task { @MainActor [weak self] in
+                    guard self?.globalSearchCancellation === cancellation else { return }
+                    self?.isGlobalSearchRunning = false
+                    self?.statusMessage = "Search cancelled"
+                }
+            } catch {
+                Task { @MainActor [weak self] in
+                    guard self?.globalSearchCancellation === cancellation else { return }
+                    self?.isGlobalSearchRunning = false
+                    self?.reportOperationFailure("global.search.failed", error: error)
+                }
+            }
+        }
+    }
+
+    func cancelGlobalSearch() {
+        globalSearchCancellation?.cancel()
+    }
+
+    func revealSearchResult(_ result: RecursiveFileSearchResult) {
+        let side = activePaneSide
+        navigate(side, to: result.url.deletingLastPathComponent(), selecting: result.url)
+    }
+
+    func copySelection(from sourceSide: PaneSide) {
+        performSelectionOperation(from: sourceSide, operation: .copy)
     }
 
     func moveSelection(from sourceSide: PaneSide) {
-        performSelectionOperation(from: sourceSide, operationName: "move") { sources, destination in
-            try operationService.move(sources, to: destination)
-        }
+        performSelectionOperation(from: sourceSide, operation: .move)
     }
 
     func trashSelection(from sourceSide: PaneSide) {
-        let sources = Array(pane(for: sourceSide).selectedItemURLs)
+        let sources = orderedSelection(pane(for: sourceSide).selectedItemURLs, on: sourceSide)
         guard !sources.isEmpty else { return }
-        do {
-            try operationService.trash(sources)
-            clearSelection(sourceSide)
-            refreshAll()
-            statusMessage = "Moved \(sources.count) item(s) to Trash"
-        } catch {
-            reportOperationFailure("trash.failed", error: error)
+        let previewReplacementURL = quickLookPreviewService.isPreviewVisible
+            ? FileSelectionResolver.replacementAfterRemoving(sources, from: items(for: sourceSide).map(\.url))
+            : nil
+        clearSelection(sourceSide)
+        if quickLookPreviewService.isPreviewVisible {
+            if let previewReplacementURL {
+                setSelection([previewReplacementURL], for: sourceSide)
+                quickLookPreviewService.showPreview(for: [previewReplacementURL])
+            } else {
+                quickLookPreviewService.closePreview()
+            }
         }
+        enqueueFileOperation(.trash, sources: sources, destination: nil)
     }
 
     func trashActiveSelection() {
@@ -879,34 +1093,208 @@ final class DualFinderViewModel: ObservableObject {
         diskAccessPrompt = nil
     }
 
-    private func performSelectionOperation(
-        from sourceSide: PaneSide,
-        operationName: String,
-        body: ([URL], URL) throws -> Void
-    ) {
-        let sources = Array(pane(for: sourceSide).selectedItemURLs)
+    func receiveDroppedFiles(_ sources: [URL], into side: PaneSide, move: Bool) {
+        let destination = pane(for: side).selectedURL.standardizedFileURL
+        let operableSources = move
+            ? sources.filter { $0.deletingLastPathComponent().standardizedFileURL != destination }
+            : sources
+        guard !operableSources.isEmpty else { return }
+        enqueueFileOperation(move ? .move : .copy, sources: operableSources, destination: destination)
+    }
+
+    func cancelFileOperation(_ id: UUID) {
+        guard let request = pendingOperationRequests.first(where: { $0.id == id }) else { return }
+        request.cancellation.cancel()
+        updateQueuedOperation(id) { operation in
+            if operation.status == .queued {
+                operation.status = .cancelled
+                operation.message = "Cancelled"
+            }
+        }
+        pendingOperationRequests.removeAll { $0.id == id && fileOperationQueue.first(where: { $0.id == id })?.status == .cancelled }
+        statusMessage = "Cancelling operation..."
+    }
+
+    func resolveFileConflict(_ resolution: FileOperationConflictResolution, applyToAll: Bool) {
+        activeConflictAnswerBox?.resolve(FileConflictAnswer(resolution: resolution, applyToAll: applyToAll))
+        activeConflictAnswerBox = nil
+        fileConflictDialogRequest = nil
+    }
+
+    private func performSelectionOperation(from sourceSide: PaneSide, operation: QueuedFileOperationKind) {
+        let sources = orderedSelection(pane(for: sourceSide).selectedItemURLs, on: sourceSide)
         guard !sources.isEmpty else {
-            logger.debug("file-operation", "\(operationName).ignored.empty-selection", metadata: [
+            logger.debug("file-operation", "\(operation.rawValue).ignored.empty-selection", metadata: [
                 "side": sourceSide.rawValue
             ])
             return
         }
 
         let destination = pane(for: opposite(sourceSide)).selectedURL
-        logger.info("file-operation", "\(operationName).selection.requested", metadata: [
+        logger.info("file-operation", "\(operation.rawValue).selection.requested", metadata: [
             "count": "\(sources.count)",
             "destination": destination.path,
             "side": sourceSide.rawValue
         ])
 
-        do {
-            try body(sources, destination)
-            clearSelection(sourceSide)
-            refreshAll()
-            statusMessage = "\(operationName.capitalized) completed: \(sources.count) item(s)"
-        } catch {
-            reportOperationFailure("\(operationName).failed", error: error)
+        clearSelection(sourceSide)
+        enqueueFileOperation(operation, sources: sources, destination: destination)
+    }
+
+    private func enqueueFileOperation(_ kind: QueuedFileOperationKind, sources: [URL], destination: URL?) {
+        let id = UUID()
+        let cancellation = FileOperationCancellation()
+        let request = QueuedFileOperationRequest(
+            id: id,
+            kind: kind,
+            sources: sources,
+            destination: destination,
+            cancellation: cancellation
+        )
+        let operation = QueuedFileOperation(
+            id: id,
+            kind: kind,
+            sources: sources,
+            destination: destination,
+            status: .queued,
+            progress: nil,
+            message: "Queued"
+        )
+        pendingOperationRequests.append(request)
+        fileOperationQueue.append(operation)
+        statusMessage = "\(kind.displayName) queued: \(sources.count) item(s)"
+        processNextFileOperationIfNeeded()
+    }
+
+    private func processNextFileOperationIfNeeded() {
+        guard !isProcessingFileOperations, let request = pendingOperationRequests.first else { return }
+        isProcessingFileOperations = true
+        updateQueuedOperation(request.id) {
+            $0.status = .running
+            $0.message = "Running"
         }
+
+        let id = request.id
+        let kind = request.kind
+        let sources = request.sources
+        let destination = request.destination
+        let cancellation = request.cancellation
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let service = FileOperationService(logger: nil)
+            var applyAllResolution: FileOperationConflictResolution?
+            do {
+                switch kind {
+                case .copy:
+                    guard let destination else { return }
+                    try service.copy(
+                        sources,
+                        to: destination,
+                        cancellation: cancellation,
+                        progress: { progress in
+                            Task { @MainActor [weak self] in
+                                self?.recordFileOperationProgress(progress, for: id)
+                            }
+                        },
+                        conflictResolver: { conflict in
+                            if let applyAllResolution {
+                                return applyAllResolution
+                            }
+                            let answer = self?.resolveConflictSynchronously(conflict)
+                                ?? FileConflictAnswer(resolution: .keepBoth, applyToAll: false)
+                            if answer.applyToAll {
+                                applyAllResolution = answer.resolution
+                            }
+                            return answer.resolution
+                        }
+                    )
+                case .move:
+                    guard let destination else { return }
+                    try service.move(
+                        sources,
+                        to: destination,
+                        cancellation: cancellation,
+                        progress: { progress in
+                            Task { @MainActor [weak self] in
+                                self?.recordFileOperationProgress(progress, for: id)
+                            }
+                        },
+                        conflictResolver: { conflict in
+                            if let applyAllResolution {
+                                return applyAllResolution
+                            }
+                            let answer = self?.resolveConflictSynchronously(conflict)
+                                ?? FileConflictAnswer(resolution: .keepBoth, applyToAll: false)
+                            if answer.applyToAll {
+                                applyAllResolution = answer.resolution
+                            }
+                            return answer.resolution
+                        }
+                    )
+                case .trash:
+                    try service.trash(
+                        sources,
+                        cancellation: cancellation,
+                        progress: { progress in
+                            Task { @MainActor [weak self] in
+                                self?.recordFileOperationProgress(progress, for: id)
+                            }
+                        }
+                    )
+                }
+
+                Task { @MainActor [weak self] in
+                    self?.finishFileOperation(id, status: .completed, message: "\(kind.displayName) completed")
+                }
+            } catch FileOperationError.cancelled {
+                Task { @MainActor [weak self] in
+                    self?.finishFileOperation(id, status: .cancelled, message: "Cancelled")
+                }
+            } catch {
+                Task { @MainActor [weak self] in
+                    self?.finishFileOperation(id, status: .failed, message: error.localizedDescription)
+                    self?.reportOperationFailure("\(kind.rawValue).failed", error: error)
+                }
+            }
+        }
+    }
+
+    private func recordFileOperationProgress(_ progress: FileOperationProgress, for id: UUID) {
+        updateQueuedOperation(id) {
+            $0.progress = progress
+            if let currentItem = progress.currentItem {
+                $0.message = currentItem.lastPathComponent
+            }
+        }
+    }
+
+    private func finishFileOperation(_ id: UUID, status: QueuedFileOperationStatus, message: String) {
+        updateQueuedOperation(id) {
+            $0.status = status
+            $0.message = message
+        }
+        pendingOperationRequests.removeAll { $0.id == id }
+        isProcessingFileOperations = false
+        refreshAll()
+        statusMessage = message
+        processNextFileOperationIfNeeded()
+    }
+
+    private func updateQueuedOperation(_ id: UUID, mutate: (inout QueuedFileOperation) -> Void) {
+        guard let index = fileOperationQueue.firstIndex(where: { $0.id == id }) else { return }
+        mutate(&fileOperationQueue[index])
+    }
+
+    private nonisolated func resolveConflictSynchronously(_ conflict: FileOperationConflict) -> FileConflictAnswer {
+        let box = FileConflictAnswerBox()
+        Task { @MainActor [weak self] in
+            self?.activeConflictAnswerBox = box
+            self?.fileConflictDialogRequest = FileConflictDialogRequest(
+                source: conflict.source,
+                destination: conflict.destination
+            )
+        }
+        return box.wait()
     }
 
     private func setItems(_ items: [FileItem], for side: PaneSide) {

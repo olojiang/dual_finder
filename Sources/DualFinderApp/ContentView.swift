@@ -15,17 +15,25 @@ struct ContentView: View {
                 FilePaneView(side: .right, model: model)
             }
             Divider()
+            OperationQueueBar(model: model)
             StatusBar(message: model.statusMessage)
         }
         .background(.background)
         .background(AppShortcutHandler {
             model.requestPathEditing(on: model.activePaneSide)
+        } showFileSearch: {
+            model.requestFileSearch(on: model.activePaneSide)
         } showFolderBookmarks: {
             model.requestFolderBookmarkDialog(on: model.activePaneSide)
         } showBatchRename: {
             model.requestBatchRenameDialog(on: model.activePaneSide)
         } focusPane: { side, requestID in
             model.requestPaneFocus(side, requestID: requestID, source: "cmd-arrow")
+        } selectTab: { index, requestID in
+            let side = model.activePaneSide
+            if model.selectTab(atZeroBasedIndex: index, on: side, requestID: requestID, source: "cmd-number") {
+                model.requestPaneFocus(side, requestID: requestID, source: "cmd-number")
+            }
         } logShortcutEvent: { message, metadata in
             model.logShortcutEvent(message, metadata: metadata)
         } navigateBack: {
@@ -43,6 +51,15 @@ struct ContentView: View {
         .sheet(item: $model.batchRenameDialogRequest) { request in
             BatchRenameDialog(model: model, side: request.side)
         }
+        .sheet(item: $model.fileConflictDialogRequest) { request in
+            FileConflictDialog(model: model, request: request)
+        }
+        .sheet(item: $model.directoryComparisonDialogRequest) { _ in
+            DirectoryComparisonDialog(model: model)
+        }
+        .sheet(item: $model.globalSearchDialogRequest) { _ in
+            GlobalSearchDialog(model: model)
+        }
         .alert(item: $model.diskAccessPrompt) { prompt in
             Alert(
                 title: Text("Full Disk Access Required"),
@@ -58,11 +75,275 @@ struct ContentView: View {
     }
 }
 
+private struct OperationQueueBar: View {
+    @ObservedObject var model: DualFinderViewModel
+
+    private var visibleOperations: [QueuedFileOperation] {
+        Array(model.fileOperationQueue
+            .filter { $0.status == .queued || $0.status == .running }
+            .suffix(3))
+    }
+
+    var body: some View {
+        if !visibleOperations.isEmpty {
+            VStack(spacing: 0) {
+                ForEach(visibleOperations) { operation in
+                    HStack(spacing: 8) {
+                        Image(systemName: iconName(for: operation.kind))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 18)
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack {
+                                Text(operation.title)
+                                    .font(.caption)
+                                    .fontWeight(.semibold)
+                                Text(operation.message)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                            ProgressView(value: operation.fractionCompleted ?? 0)
+                                .progressViewStyle(.linear)
+                        }
+                        IconButton(systemName: "xmark.circle", help: "Cancel operation") {
+                            model.cancelFileOperation(operation.id)
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                }
+            }
+            .background(.bar)
+            Divider()
+        }
+    }
+
+    private func iconName(for kind: QueuedFileOperationKind) -> String {
+        switch kind {
+        case .copy: "doc.on.doc"
+        case .move: "arrow.right.doc.on.clipboard"
+        case .trash: "trash"
+        }
+    }
+}
+
+private struct FileConflictDialog: View {
+    @ObservedObject var model: DualFinderViewModel
+    let request: FileConflictDialogRequest
+    @State private var applyToAll = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Image(systemName: "exclamationmark.triangle")
+                    .foregroundStyle(.orange)
+                Text("File Already Exists")
+                    .font(.headline)
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Text(request.destination.lastPathComponent)
+                    .font(.body)
+                    .fontWeight(.semibold)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(request.destination.deletingLastPathComponent().path)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+            }
+            Toggle("Apply to all conflicts", isOn: $applyToAll)
+            HStack {
+                Button("Skip") {
+                    model.resolveFileConflict(.skip, applyToAll: applyToAll)
+                }
+                Spacer()
+                Button("Keep Both") {
+                    model.resolveFileConflict(.keepBoth, applyToAll: applyToAll)
+                }
+                Button("Overwrite", role: .destructive) {
+                    model.resolveFileConflict(.overwrite, applyToAll: applyToAll)
+                }
+            }
+        }
+        .padding(18)
+        .frame(width: 420)
+    }
+}
+
+private struct DirectoryComparisonDialog: View {
+    @ObservedObject var model: DualFinderViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    private var differences: [DirectoryComparisonEntry] {
+        model.directoryComparisonResults.filter { $0.status != .same }
+    }
+
+    var body: some View {
+        VStack(spacing: 12) {
+            HStack {
+                Text("Directory Compare")
+                    .font(.headline)
+                Spacer()
+                IconButton(systemName: "arrow.clockwise", help: "Refresh comparison") {
+                    model.compareDirectories()
+                }
+                IconButton(systemName: "xmark", help: "Close") {
+                    dismiss()
+                }
+            }
+            HStack {
+                Text(model.leftPane.selectedURL.path)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text(model.rightPane.selectedURL.path)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .truncationMode(.middle)
+
+            if differences.isEmpty {
+                ContentUnavailableView("Folders match", systemImage: "checkmark.circle")
+                    .frame(height: 320)
+            } else {
+                List(differences) { entry in
+                    HStack(spacing: 10) {
+                        Image(systemName: iconName(for: entry.status))
+                            .foregroundStyle(color(for: entry.status))
+                            .frame(width: 18)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(entry.relativePath)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Text(entry.status.rawValue)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button {
+                            model.syncComparisonEntry(entry, direction: .left)
+                        } label: {
+                            Image(systemName: "arrow.left")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Copy right item to left")
+                        .disabled(entry.rightURL == nil)
+                        Button {
+                            model.syncComparisonEntry(entry, direction: .right)
+                        } label: {
+                            Image(systemName: "arrow.right")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Copy left item to right")
+                        .disabled(entry.leftURL == nil)
+                    }
+                }
+                .frame(height: 360)
+            }
+        }
+        .padding(16)
+        .frame(width: 720)
+    }
+
+    private func iconName(for status: DirectoryComparisonStatus) -> String {
+        switch status {
+        case .onlyLeft: "arrow.left.circle"
+        case .onlyRight: "arrow.right.circle"
+        case .different: "exclamationmark.circle"
+        case .same: "checkmark.circle"
+        }
+    }
+
+    private func color(for status: DirectoryComparisonStatus) -> Color {
+        switch status {
+        case .onlyLeft, .onlyRight: .accentColor
+        case .different: .orange
+        case .same: .green
+        }
+    }
+}
+
+private struct GlobalSearchDialog: View {
+    @ObservedObject var model: DualFinderViewModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var query = ""
+    @State private var searchContents = false
+    @FocusState private var isQueryFocused: Bool
+
+    var body: some View {
+        VStack(spacing: 12) {
+            HStack {
+                Text("Recursive Search")
+                    .font(.headline)
+                Spacer()
+                IconButton(systemName: "xmark", help: "Close") {
+                    dismiss()
+                }
+            }
+            HStack(spacing: 8) {
+                TextField("Search names or contents", text: $query)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($isQueryFocused)
+                    .onSubmit(runSearch)
+                Toggle("Contents", isOn: $searchContents)
+                Button(model.isGlobalSearchRunning ? "Cancel" : "Search") {
+                    model.isGlobalSearchRunning ? model.cancelGlobalSearch() : runSearch()
+                }
+                .disabled(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+
+            if model.globalSearchResults.isEmpty {
+                ContentUnavailableView(
+                    model.isGlobalSearchRunning ? "Searching..." : "No results",
+                    systemImage: model.isGlobalSearchRunning ? "magnifyingglass" : "doc.text.magnifyingglass"
+                )
+                .frame(height: 340)
+            } else {
+                List(model.globalSearchResults) { result in
+                    HStack(spacing: 8) {
+                        Image(systemName: result.matchedContent ? "text.page" : "doc")
+                            .foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(result.url.lastPathComponent)
+                                .lineLimit(1)
+                            Text(result.url.deletingLastPathComponent().path)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture(count: 2) {
+                        model.revealSearchResult(result)
+                        dismiss()
+                    }
+                }
+                .frame(height: 340)
+            }
+        }
+        .padding(16)
+        .frame(width: 680)
+        .onAppear {
+            isQueryFocused = true
+        }
+    }
+
+    private func runSearch() {
+        model.startGlobalSearch(query: query, searchContents: searchContents)
+    }
+}
+
 private struct AppShortcutHandler: NSViewRepresentable {
     let goToFolder: () -> Void
+    let showFileSearch: () -> Void
     let showFolderBookmarks: () -> Void
     let showBatchRename: () -> Void
     let focusPane: (PaneSide, String) -> Void
+    let selectTab: (Int, String) -> Void
     let logShortcutEvent: (String, [String: String]) -> Void
     let navigateBack: () -> Void
     let navigateForward: () -> Void
@@ -72,9 +353,11 @@ private struct AppShortcutHandler: NSViewRepresentable {
     func makeCoordinator() -> Coordinator {
         Coordinator(
             goToFolder: goToFolder,
+            showFileSearch: showFileSearch,
             showFolderBookmarks: showFolderBookmarks,
             showBatchRename: showBatchRename,
             focusPane: focusPane,
+            selectTab: selectTab,
             logShortcutEvent: logShortcutEvent,
             navigateBack: navigateBack,
             navigateForward: navigateForward,
@@ -90,9 +373,11 @@ private struct AppShortcutHandler: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSView, context: Context) {
         context.coordinator.goToFolder = goToFolder
+        context.coordinator.showFileSearch = showFileSearch
         context.coordinator.showFolderBookmarks = showFolderBookmarks
         context.coordinator.showBatchRename = showBatchRename
         context.coordinator.focusPane = focusPane
+        context.coordinator.selectTab = selectTab
         context.coordinator.logShortcutEvent = logShortcutEvent
         context.coordinator.navigateBack = navigateBack
         context.coordinator.navigateForward = navigateForward
@@ -106,9 +391,11 @@ private struct AppShortcutHandler: NSViewRepresentable {
 
     final class Coordinator {
         var goToFolder: () -> Void
+        var showFileSearch: () -> Void
         var showFolderBookmarks: () -> Void
         var showBatchRename: () -> Void
         var focusPane: (PaneSide, String) -> Void
+        var selectTab: (Int, String) -> Void
         var logShortcutEvent: (String, [String: String]) -> Void
         var navigateBack: () -> Void
         var navigateForward: () -> Void
@@ -118,9 +405,11 @@ private struct AppShortcutHandler: NSViewRepresentable {
 
         init(
             goToFolder: @escaping () -> Void,
+            showFileSearch: @escaping () -> Void,
             showFolderBookmarks: @escaping () -> Void,
             showBatchRename: @escaping () -> Void,
             focusPane: @escaping (PaneSide, String) -> Void,
+            selectTab: @escaping (Int, String) -> Void,
             logShortcutEvent: @escaping (String, [String: String]) -> Void,
             navigateBack: @escaping () -> Void,
             navigateForward: @escaping () -> Void,
@@ -128,9 +417,11 @@ private struct AppShortcutHandler: NSViewRepresentable {
             moveRightSelectionToLeft: @escaping () -> Void
         ) {
             self.goToFolder = goToFolder
+            self.showFileSearch = showFileSearch
             self.showFolderBookmarks = showFolderBookmarks
             self.showBatchRename = showBatchRename
             self.focusPane = focusPane
+            self.selectTab = selectTab
             self.logShortcutEvent = logShortcutEvent
             self.navigateBack = navigateBack
             self.navigateForward = navigateForward
@@ -144,6 +435,11 @@ private struct AppShortcutHandler: NSViewRepresentable {
             monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
                 if Self.isGoToFolderShortcut(event) {
                     self?.goToFolder()
+                    return nil
+                }
+
+                if Self.isFileSearchShortcut(event) {
+                    self?.showFileSearch()
                     return nil
                 }
 
@@ -164,6 +460,11 @@ private struct AppShortcutHandler: NSViewRepresentable {
 
                 if Self.isFocusRightPaneShortcut(event) {
                     self?.handlePaneFocusShortcut(event, target: .right)
+                    return nil
+                }
+
+                if let tabIndex = Self.tabShortcutIndex(event) {
+                    self?.handleTabSelectionShortcut(event, index: tabIndex)
                     return nil
                 }
 
@@ -198,9 +499,23 @@ private struct AppShortcutHandler: NSViewRepresentable {
                 "target": target.rawValue,
                 "keyCode": "\(event.keyCode)",
                 "characters": event.charactersIgnoringModifiers ?? "",
-                "modifiers": Self.modifierDescription(for: event)
+                "modifiers": Self.modifierDescription(for: event),
+                "rawModifierFlags": "\(event.modifierFlags.rawValue)"
             ])
             focusPane(target, requestID)
+        }
+
+        private func handleTabSelectionShortcut(_ event: NSEvent, index: Int) {
+            let requestID = UUID().uuidString
+            logShortcutEvent("key-down", [
+                "requestID": requestID,
+                "target": "active-pane-tab",
+                "displayIndex": "\(index + 1)",
+                "keyCode": "\(event.keyCode)",
+                "characters": event.charactersIgnoringModifiers ?? "",
+                "modifiers": Self.modifierDescription(for: event)
+            ])
+            selectTab(index, requestID)
         }
 
         func remove() {
@@ -215,20 +530,23 @@ private struct AppShortcutHandler: NSViewRepresentable {
         }
 
         private static func isGoToFolderShortcut(_ event: NSEvent) -> Bool {
-            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            return flags.contains(.command)
-                && flags.contains(.shift)
+            let flags = shortcutModifierFlags(for: event)
+            return flags == [.command, .shift]
                 && event.charactersIgnoringModifiers?.lowercased() == "g"
         }
 
         private static func isFolderBookmarksShortcut(_ event: NSEvent) -> Bool {
-            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let flags = shortcutModifierFlags(for: event)
             return flags == .control
                 && event.charactersIgnoringModifiers?.lowercased() == "d"
         }
 
+        private static func isFileSearchShortcut(_ event: NSEvent) -> Bool {
+            isControlShortcut(event, character: "s", keyCode: 1)
+        }
+
         private static func isBatchRenameShortcut(_ event: NSEvent) -> Bool {
-            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let flags = shortcutModifierFlags(for: event)
             return flags == .control
                 && event.charactersIgnoringModifiers?.lowercased() == "m"
         }
@@ -249,6 +567,19 @@ private struct AppShortcutHandler: NSViewRepresentable {
             isCommandArrowShortcut(event, keyCode: 124)
         }
 
+        private static func tabShortcutIndex(_ event: NSEvent) -> Int? {
+            let flags = shortcutModifierFlags(for: event)
+            guard flags == .command,
+                  let character = event.charactersIgnoringModifiers,
+                  character.count == 1,
+                  let number = Int(character),
+                  (1...9).contains(number)
+            else {
+                return nil
+            }
+            return number - 1
+        }
+
         private static func isMoveLeftSelectionToRightShortcut(_ event: NSEvent) -> Bool {
             isCommandOptionArrowShortcut(event, keyCode: 124)
         }
@@ -258,29 +589,32 @@ private struct AppShortcutHandler: NSViewRepresentable {
         }
 
         private static func isControlShortcut(_ event: NSEvent, character: String, keyCode: UInt16) -> Bool {
-            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let flags = shortcutModifierFlags(for: event)
             return flags == .control
                 && (event.charactersIgnoringModifiers == character || event.keyCode == keyCode)
         }
 
         private static func isCommandOptionArrowShortcut(_ event: NSEvent, keyCode: UInt16) -> Bool {
-            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let flags = shortcutModifierFlags(for: event)
             return flags == [.command, .option] && event.keyCode == keyCode
         }
 
         private static func isCommandArrowShortcut(_ event: NSEvent, keyCode: UInt16) -> Bool {
-            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let flags = shortcutModifierFlags(for: event)
             return flags == .command && event.keyCode == keyCode
         }
 
+        private static func shortcutModifierFlags(for event: NSEvent) -> NSEvent.ModifierFlags {
+            event.modifierFlags.intersection([.command, .option, .control, .shift])
+        }
+
         private static func modifierDescription(for event: NSEvent) -> String {
-            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let flags = shortcutModifierFlags(for: event)
             var names: [String] = []
             if flags.contains(.command) { names.append("command") }
             if flags.contains(.option) { names.append("option") }
             if flags.contains(.control) { names.append("control") }
             if flags.contains(.shift) { names.append("shift") }
-            if flags.contains(.capsLock) { names.append("capsLock") }
             return names.joined(separator: "+")
         }
     }
@@ -798,6 +1132,12 @@ private struct AppToolbar: View {
             }
             IconButton(systemName: "arrow.right.arrow.left", help: "Move left selection to right") {
                 model.moveSelection(from: .left)
+            }
+            IconButton(systemName: "rectangle.split.2x1", help: "Compare folders") {
+                model.requestDirectoryComparison()
+            }
+            IconButton(systemName: "magnifyingglass", help: "Recursive search") {
+                model.requestGlobalSearchDialog()
             }
             Toggle(isOn: $model.showHiddenFiles) {
                 Image(systemName: model.showHiddenFiles ? "eye" : "eye.slash")
