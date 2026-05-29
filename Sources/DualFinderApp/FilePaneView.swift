@@ -24,6 +24,15 @@ struct FilePaneView: View {
             guard request?.side == side else { return }
             beginPathEditing()
         }
+        .onChange(of: model.paneFocusRequest) { _, request in
+            guard let request, request.side == side else { return }
+            model.logPaneFocusEvent("file-list.focus-request.observed", metadata: [
+                "requestID": request.requestID,
+                "side": side.rawValue,
+                "source": request.source
+            ])
+            restoreFileListFocus(requestID: request.requestID, reason: request.source)
+        }
         .onChange(of: model.pane(for: side).selectedURL) { _, url in
             guard !isEditingPath else { return }
             pathText = url.path
@@ -31,7 +40,17 @@ struct FilePaneView: View {
     }
 
     private var paneHeader: some View {
-        HStack(spacing: 6) {
+        let pane = model.pane(for: side)
+
+        return HStack(spacing: 6) {
+            IconButton(systemName: "chevron.left", help: "Go back") {
+                model.navigateBack(side)
+            }
+            .disabled(!pane.canNavigateSelectedTabBack)
+            IconButton(systemName: "chevron.right", help: "Go forward") {
+                model.navigateForward(side)
+            }
+            .disabled(!pane.canNavigateSelectedTabForward)
             IconButton(systemName: "chevron.up", help: "Go to parent folder") {
                 model.navigateUp(side)
             }
@@ -138,6 +157,12 @@ struct FilePaneView: View {
                 }
             }
             .focused($isFileListFocused)
+            .onChange(of: isFileListFocused) { _, isFocused in
+                model.logPaneFocusEvent("file-list.focus-state.changed", metadata: [
+                    "side": side.rawValue,
+                    "focused": "\(isFocused)"
+                ])
+            }
             .onKeyPress(.return, phases: .down) { keyPress in
                 guard keyPress.modifiers.isEmpty else { return .ignored }
                 return beginRenamingSelectedItem() ? .handled : .ignored
@@ -148,11 +173,28 @@ struct FilePaneView: View {
                 return .handled
             }
             .onKeyPress(KeyEquivalent("c"), phases: .down) { keyPress in
-                guard keyPress.modifiers.contains(.command),
-                      keyPress.modifiers.contains(.option),
-                      renamingURL == nil
-                else { return .ignored }
-                model.copyAbsolutePaths(model.pane(for: side).selectedItemURLs, on: side)
+                guard keyPress.modifiers.contains(.command), renamingURL == nil else { return .ignored }
+                if keyPress.modifiers.contains(.option) {
+                    guard !keyPress.modifiers.contains(.shift), !keyPress.modifiers.contains(.control) else { return .ignored }
+                    model.copyAbsolutePaths(model.pane(for: side).selectedItemURLs, on: side)
+                    return .handled
+                }
+                guard !keyPress.modifiers.contains(.shift), !keyPress.modifiers.contains(.control) else { return .ignored }
+                let requestID = logFileClipboardShortcut("copy", modifiers: "command")
+                model.copySelectionToFileClipboard(on: side, requestID: requestID)
+                return .handled
+            }
+            .onKeyPress(KeyEquivalent("v"), phases: .down) { keyPress in
+                guard keyPress.modifiers.contains(.command), renamingURL == nil else { return .ignored }
+                guard !keyPress.modifiers.contains(.shift), !keyPress.modifiers.contains(.control) else { return .ignored }
+                if keyPress.modifiers.contains(.option) {
+                    let requestID = logFileClipboardShortcut("paste.move", modifiers: "command+option")
+                    model.pasteFileClipboard(into: side, operation: .move, requestID: requestID)
+                    return .handled
+                }
+
+                let requestID = logFileClipboardShortcut("paste.copy", modifiers: "command")
+                model.pasteFileClipboard(into: side, operation: .copy, requestID: requestID)
                 return .handled
             }
             .onKeyPress(keys: [.delete, .deleteForward], phases: .down) { keyPress in
@@ -191,6 +233,7 @@ struct FilePaneView: View {
                 Button("Copy Absolute Path") { model.copyAbsolutePaths(selection, on: side) }
                 Button("Open in Ghostty or Terminal") { model.openInTerminal(selection, on: side) }
                 Divider()
+                Button("Batch Rename...") { model.requestBatchRenameDialog(on: side) }
                 Button("Copy to Other Pane") { model.copySelection(from: side) }
                 Button("Move to Other Pane") { model.moveSelection(from: side) }
                 Button("Move to Trash", role: .destructive) { model.trashSelection(from: side) }
@@ -374,9 +417,30 @@ struct FilePaneView: View {
         model.selectItem(url, on: side)
     }
 
-    private func restoreFileListFocus() {
+    private func logFileClipboardShortcut(_ operation: String, modifiers: String) -> String {
+        let requestID = UUID().uuidString
+        model.logShortcutEvent("key-down", metadata: [
+            "requestID": requestID,
+            "side": side.rawValue,
+            "key": operation == "copy" ? "c" : "v",
+            "modifiers": modifiers,
+            "operation": operation
+        ])
+        return requestID
+    }
+
+    private func restoreFileListFocus(requestID: String? = nil, reason: String? = nil) {
         DispatchQueue.main.async {
             isFileListFocused = true
+            guard let requestID else { return }
+            var metadata = [
+                "requestID": requestID,
+                "side": side.rawValue
+            ]
+            if let reason {
+                metadata["reason"] = reason
+            }
+            model.logPaneFocusEvent("file-list.focus-set.requested", metadata: metadata)
         }
     }
 }

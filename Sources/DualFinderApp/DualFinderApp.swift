@@ -44,6 +44,24 @@ struct DualFinderApplication: App {
                 }
                 .keyboardShortcut("t", modifiers: [.command, .option])
                 .disabled(!model.hasActiveSelection)
+
+                Button("Batch Rename...") {
+                    model.requestBatchRenameDialog(on: model.activePaneSide)
+                }
+                .keyboardShortcut("m", modifiers: [.control])
+                .disabled(!model.hasActiveSelection)
+
+                Button("Move Left Selection to Right") {
+                    model.moveSelection(from: .left)
+                }
+                .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
+                .disabled(!model.hasSelection(on: .left))
+
+                Button("Move Right Selection to Left") {
+                    model.moveSelection(from: .right)
+                }
+                .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
+                .disabled(!model.hasSelection(on: .right))
             }
             CommandGroup(after: .pasteboard) {
                 Button("Copy Absolute Path") {

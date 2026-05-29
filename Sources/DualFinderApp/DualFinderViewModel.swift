@@ -8,8 +8,25 @@ struct PathEditRequest: Equatable {
     let side: PaneSide
 }
 
+struct PaneFocusRequest: Equatable {
+    let id = UUID()
+    let requestID: String
+    let side: PaneSide
+    let source: String
+}
+
 struct FolderBookmarkDialogRequest: Identifiable, Equatable {
     let id = UUID()
+}
+
+struct BatchRenameDialogRequest: Identifiable, Equatable {
+    let id = UUID()
+    let side: PaneSide
+}
+
+enum FileClipboardOperation: String {
+    case copy
+    case move
 }
 
 @MainActor
@@ -22,7 +39,9 @@ final class DualFinderViewModel: ObservableObject {
     @Published var diskAccessPrompt: DiskAccessPrompt?
     @Published private(set) var activePaneSide: PaneSide = .left
     @Published var pathEditRequest: PathEditRequest?
+    @Published var paneFocusRequest: PaneFocusRequest?
     @Published var folderBookmarkDialogRequest: FolderBookmarkDialogRequest?
+    @Published var batchRenameDialogRequest: BatchRenameDialogRequest?
     @Published var isInlineRenaming = false
     @Published var showHiddenFiles = false {
         didSet { refreshAll() }
@@ -82,7 +101,11 @@ final class DualFinderViewModel: ObservableObject {
     }
 
     var hasActiveSelection: Bool {
-        !pane(for: activePaneSide).selectedItemURLs.isEmpty
+        hasSelection(on: activePaneSide)
+    }
+
+    func hasSelection(on side: PaneSide) -> Bool {
+        !pane(for: side).selectedItemURLs.isEmpty
     }
 
     func bindingForSelection(side: PaneSide) -> Binding<Set<URL>> {
@@ -105,6 +128,35 @@ final class DualFinderViewModel: ObservableObject {
         activePaneSide = side
     }
 
+    func requestPaneFocus(_ side: PaneSide, requestID: String, source: String) {
+        let previousSide = activePaneSide
+        logger.debug("pane-focus", "switch.requested", metadata: [
+            "requestID": requestID,
+            "from": previousSide.rawValue,
+            "to": side.rawValue,
+            "source": source
+        ])
+
+        activePaneSide = side
+        paneFocusRequest = PaneFocusRequest(requestID: requestID, side: side, source: source)
+
+        logger.info("pane-focus", "switch.applied", metadata: [
+            "requestID": requestID,
+            "from": previousSide.rawValue,
+            "to": side.rawValue,
+            "source": source,
+            "changed": "\(previousSide != side)"
+        ])
+    }
+
+    func logPaneFocusEvent(_ message: String, metadata: [String: String] = [:]) {
+        logger.debug("pane-focus", message, metadata: metadata)
+    }
+
+    func logShortcutEvent(_ message: String, metadata: [String: String] = [:]) {
+        logger.debug("shortcut", message, metadata: metadata)
+    }
+
     func requestPathEditing(on side: PaneSide) {
         activatePane(side)
         pathEditRequest = PathEditRequest(side: side)
@@ -114,6 +166,22 @@ final class DualFinderViewModel: ObservableObject {
         guard !isInlineRenaming else { return }
         activatePane(side)
         folderBookmarkDialogRequest = FolderBookmarkDialogRequest()
+    }
+
+    func requestBatchRenameDialog(on side: PaneSide) {
+        guard !isInlineRenaming else { return }
+        let selectedItems = selectedItems(on: side)
+        guard !selectedItems.isEmpty else {
+            statusMessage = "Select files or folders to rename"
+            return
+        }
+
+        activatePane(side)
+        batchRenameDialogRequest = BatchRenameDialogRequest(side: side)
+        logger.info("batch-rename", "dialog.requested", metadata: [
+            "side": side.rawValue,
+            "count": "\(selectedItems.count)"
+        ])
     }
 
     func folderBookmarkEntries() -> [FolderBookmarkEntry] {
@@ -388,6 +456,114 @@ final class DualFinderViewModel: ObservableObject {
         ])
     }
 
+    func copySelectionToFileClipboard(on side: PaneSide, requestID: String? = nil) {
+        guard !isInlineRenaming else {
+            logger.debug("clipboard", "files.copy.ignored", metadata: metadataWithRequestID([
+                "side": side.rawValue,
+                "reason": "inline-renaming"
+            ], requestID: requestID))
+            return
+        }
+
+        let urls = orderedSelection(pane(for: side).selectedItemURLs, on: side)
+        guard !urls.isEmpty else {
+            logger.debug("clipboard", "files.copy.ignored", metadata: metadataWithRequestID([
+                "side": side.rawValue,
+                "reason": "empty-selection"
+            ], requestID: requestID))
+            return
+        }
+
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        let didWrite = pasteboard.writeObjects(urls.map { $0 as NSURL })
+        guard didWrite else {
+            logger.error("clipboard", "files.copy.failed", metadata: metadataWithRequestID([
+                "side": side.rawValue,
+                "count": "\(urls.count)"
+            ], requestID: requestID))
+            statusMessage = "Failed to copy \(urls.count) item(s)"
+            return
+        }
+
+        statusMessage = "Copied \(urls.count) item(s)"
+        logger.info("clipboard", "files.copied", metadata: metadataWithRequestID([
+            "side": side.rawValue,
+            "count": "\(urls.count)",
+            "sources": urls.map(\.path).joined(separator: "|")
+        ], requestID: requestID))
+    }
+
+    func pasteFileClipboard(into side: PaneSide, operation: FileClipboardOperation, requestID: String? = nil) {
+        guard !isInlineRenaming else {
+            logger.debug("file-operation", "paste.\(operation.rawValue).ignored", metadata: metadataWithRequestID([
+                "side": side.rawValue,
+                "reason": "inline-renaming"
+            ], requestID: requestID))
+            return
+        }
+
+        let sources = fileURLsFromPasteboard()
+        guard !sources.isEmpty else {
+            logger.debug("file-operation", "paste.\(operation.rawValue).ignored", metadata: metadataWithRequestID([
+                "side": side.rawValue,
+                "reason": "empty-file-clipboard"
+            ], requestID: requestID))
+            return
+        }
+
+        let destination = pane(for: side).selectedURL.standardizedFileURL
+        let operableSources: [URL]
+        if operation == .move {
+            operableSources = sources.filter { $0.deletingLastPathComponent().standardizedFileURL != destination }
+            let skippedCount = sources.count - operableSources.count
+            if skippedCount > 0 {
+                logger.debug("file-operation", "paste.move.skipped.same-destination", metadata: metadataWithRequestID([
+                    "side": side.rawValue,
+                    "destination": destination.path,
+                    "count": "\(skippedCount)"
+                ], requestID: requestID))
+            }
+        } else {
+            operableSources = sources
+        }
+
+        guard !operableSources.isEmpty else {
+            statusMessage = "No items to \(operation.rawValue) into this folder"
+            logger.debug("file-operation", "paste.\(operation.rawValue).ignored", metadata: metadataWithRequestID([
+                "side": side.rawValue,
+                "destination": destination.path,
+                "reason": "same-destination"
+            ], requestID: requestID))
+            return
+        }
+
+        logger.info("file-operation", "paste.\(operation.rawValue).requested", metadata: metadataWithRequestID([
+            "side": side.rawValue,
+            "count": "\(operableSources.count)",
+            "destination": destination.path,
+            "sources": operableSources.map(\.path).joined(separator: "|")
+        ], requestID: requestID))
+
+        do {
+            switch operation {
+            case .copy:
+                try operationService.copy(operableSources, to: destination)
+            case .move:
+                try operationService.move(operableSources, to: destination)
+            }
+            refreshAll()
+            statusMessage = "\(operation.rawValue.capitalized) completed: \(operableSources.count) item(s)"
+            logger.info("file-operation", "paste.\(operation.rawValue).completed", metadata: metadataWithRequestID([
+                "side": side.rawValue,
+                "count": "\(operableSources.count)",
+                "destination": destination.path
+            ], requestID: requestID))
+        } catch {
+            reportOperationFailure("paste.\(operation.rawValue).failed", error: error)
+        }
+    }
+
     func openInTerminal(_ urls: Set<URL>, on side: PaneSide) {
         let orderedURLs = orderedSelection(urls, on: side)
         let directories = uniqueDirectories(forTerminal: orderedURLs)
@@ -496,6 +672,38 @@ final class DualFinderViewModel: ObservableObject {
             setSelection([renamed], for: side)
         } catch {
             reportOperationFailure("rename.failed", error: error)
+        }
+    }
+
+    func selectedItems(on side: PaneSide) -> [FileItem] {
+        let selected = pane(for: side).selectedItemURLs
+        return items(for: side).filter { selected.contains($0.url) }
+    }
+
+    func batchRenamePreviews(rule: BatchRenameRule, on side: PaneSide) throws -> [BatchRenamePreview] {
+        try BatchRenamePlanner().previews(for: selectedItems(on: side), rule: rule)
+    }
+
+    func applyBatchRename(_ previews: [BatchRenamePreview], on side: PaneSide) {
+        guard !previews.isEmpty else { return }
+        guard previews.allSatisfy({ $0.status.allowsApply }) else {
+            statusMessage = "Fix preview errors before renaming"
+            return
+        }
+
+        let operations = previews.map { BatchRenameOperation(sourceURL: $0.sourceURL, newName: $0.newName) }
+        do {
+            let renamedURLs = try operationService.batchRename(operations)
+            refresh(side)
+            setSelection(Set(renamedURLs), for: side)
+            let changedCount = previews.filter(\.isChanged).count
+            statusMessage = "Renamed \(changedCount) item(s)"
+            logger.info("batch-rename", "applied", metadata: [
+                "side": side.rawValue,
+                "count": "\(changedCount)"
+            ])
+        } catch {
+            reportOperationFailure("batch-rename.failed", error: error)
         }
     }
 
@@ -614,8 +822,20 @@ final class DualFinderViewModel: ObservableObject {
         body: ([URL], URL) throws -> Void
     ) {
         let sources = Array(pane(for: sourceSide).selectedItemURLs)
-        guard !sources.isEmpty else { return }
+        guard !sources.isEmpty else {
+            logger.debug("file-operation", "\(operationName).ignored.empty-selection", metadata: [
+                "side": sourceSide.rawValue
+            ])
+            return
+        }
+
         let destination = pane(for: opposite(sourceSide)).selectedURL
+        logger.info("file-operation", "\(operationName).selection.requested", metadata: [
+            "count": "\(sources.count)",
+            "destination": destination.path,
+            "side": sourceSide.rawValue
+        ])
+
         do {
             try body(sources, destination)
             clearSelection(sourceSide)
@@ -682,6 +902,27 @@ final class DualFinderViewModel: ObservableObject {
         let itemURLs = items(for: side).map(\.url)
         let ordered = itemURLs.filter { selection.contains($0) }
         return ordered.isEmpty ? Array(selection).sorted { $0.path < $1.path } : ordered
+    }
+
+    private func fileURLsFromPasteboard() -> [URL] {
+        let objects = NSPasteboard.general.readObjects(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]
+        ) ?? []
+
+        return objects.compactMap { object in
+            if let url = object as? URL {
+                return url.standardizedFileURL
+            }
+            return (object as? NSURL)?.filePathURL?.standardizedFileURL
+        }
+    }
+
+    private func metadataWithRequestID(_ metadata: [String: String], requestID: String?) -> [String: String] {
+        guard let requestID else { return metadata }
+        var enriched = metadata
+        enriched["requestID"] = requestID
+        return enriched
     }
 
     private func uniqueDirectories(forTerminal urls: [URL]) -> [URL] {

@@ -19,6 +19,7 @@ public struct FileSystemService {
             .isAliasFileKey,
             .fileSizeKey,
             .contentModificationDateKey,
+            .creationDateKey,
             .isHiddenKey,
             .localizedNameKey,
             .localizedTypeDescriptionKey
@@ -53,6 +54,7 @@ public struct FileSystemService {
             .isAliasFileKey,
             .fileSizeKey,
             .contentModificationDateKey,
+            .creationDateKey,
             .isHiddenKey,
             .localizedNameKey,
             .localizedTypeDescriptionKey
@@ -76,6 +78,7 @@ public struct FileSystemService {
             type: Self.typeDescription(for: itemURL, kind: kind, localizedType: values.localizedTypeDescription),
             size: size,
             modifiedAt: values.contentModificationDate,
+            createdAt: values.creationDate,
             isHidden: values.isHidden ?? false
         )
     }

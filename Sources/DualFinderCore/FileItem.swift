@@ -16,9 +16,19 @@ public struct FileItem: Identifiable, Hashable, Sendable {
     public let type: String
     public let size: Int64?
     public let modifiedAt: Date?
+    public let createdAt: Date?
     public let isHidden: Bool
 
-    public init(url: URL, name: String, kind: FileItemKind, type: String, size: Int64?, modifiedAt: Date?, isHidden: Bool) {
+    public init(
+        url: URL,
+        name: String,
+        kind: FileItemKind,
+        type: String,
+        size: Int64?,
+        modifiedAt: Date?,
+        createdAt: Date? = nil,
+        isHidden: Bool
+    ) {
         self.id = url
         self.url = url
         self.name = name
@@ -26,6 +36,7 @@ public struct FileItem: Identifiable, Hashable, Sendable {
         self.type = type
         self.size = size
         self.modifiedAt = modifiedAt
+        self.createdAt = createdAt
         self.isHidden = isHidden
     }
 

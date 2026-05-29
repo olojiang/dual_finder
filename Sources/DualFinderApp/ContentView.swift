@@ -22,13 +22,26 @@ struct ContentView: View {
             model.requestPathEditing(on: model.activePaneSide)
         } showFolderBookmarks: {
             model.requestFolderBookmarkDialog(on: model.activePaneSide)
+        } showBatchRename: {
+            model.requestBatchRenameDialog(on: model.activePaneSide)
+        } focusPane: { side, requestID in
+            model.requestPaneFocus(side, requestID: requestID, source: "cmd-arrow")
+        } logShortcutEvent: { message, metadata in
+            model.logShortcutEvent(message, metadata: metadata)
         } navigateBack: {
             model.navigateBack(model.activePaneSide)
         } navigateForward: {
             model.navigateForward(model.activePaneSide)
+        } moveLeftSelectionToRight: {
+            model.moveSelection(from: .left)
+        } moveRightSelectionToLeft: {
+            model.moveSelection(from: .right)
         })
         .sheet(item: $model.folderBookmarkDialogRequest) { _ in
             FolderBookmarkDialog(model: model)
+        }
+        .sheet(item: $model.batchRenameDialogRequest) { request in
+            BatchRenameDialog(model: model, side: request.side)
         }
         .alert(item: $model.diskAccessPrompt) { prompt in
             Alert(
@@ -48,15 +61,25 @@ struct ContentView: View {
 private struct AppShortcutHandler: NSViewRepresentable {
     let goToFolder: () -> Void
     let showFolderBookmarks: () -> Void
+    let showBatchRename: () -> Void
+    let focusPane: (PaneSide, String) -> Void
+    let logShortcutEvent: (String, [String: String]) -> Void
     let navigateBack: () -> Void
     let navigateForward: () -> Void
+    let moveLeftSelectionToRight: () -> Void
+    let moveRightSelectionToLeft: () -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
             goToFolder: goToFolder,
             showFolderBookmarks: showFolderBookmarks,
+            showBatchRename: showBatchRename,
+            focusPane: focusPane,
+            logShortcutEvent: logShortcutEvent,
             navigateBack: navigateBack,
-            navigateForward: navigateForward
+            navigateForward: navigateForward,
+            moveLeftSelectionToRight: moveLeftSelectionToRight,
+            moveRightSelectionToLeft: moveRightSelectionToLeft
         )
     }
 
@@ -68,8 +91,13 @@ private struct AppShortcutHandler: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {
         context.coordinator.goToFolder = goToFolder
         context.coordinator.showFolderBookmarks = showFolderBookmarks
+        context.coordinator.showBatchRename = showBatchRename
+        context.coordinator.focusPane = focusPane
+        context.coordinator.logShortcutEvent = logShortcutEvent
         context.coordinator.navigateBack = navigateBack
         context.coordinator.navigateForward = navigateForward
+        context.coordinator.moveLeftSelectionToRight = moveLeftSelectionToRight
+        context.coordinator.moveRightSelectionToLeft = moveRightSelectionToLeft
     }
 
     static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
@@ -79,20 +107,35 @@ private struct AppShortcutHandler: NSViewRepresentable {
     final class Coordinator {
         var goToFolder: () -> Void
         var showFolderBookmarks: () -> Void
+        var showBatchRename: () -> Void
+        var focusPane: (PaneSide, String) -> Void
+        var logShortcutEvent: (String, [String: String]) -> Void
         var navigateBack: () -> Void
         var navigateForward: () -> Void
+        var moveLeftSelectionToRight: () -> Void
+        var moveRightSelectionToLeft: () -> Void
         private var monitor: Any?
 
         init(
             goToFolder: @escaping () -> Void,
             showFolderBookmarks: @escaping () -> Void,
+            showBatchRename: @escaping () -> Void,
+            focusPane: @escaping (PaneSide, String) -> Void,
+            logShortcutEvent: @escaping (String, [String: String]) -> Void,
             navigateBack: @escaping () -> Void,
-            navigateForward: @escaping () -> Void
+            navigateForward: @escaping () -> Void,
+            moveLeftSelectionToRight: @escaping () -> Void,
+            moveRightSelectionToLeft: @escaping () -> Void
         ) {
             self.goToFolder = goToFolder
             self.showFolderBookmarks = showFolderBookmarks
+            self.showBatchRename = showBatchRename
+            self.focusPane = focusPane
+            self.logShortcutEvent = logShortcutEvent
             self.navigateBack = navigateBack
             self.navigateForward = navigateForward
+            self.moveLeftSelectionToRight = moveLeftSelectionToRight
+            self.moveRightSelectionToLeft = moveRightSelectionToLeft
         }
 
         func install() {
@@ -109,6 +152,21 @@ private struct AppShortcutHandler: NSViewRepresentable {
                     return nil
                 }
 
+                if Self.isBatchRenameShortcut(event) {
+                    self?.showBatchRename()
+                    return nil
+                }
+
+                if Self.isFocusLeftPaneShortcut(event) {
+                    self?.handlePaneFocusShortcut(event, target: .left)
+                    return nil
+                }
+
+                if Self.isFocusRightPaneShortcut(event) {
+                    self?.handlePaneFocusShortcut(event, target: .right)
+                    return nil
+                }
+
                 if Self.isNavigateBackShortcut(event) {
                     self?.navigateBack()
                     return nil
@@ -119,8 +177,30 @@ private struct AppShortcutHandler: NSViewRepresentable {
                     return nil
                 }
 
+                if Self.isMoveLeftSelectionToRightShortcut(event) {
+                    self?.moveLeftSelectionToRight()
+                    return nil
+                }
+
+                if Self.isMoveRightSelectionToLeftShortcut(event) {
+                    self?.moveRightSelectionToLeft()
+                    return nil
+                }
+
                 return event
             }
+        }
+
+        private func handlePaneFocusShortcut(_ event: NSEvent, target: PaneSide) {
+            let requestID = UUID().uuidString
+            logShortcutEvent("key-down", [
+                "requestID": requestID,
+                "target": target.rawValue,
+                "keyCode": "\(event.keyCode)",
+                "characters": event.charactersIgnoringModifiers ?? "",
+                "modifiers": Self.modifierDescription(for: event)
+            ])
+            focusPane(target, requestID)
         }
 
         func remove() {
@@ -147,6 +227,12 @@ private struct AppShortcutHandler: NSViewRepresentable {
                 && event.charactersIgnoringModifiers?.lowercased() == "d"
         }
 
+        private static func isBatchRenameShortcut(_ event: NSEvent) -> Bool {
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            return flags == .control
+                && event.charactersIgnoringModifiers?.lowercased() == "m"
+        }
+
         private static func isNavigateBackShortcut(_ event: NSEvent) -> Bool {
             isControlShortcut(event, character: "[", keyCode: 33)
         }
@@ -155,10 +241,47 @@ private struct AppShortcutHandler: NSViewRepresentable {
             isControlShortcut(event, character: "]", keyCode: 30)
         }
 
+        private static func isFocusLeftPaneShortcut(_ event: NSEvent) -> Bool {
+            isCommandArrowShortcut(event, keyCode: 123)
+        }
+
+        private static func isFocusRightPaneShortcut(_ event: NSEvent) -> Bool {
+            isCommandArrowShortcut(event, keyCode: 124)
+        }
+
+        private static func isMoveLeftSelectionToRightShortcut(_ event: NSEvent) -> Bool {
+            isCommandOptionArrowShortcut(event, keyCode: 124)
+        }
+
+        private static func isMoveRightSelectionToLeftShortcut(_ event: NSEvent) -> Bool {
+            isCommandOptionArrowShortcut(event, keyCode: 123)
+        }
+
         private static func isControlShortcut(_ event: NSEvent, character: String, keyCode: UInt16) -> Bool {
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             return flags == .control
                 && (event.charactersIgnoringModifiers == character || event.keyCode == keyCode)
+        }
+
+        private static func isCommandOptionArrowShortcut(_ event: NSEvent, keyCode: UInt16) -> Bool {
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            return flags == [.command, .option] && event.keyCode == keyCode
+        }
+
+        private static func isCommandArrowShortcut(_ event: NSEvent, keyCode: UInt16) -> Bool {
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            return flags == .command && event.keyCode == keyCode
+        }
+
+        private static func modifierDescription(for event: NSEvent) -> String {
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            var names: [String] = []
+            if flags.contains(.command) { names.append("command") }
+            if flags.contains(.option) { names.append("option") }
+            if flags.contains(.control) { names.append("control") }
+            if flags.contains(.shift) { names.append("shift") }
+            if flags.contains(.capsLock) { names.append("capsLock") }
+            return names.joined(separator: "+")
         }
     }
 }

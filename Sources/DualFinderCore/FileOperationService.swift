@@ -80,6 +80,44 @@ public struct FileOperationService {
         return standardizedDestination
     }
 
+    public func batchRename(_ operations: [BatchRenameOperation]) throws -> [URL] {
+        let changes = try validatedBatchRenameChanges(operations)
+        guard !changes.isEmpty else {
+            logger?.info("file-operation", "batch-rename.noop")
+            return operations.map(\.sourceURL.standardizedFileURL)
+        }
+
+        logger?.info("file-operation", "batch-rename.started", metadata: [
+            "count": "\(changes.count)",
+            "sources": changes.map { $0.source.path }.joined(separator: "|")
+        ])
+
+        var staged: [(temporary: URL, destination: URL, original: URL)] = []
+        do {
+            for change in changes {
+                let temporary = uniqueTemporaryRenameURL(in: change.source.deletingLastPathComponent())
+                try fileManager.moveItem(at: change.source, to: temporary)
+                staged.append((temporary, change.destination, change.source))
+            }
+
+            for item in staged {
+                try fileManager.moveItem(at: item.temporary, to: item.destination)
+                logger?.info("file-operation", "batch-rename.item.completed", metadata: [
+                    "source": item.original.path,
+                    "destination": item.destination.path
+                ])
+            }
+        } catch {
+            rollback(staged)
+            throw error
+        }
+
+        logger?.info("file-operation", "batch-rename.completed", metadata: [
+            "count": "\(changes.count)"
+        ])
+        return operations.map(\.destinationURL)
+    }
+
     public func trash(_ sources: [URL]) throws {
         logger?.info("file-operation", "trash.started", metadata: ["count": "\(sources.count)"])
         for source in sources {
@@ -131,6 +169,62 @@ public struct FileOperationService {
             index += 1
         }
         return destination
+    }
+
+    private func validatedBatchRenameChanges(_ operations: [BatchRenameOperation]) throws -> [(source: URL, destination: URL)] {
+        var destinationPaths = Set<String>()
+        let changes = try operations.compactMap { operation -> (source: URL, destination: URL)? in
+            let newName = operation.newName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !newName.isEmpty else {
+                throw BatchRenameError.emptyName(operation.sourceURL)
+            }
+            guard newName.rangeOfCharacter(from: CharacterSet(charactersIn: "/:")) == nil else {
+                throw BatchRenameError.invalidName(operation.newName)
+            }
+
+            let source = operation.sourceURL.standardizedFileURL
+            let destination = operation.destinationURL.standardizedFileURL
+            guard source != destination else { return nil }
+            guard destinationPaths.insert(destination.path).inserted else {
+                throw BatchRenameError.duplicateDestination(destination)
+            }
+            return (source, destination)
+        }
+
+        let changedSourcePaths = Set(changes.map(\.source.path))
+        for change in changes where fileManager.fileExists(atPath: change.destination.path) {
+            guard changedSourcePaths.contains(change.destination.path) else {
+                throw BatchRenameError.destinationExists(change.destination)
+            }
+        }
+
+        return changes
+    }
+
+    private func uniqueTemporaryRenameURL(in directory: URL) -> URL {
+        var destination: URL
+        repeat {
+            destination = directory.appendingPathComponent(".dualfinder-rename-\(UUID().uuidString).tmp")
+        } while fileManager.fileExists(atPath: destination.path)
+        return destination
+    }
+
+    private func rollback(_ staged: [(temporary: URL, destination: URL, original: URL)]) {
+        for item in staged.reversed() where fileManager.fileExists(atPath: item.temporary.path) {
+            do {
+                if fileManager.fileExists(atPath: item.original.path) {
+                    try fileManager.removeItem(at: item.temporary)
+                } else {
+                    try fileManager.moveItem(at: item.temporary, to: item.original)
+                }
+            } catch {
+                logger?.error("file-operation", "batch-rename.rollback.failed", metadata: [
+                    "temporary": item.temporary.path,
+                    "original": item.original.path,
+                    "error": error.localizedDescription
+                ])
+            }
+        }
     }
 
     private func operationMetadata(_ sources: [URL], _ destination: URL) -> [String: String] {

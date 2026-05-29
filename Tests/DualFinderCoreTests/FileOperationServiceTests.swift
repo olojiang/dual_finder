@@ -89,6 +89,24 @@ struct FileOperationServiceTests {
         #expect(FileManager.default.fileExists(atPath: source.path))
     }
 
+    @Test("batch renames through temporary names so items can swap")
+    func batchRenamesSwappingItems() throws {
+        let root = try TemporaryDirectory()
+        let first = root.url.appendingPathComponent("first.txt")
+        let second = root.url.appendingPathComponent("second.txt")
+        try "one".write(to: first, atomically: true, encoding: .utf8)
+        try "two".write(to: second, atomically: true, encoding: .utf8)
+
+        let results = try FileOperationService(logger: CapturingLogger()).batchRename([
+            BatchRenameOperation(sourceURL: first, newName: "second.txt"),
+            BatchRenameOperation(sourceURL: second, newName: "first.txt")
+        ])
+
+        #expect(results.map(\.lastPathComponent) == ["second.txt", "first.txt"])
+        #expect(try String(contentsOf: root.url.appendingPathComponent("first.txt"), encoding: .utf8) == "two")
+        #expect(try String(contentsOf: root.url.appendingPathComponent("second.txt"), encoding: .utf8) == "one")
+    }
+
     @Test("empties trash directory contents")
     func emptiesTrashDirectoryContents() throws {
         let root = try TemporaryDirectory()
