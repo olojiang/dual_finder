@@ -118,8 +118,8 @@ public struct BatchRenamePlanner {
         switch rule {
         case let .numbering(prefix, suffix, start, padding, includeOriginalName):
             let number = paddedNumber(start + offset, padding: padding)
-            let base = baseName(for: item.name)
-            let ext = extensionWithDot(for: item.name)
+            let base = FileNameUtilities.baseName(for: item.name)
+            let ext = FileNameUtilities.extensionWithDot(for: item.name)
             if includeOriginalName {
                 return "\(prefix)\(number)_\(base)\(suffix)\(ext)"
             }
@@ -141,8 +141,8 @@ public struct BatchRenamePlanner {
             }
 
         case let .changeExtension(newExtension):
-            let normalizedExtension = newExtension.trimmingCharacters(in: CharacterSet(charactersIn: ". "))
-            let base = baseName(for: item.name)
+            let normalizedExtension = FileNameUtilities.normalizedExtension(newExtension)
+            let base = FileNameUtilities.baseName(for: item.name)
             return normalizedExtension.isEmpty ? base : "\(base).\(normalizedExtension)"
 
         case let .metadataTemplate(template):
@@ -151,9 +151,8 @@ public struct BatchRenamePlanner {
     }
 
     private func initialStatus(for source: URL, destination: URL, newName: String) -> BatchRenamePreviewStatus {
-        let trimmedName = newName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedName.isEmpty else { return .emptyName }
-        guard trimmedName.rangeOfCharacter(from: CharacterSet(charactersIn: "/:")) == nil else { return .invalidName }
+        guard !FileNameUtilities.isBlank(newName) else { return .emptyName }
+        guard !FileNameUtilities.containsInvalidPathComponentCharacters(newName) else { return .invalidName }
 
         return source.standardizedFileURL == destination.standardizedFileURL ? .unchanged : .ready
     }
@@ -183,9 +182,9 @@ public struct BatchRenamePlanner {
         let replacements = [
             "{index}": String(offset + 1),
             "{name}": item.name,
-            "{base}": baseName(for: item.name),
-            "{ext}": extensionName(for: item.name),
-            "{extWithDot}": extensionWithDot(for: item.name),
+            "{base}": FileNameUtilities.baseName(for: item.name),
+            "{ext}": FileNameUtilities.extensionName(for: item.name),
+            "{extWithDot}": FileNameUtilities.extensionWithDot(for: item.name),
             "{date}": formattedDate(item.modifiedAt),
             "{time}": formattedTime(item.modifiedAt),
             "{modifiedDate}": formattedDate(item.modifiedAt),
@@ -206,19 +205,6 @@ public struct BatchRenamePlanner {
         let width = max(0, padding)
         guard width > 0 else { return String(value) }
         return String(format: "%0\(width)d", value)
-    }
-
-    private func baseName(for name: String) -> String {
-        (name as NSString).deletingPathExtension
-    }
-
-    private func extensionName(for name: String) -> String {
-        (name as NSString).pathExtension
-    }
-
-    private func extensionWithDot(for name: String) -> String {
-        let ext = extensionName(for: name)
-        return ext.isEmpty ? "" : ".\(ext)"
     }
 
     private func formattedDate(_ date: Date?) -> String {

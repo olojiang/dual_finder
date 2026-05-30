@@ -53,6 +53,42 @@ struct FileSystemServiceTests {
         #expect(descending.map(\.name) == ["large.txt", "small.txt"])
     }
 
+    @Test("sorts by type and falls back to names")
+    func sortsByTypeAndFallsBackToNames() throws {
+        let root = try TemporaryDirectory()
+        try "text".write(to: root.url.appendingPathComponent("beta.txt"), atomically: true, encoding: .utf8)
+        try "markdown".write(to: root.url.appendingPathComponent("alpha.md"), atomically: true, encoding: .utf8)
+        try "more text".write(to: root.url.appendingPathComponent("alpha.txt"), atomically: true, encoding: .utf8)
+
+        let items = try FileSystemService().contents(
+            of: root.url,
+            sortRule: FileSortRule(field: .type, direction: .ascending)
+        )
+
+        #expect(items.map(\.name) == ["alpha.md", "alpha.txt", "beta.txt"])
+    }
+
+    @Test("hides dot files unless hidden files are included")
+    func hidesDotFilesUnlessIncluded() throws {
+        let root = try TemporaryDirectory()
+        try "visible".write(to: root.url.appendingPathComponent("visible.txt"), atomically: true, encoding: .utf8)
+        try "hidden".write(to: root.url.appendingPathComponent(".hidden.txt"), atomically: true, encoding: .utf8)
+
+        let visibleOnly = try FileSystemService().contents(of: root.url)
+        let includingHidden = try FileSystemService().contents(of: root.url, includeHidden: true)
+
+        #expect(visibleOnly.map(\.name) == ["visible.txt"])
+        #expect(includingHidden.map(\.name).contains(".hidden.txt"))
+    }
+
+    @Test("returns nil parent for filesystem root")
+    func returnsNilParentForFilesystemRoot() {
+        let service = FileSystemService()
+
+        #expect(service.parent(of: URL(fileURLWithPath: "/")) == nil)
+        #expect(service.parent(of: URL(fileURLWithPath: "/tmp/example")) == URL(fileURLWithPath: "/tmp"))
+    }
+
     @Test("uses valid cached folder sizes and invalidates changed modification dates")
     func usesFolderSizeCache() throws {
         let root = try TemporaryDirectory()
@@ -73,6 +109,28 @@ struct FileSystemServiceTests {
         try setModificationDate(changedDate, for: folder)
         items = try FileSystemService().contents(of: root.url, folderSizeCache: cache)
         #expect(items.first?.size == nil)
+    }
+
+    @Test("computes folder sizes while ignoring symbolic links")
+    func computesFolderSizeIgnoringSymbolicLinks() throws {
+        let root = try TemporaryDirectory()
+        let cacheURL = root.url.appendingPathComponent("cache.json")
+        let folder = root.url.appendingPathComponent("Folder")
+        let nested = folder.appendingPathComponent("Nested")
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        try Data(repeating: 1, count: 5).write(to: folder.appendingPathComponent("a.bin"))
+        try Data(repeating: 2, count: 7).write(to: nested.appendingPathComponent("b.bin"))
+        try FileManager.default.createSymbolicLink(
+            at: folder.appendingPathComponent("linked.bin"),
+            withDestinationURL: nested.appendingPathComponent("b.bin")
+        )
+        let cache = FolderSizeCache(storageURL: cacheURL)
+
+        let first = try FileSystemService().calculateFolderSize(at: folder, cache: cache)
+        let second = try FileSystemService().calculateFolderSize(at: folder, cache: cache)
+
+        #expect(first == .computed(12))
+        #expect(second == .cached(12))
     }
 
     private func setModificationDate(_ date: Date, for url: URL) throws {

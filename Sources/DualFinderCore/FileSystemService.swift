@@ -2,6 +2,23 @@ import Foundation
 
 public struct FileSystemService {
     private let fileManager: FileManager
+    private static let itemResourceKeys: Set<URLResourceKey> = [
+        .isDirectoryKey,
+        .isPackageKey,
+        .isAliasFileKey,
+        .fileSizeKey,
+        .contentModificationDateKey,
+        .creationDateKey,
+        .isHiddenKey,
+        .localizedNameKey,
+        .localizedTypeDescriptionKey
+    ]
+    private static let folderSizeResourceKeys: [URLResourceKey] = [
+        .isRegularFileKey,
+        .fileSizeKey,
+        .isDirectoryKey,
+        .isSymbolicLinkKey
+    ]
 
     public init(fileManager: FileManager = .default) {
         self.fileManager = fileManager
@@ -13,26 +30,21 @@ public struct FileSystemService {
         sortRule: FileSortRule = FileSortRule(),
         folderSizeCache: FolderSizeCache? = nil
     ) throws -> [FileItem] {
-        let keys: Set<URLResourceKey> = [
-            .isDirectoryKey,
-            .isPackageKey,
-            .isAliasFileKey,
-            .fileSizeKey,
-            .contentModificationDateKey,
-            .creationDateKey,
-            .isHiddenKey,
-            .localizedNameKey,
-            .localizedTypeDescriptionKey
-        ]
         let options: FileManager.DirectoryEnumerationOptions = includeHidden ? [] : [.skipsHiddenFiles]
-        let urls = try fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: Array(keys), options: options)
+        let urls = try fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: Array(Self.itemResourceKeys),
+            options: options
+        )
         return try urls.map { try item(for: $0, folderSizeCache: folderSizeCache) }
             .sorted { FileSystemService.sortItems($0, $1, rule: sortRule) }
     }
 
     public func parent(of url: URL) -> URL? {
-        let parent = url.deletingLastPathComponent()
-        return parent.path == url.path ? nil : parent
+        let item = url.standardizedFileURL
+        guard item.path != "/" else { return nil }
+        let parent = item.deletingLastPathComponent().standardizedFileURL
+        return parent.path == item.path ? nil : parent
     }
 
     public func calculateFolderSize(at folder: URL, cache: FolderSizeCache = FolderSizeCache()) throws -> FolderSizeResolution {
@@ -48,17 +60,7 @@ public struct FileSystemService {
 
     private func item(for url: URL, folderSizeCache: FolderSizeCache?) throws -> FileItem {
         let itemURL = url.standardizedFileURL
-        let values = try url.resourceValues(forKeys: [
-            .isDirectoryKey,
-            .isPackageKey,
-            .isAliasFileKey,
-            .fileSizeKey,
-            .contentModificationDateKey,
-            .creationDateKey,
-            .isHiddenKey,
-            .localizedNameKey,
-            .localizedTypeDescriptionKey
-        ])
+        let values = try url.resourceValues(forKeys: Self.itemResourceKeys)
         let kind: FileItemKind
         if values.isAliasFile == true {
             kind = .alias
@@ -84,11 +86,10 @@ public struct FileSystemService {
     }
 
     private func recursiveSize(of folder: URL) throws -> Int64 {
-        let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey, .isDirectoryKey, .isSymbolicLinkKey]
         let options: FileManager.DirectoryEnumerationOptions = []
         guard let enumerator = fileManager.enumerator(
             at: folder,
-            includingPropertiesForKeys: keys,
+            includingPropertiesForKeys: Self.folderSizeResourceKeys,
             options: options
         ) else {
             return 0
@@ -96,7 +97,7 @@ public struct FileSystemService {
 
         var total: Int64 = 0
         for case let url as URL in enumerator {
-            guard let values = try? url.resourceValues(forKeys: Set(keys)) else { continue }
+            guard let values = try? url.resourceValues(forKeys: Set(Self.folderSizeResourceKeys)) else { continue }
             guard values.isSymbolicLink != true else { continue }
             if values.isRegularFile == true {
                 total += Int64(values.fileSize ?? 0)

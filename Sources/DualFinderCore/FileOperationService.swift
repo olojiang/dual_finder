@@ -103,7 +103,7 @@ public struct FileOperationService {
     }
 
     public func createEmptyFile(named name: String, in directory: URL) throws -> URL {
-        guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        guard !FileNameUtilities.isBlank(name) else {
             throw FileOperationError.emptyName
         }
 
@@ -114,7 +114,7 @@ public struct FileOperationService {
     }
 
     public func rename(_ source: URL, to newName: String) throws -> URL {
-        guard !newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        guard !FileNameUtilities.isBlank(newName) else {
             throw FileOperationError.emptyName
         }
 
@@ -384,12 +384,9 @@ public struct FileOperationService {
             return destination
         }
 
-        let base = (name as NSString).deletingPathExtension
-        let ext = (name as NSString).pathExtension
         var index = 2
         while fileManager.fileExists(atPath: destination.path) {
-            let candidate = ext.isEmpty ? "\(base) \(index)" : "\(base) \(index).\(ext)"
-            destination = directory.appendingPathComponent(candidate)
+            destination = directory.appendingPathComponent(FileNameUtilities.numberedCopyName(for: name, index: index))
             index += 1
         }
         return destination
@@ -398,11 +395,10 @@ public struct FileOperationService {
     private func validatedBatchRenameChanges(_ operations: [BatchRenameOperation]) throws -> [(source: URL, destination: URL)] {
         var destinationPaths = Set<String>()
         let changes = try operations.compactMap { operation -> (source: URL, destination: URL)? in
-            let newName = operation.newName.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !newName.isEmpty else {
+            guard !FileNameUtilities.isBlank(operation.newName) else {
                 throw BatchRenameError.emptyName(operation.sourceURL)
             }
-            guard newName.rangeOfCharacter(from: CharacterSet(charactersIn: "/:")) == nil else {
+            guard !FileNameUtilities.containsInvalidPathComponentCharacters(operation.newName) else {
                 throw BatchRenameError.invalidName(operation.newName)
             }
 
