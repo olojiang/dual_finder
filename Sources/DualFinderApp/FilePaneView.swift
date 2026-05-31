@@ -134,10 +134,75 @@ struct FilePaneView: View {
                     }
                     .buttonStyle(.plain)
                     .help(tab.url.path)
+                    .contextMenu {
+                        pathAndTerminalContextMenuItems(for: Set([tab.url]), selectTabID: tab.id)
+                        favoriteContextMenuItems(for: Set([tab.url]))
+                    }
                 }
             }
             .padding(.horizontal, 8)
             .padding(.bottom, 6)
+        }
+    }
+
+    @ViewBuilder
+    private func pathAndTerminalContextMenuItems(for urls: Set<URL>, selectTabID: UUID? = nil) -> some View {
+        Button("Copy Absolute Path") {
+            if let selectTabID {
+                model.selectTab(selectTabID, on: side)
+            }
+            model.copyAbsolutePaths(urls, on: side)
+        }
+        Button("Open in Ghostty or Terminal") {
+            if let selectTabID {
+                model.selectTab(selectTabID, on: side)
+            }
+            model.openInTerminal(urls, on: side)
+        }
+    }
+
+    @ViewBuilder
+    private func favoriteContextMenuItems(for selection: Set<URL>) -> some View {
+        let newFavorites = model.selectedDirectoryURLs(in: selection, on: side)
+            .filter { !model.isFolderFavorite($0) }
+
+        if newFavorites.count == 1, let folder = newFavorites.first {
+            Button("Add to Favorite") {
+                model.addFolderToFavorites(folder)
+            }
+        } else if newFavorites.count > 1 {
+            Button("Add \(newFavorites.count) Folders to Favorites") {
+                for folder in newFavorites {
+                    model.addFolderToFavorites(folder)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func archiveContextMenuItems(for selection: Set<URL>) -> some View {
+        let ordered = model.orderedContextMenuURLs(selection, on: side)
+        if ArchiveService.canCompress(ordered) {
+            Button("Compress to ZIP") {
+                model.compressSelectionToZip(on: side)
+            }
+        }
+
+        let archives = ArchiveService.extractableArchives(from: ordered)
+        if !archives.isEmpty {
+            Button("Extract Here") {
+                model.extractArchiveSelection(on: side, mode: .currentDirectory)
+            }
+            if archives.count == 1, let archive = archives.first {
+                let folderName = model.extractionSubfolderLabel(for: archive)
+                Button("Extract to \"\(folderName)\"") {
+                    model.extractArchiveSelection(on: side, mode: .namedSubfolder)
+                }
+            } else {
+                Button("Extract to Subfolder(s)") {
+                    model.extractArchiveSelection(on: side, mode: .namedSubfolder)
+                }
+            }
         }
     }
 
@@ -274,8 +339,9 @@ struct FilePaneView: View {
                         }
                     }
                     .contextMenu(forSelectionType: URL.self) { selection in
-                        Button("Copy Absolute Path") { model.copyAbsolutePaths(selection, on: side) }
-                        Button("Open in Ghostty or Terminal") { model.openInTerminal(selection, on: side) }
+                        pathAndTerminalContextMenuItems(for: selection)
+                        archiveContextMenuItems(for: selection)
+                        favoriteContextMenuItems(for: selection)
                         Divider()
                         Button("Batch Rename...") { model.requestBatchRenameDialog(on: side) }
                         Button("Copy to Other Pane") { model.copySelection(from: side) }

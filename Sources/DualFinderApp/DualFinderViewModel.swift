@@ -57,6 +57,7 @@ final class DualFinderViewModel: ObservableObject {
     @Published private(set) var globalSearchResults: [RecursiveFileSearchResult] = []
     @Published private(set) var isGlobalSearchRunning = false
     @Published var isInlineRenaming = false
+    @Published private(set) var folderBookmarkRevision = 0
     @Published var showHiddenFiles = false {
         didSet { refreshAll() }
     }
@@ -75,6 +76,8 @@ final class DualFinderViewModel: ObservableObject {
     private var isProcessingFileOperations = false
     private var activeConflictAnswerBox: FileConflictAnswerBox?
     private var globalSearchCancellation: FileOperationCancellation?
+    private var archiveCancellation: FileOperationCancellation?
+    private var isArchiveOperationRunning = false
 
     init(
         initialURL: URL = FileManager.default.homeDirectoryForCurrentUser,
@@ -273,18 +276,32 @@ final class DualFinderViewModel: ObservableObject {
         logger.debug("drag-drop", message, metadata: metadata)
     }
 
-    func addActiveFolderToFavorites() {
-        let url = pane(for: activePaneSide).selectedURL
+    func isFolderFavorite(_ url: URL) -> Bool {
+        folderBookmarkStore.isFavorite(url)
+    }
+
+    func selectedDirectoryURLs(in selection: Set<URL>, on side: PaneSide) -> [URL] {
+        items(for: side)
+            .filter { selection.contains($0.url) && $0.isDirectoryLike }
+            .map(\.url)
+    }
+
+    func addFolderToFavorites(_ url: URL) {
         folderBookmarkStore.addFavorite(url)
+        folderBookmarkRevision += 1
         statusMessage = "Added favorite: \(url.path)"
         logger.info("folder-bookmark", "favorite.added", metadata: [
-            "side": activePaneSide.rawValue,
             "path": url.path
         ])
     }
 
+    func addActiveFolderToFavorites() {
+        addFolderToFavorites(pane(for: activePaneSide).selectedURL)
+    }
+
     func removeFolderFavorite(_ url: URL) {
         folderBookmarkStore.removeFavorite(url)
+        folderBookmarkRevision += 1
         statusMessage = "Removed favorite: \(url.path)"
         logger.info("folder-bookmark", "favorite.removed", metadata: [
             "path": url.path
@@ -1040,6 +1057,75 @@ final class DualFinderViewModel: ObservableObject {
             statusMessage = "Emptied Trash: \(removedCount) item(s)"
         } catch {
             reportOperationFailure("trash.empty.failed", error: error)
+        }
+    }
+
+    func compressSelectionToZip(on side: PaneSide) {
+        let sources = orderedSelection(pane(for: side).selectedItemURLs, on: side)
+        guard !sources.isEmpty else { return }
+        runArchiveOperation(label: "Compressing to ZIP", sources: sources, mode: nil)
+    }
+
+    func extractArchiveSelection(on side: PaneSide, mode: ArchiveExtractionMode) {
+        let archives = orderedSelection(pane(for: side).selectedItemURLs, on: side)
+        guard !archives.isEmpty else { return }
+        let label = mode == .currentDirectory ? "Extracting here" : "Extracting to subfolder"
+        runArchiveOperation(label: label, sources: archives, mode: mode)
+    }
+
+    func extractionSubfolderLabel(for url: URL) -> String {
+        ArchiveFormatDetector.extractionFolderName(for: url)
+    }
+
+    func orderedContextMenuURLs(_ selection: Set<URL>, on side: PaneSide) -> [URL] {
+        orderedSelection(selection, on: side)
+    }
+
+    private func runArchiveOperation(
+        label: String,
+        sources: [URL],
+        mode: ArchiveExtractionMode?
+    ) {
+        guard !isInlineRenaming, !isArchiveOperationRunning else { return }
+
+        let cancellation = FileOperationCancellation()
+        archiveCancellation = cancellation
+        isArchiveOperationRunning = true
+        statusMessage = "\(label)..."
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let service = ArchiveService(logger: nil)
+            do {
+                let successMessage: String
+                if let mode {
+                    try service.extract(archives: sources, mode: mode, cancellation: cancellation)
+                    successMessage = mode == .currentDirectory
+                        ? "Extracted archive(s) to current folder"
+                        : "Extracted archive(s) to subfolder(s)"
+                } else {
+                    let created = try service.compressToZip(sources: sources, cancellation: cancellation)
+                    successMessage = "Created archive: \(created.lastPathComponent)"
+                }
+
+                DispatchQueue.main.async {
+                    self.isArchiveOperationRunning = false
+                    self.archiveCancellation = nil
+                    self.refreshAll()
+                    self.statusMessage = successMessage
+                }
+            } catch ArchiveError.cancelled {
+                DispatchQueue.main.async {
+                    self.isArchiveOperationRunning = false
+                    self.archiveCancellation = nil
+                    self.statusMessage = "Archive operation cancelled"
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.isArchiveOperationRunning = false
+                    self.archiveCancellation = nil
+                    self.reportOperationFailure("archive.failed", error: error)
+                }
+            }
         }
     }
 

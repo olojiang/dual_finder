@@ -98,11 +98,13 @@ private struct CommonLocationsSidebar: View {
     @ObservedObject var model: DualFinderViewModel
 
     private var favorites: [FolderBookmarkEntry] {
-        model.folderBookmarkEntries().filter(\.isFavorite)
+        _ = model.folderBookmarkRevision
+        return model.folderBookmarkEntries().filter(\.isFavorite)
     }
 
     private var recents: [FolderBookmarkEntry] {
-        Array(model.folderBookmarkEntries().filter { !$0.isFavorite }.prefix(8))
+        _ = model.folderBookmarkRevision
+        return Array(model.folderBookmarkEntries().filter { !$0.isFavorite }.prefix(8))
     }
 
     var body: some View {
@@ -174,32 +176,66 @@ private struct CommonLocationRow: View {
     let isActive: Bool
     let open: () -> Void
     let removeFavorite: () -> Void
+    @State private var isRemoveConfirmationPresented = false
 
     var body: some View {
-        Button(action: open) {
-            HStack(spacing: 8) {
-                Image(systemName: iconName)
-                    .foregroundStyle(entry.isFavorite ? Color.accentColor : Color.secondary)
-                    .frame(width: 18)
-                Text(displayName)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer(minLength: 0)
-            }
-            .font(.callout)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-            .background(isActive ? Color.accentColor.opacity(0.18) : Color.clear)
-            .clipShape(RoundedRectangle(cornerRadius: 6))
+        HStack(spacing: 8) {
+            favoriteStarButton
+            rowLabel
         }
-        .buttonStyle(.plain)
+        .font(.callout)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(isActive ? Color.accentColor.opacity(0.18) : Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .contentShape(Rectangle())
+        .onTapGesture(perform: open)
         .help(entry.url.path)
         .contextMenu {
             if entry.isFavorite {
-                Button("Remove Favorite", action: removeFavorite)
+                Button("Remove Favorite") {
+                    isRemoveConfirmationPresented = true
+                }
             }
+        }
+        .confirmationDialog(
+            "Remove from Favorites?",
+            isPresented: $isRemoveConfirmationPresented,
+            titleVisibility: .visible
+        ) {
+            Button("Remove", role: .destructive, action: removeFavorite)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Remove \"\(displayName)\" from your favorites?")
+        }
+    }
+
+    @ViewBuilder
+    private var favoriteStarButton: some View {
+        if entry.isFavorite {
+            Button {
+                isRemoveConfirmationPresented = true
+            } label: {
+                Image(systemName: "star.fill")
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 18)
+            }
+            .buttonStyle(.plain)
+            .help("Remove from favorites")
+        } else {
+            Image(systemName: iconName)
+                .foregroundStyle(Color.secondary)
+                .frame(width: 18)
+        }
+    }
+
+    private var rowLabel: some View {
+        HStack(spacing: 8) {
+            Text(displayName)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 0)
         }
     }
 
@@ -983,6 +1019,9 @@ private struct FolderBookmarkDialog: View {
                 "filteredCount": "\(filteredEntries.count)",
                 "selectedIndex": "\(selectedIndex)"
             ])
+        }
+        .onChange(of: model.folderBookmarkRevision) { _, _ in
+            reloadEntries(selecting: selectedEntry?.url)
         }
     }
 

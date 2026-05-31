@@ -41,6 +41,21 @@ struct FolderBookmarkStoreTests {
         ])
     }
 
+    @Test("isFavorite reports membership using normalized paths")
+    func isFavoriteReportsMembership() {
+        let suiteName = "FolderBookmarkStoreTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = FolderBookmarkStore(defaults: defaults)
+        let folder = URL(fileURLWithPath: "/tmp/favorite")
+        let aliased = URL(fileURLWithPath: "/tmp/favorite/.")
+
+        #expect(store.isFavorite(folder) == false)
+        store.addFavorite(folder)
+        #expect(store.isFavorite(folder))
+        #expect(store.isFavorite(aliased))
+    }
+
     @Test("removing a favorite keeps it as a recent folder")
     func removingFavoriteKeepsRecentFolder() {
         let suiteName = "FolderBookmarkStoreTests-\(UUID().uuidString)"

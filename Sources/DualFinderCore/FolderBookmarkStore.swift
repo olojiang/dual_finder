@@ -63,6 +63,11 @@ public final class FolderBookmarkStore {
         save(snapshot)
     }
 
+    public func isFavorite(_ url: URL) -> Bool {
+        let path = normalizedPath(for: url)
+        return loadSnapshot().favoritePaths.contains(path)
+    }
+
     public func removeFavorite(_ url: URL) {
         var snapshot = loadSnapshot()
         let path = normalizedPath(for: url)
