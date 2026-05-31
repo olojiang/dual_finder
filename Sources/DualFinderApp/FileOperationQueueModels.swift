@@ -28,9 +28,11 @@ struct QueuedFileOperation: Identifiable, Equatable {
     let kind: QueuedFileOperationKind
     let sources: [URL]
     let destination: URL?
+    let createdAt: Date
     var status: QueuedFileOperationStatus
     var progress: FileOperationProgress?
     var message: String
+    var finishedAt: Date?
 
     var fractionCompleted: Double? {
         progress?.fractionCompleted

@@ -169,12 +169,19 @@ struct FilePaneView: View {
                                             },
                                             doubleClick: {
                                                 activateItem(item.url)
+                                            },
+                                            dragURLsProvider: {
+                                                dragURLs(startingWith: item.url)
+                                            },
+                                            onDragStarted: { urls in
+                                                model.logDragDropEvent("drag.started", metadata: [
+                                                    "side": side.rawValue,
+                                                    "count": "\(urls.count)",
+                                                    "paths": urls.map(\.path).joined(separator: "|")
+                                                ])
                                             }
                                         )
                                     }
-                                }
-                                .onDrag {
-                                    NSItemProvider(object: item.url as NSURL)
                                 }
                         }
                     }
@@ -705,6 +712,13 @@ struct FilePaneView: View {
         model.selectItem(url, on: side)
     }
 
+    private func dragURLs(startingWith url: URL) -> [URL] {
+        let selection = model.pane(for: side).selectedItemURLs
+        guard selection.contains(url) else { return [url] }
+        let orderedSelection = model.items(for: side).map(\.url).filter { selection.contains($0) }
+        return orderedSelection.isEmpty ? [url] : orderedSelection
+    }
+
     private func logFileClipboardShortcut(_ operation: String, modifiers: String) -> String {
         let requestID = UUID().uuidString
         model.logShortcutEvent("key-down", metadata: [
@@ -760,12 +774,16 @@ private struct RowMouseHandler: NSViewRepresentable {
     let mouseDown: (NSEvent.ModifierFlags) -> Void
     let mouseUp: (NSEvent.ModifierFlags) -> Void
     let doubleClick: () -> Void
+    let dragURLsProvider: () -> [URL]
+    let onDragStarted: ([URL]) -> Void
 
     func makeNSView(context: Context) -> MouseHandlingView {
         let view = MouseHandlingView()
         view.mouseDownAction = mouseDown
         view.mouseUpAction = mouseUp
         view.doubleClickAction = doubleClick
+        view.dragURLsProvider = dragURLsProvider
+        view.onDragStarted = onDragStarted
         return view
     }
 
@@ -773,12 +791,21 @@ private struct RowMouseHandler: NSViewRepresentable {
         nsView.mouseDownAction = mouseDown
         nsView.mouseUpAction = mouseUp
         nsView.doubleClickAction = doubleClick
+        nsView.dragURLsProvider = dragURLsProvider
+        nsView.onDragStarted = onDragStarted
     }
 
-    final class MouseHandlingView: NSView {
+    final class MouseHandlingView: NSView, NSDraggingSource {
         var mouseDownAction: ((NSEvent.ModifierFlags) -> Void)?
         var mouseUpAction: ((NSEvent.ModifierFlags) -> Void)?
         var doubleClickAction: (() -> Void)?
+        var dragURLsProvider: (() -> [URL])?
+        var onDragStarted: (([URL]) -> Void)?
+
+        private var mouseDownEvent: NSEvent?
+        private var mouseDownLocation: NSPoint = .zero
+        private var didStartDrag = false
+        private static let dragThreshold: CGFloat = 4.0
 
         override var acceptsFirstResponder: Bool { true }
 
@@ -794,18 +821,123 @@ private struct RowMouseHandler: NSViewRepresentable {
             if event.clickCount >= 2 {
                 doubleClickAction?()
             } else {
+                mouseDownEvent = event
+                mouseDownLocation = event.locationInWindow
+                didStartDrag = false
                 mouseDownAction?(event.modifierFlags)
             }
         }
 
+        override func mouseDragged(with event: NSEvent) {
+            guard !didStartDrag else { return }
+            let delta = hypot(
+                event.locationInWindow.x - mouseDownLocation.x,
+                event.locationInWindow.y - mouseDownLocation.y
+            )
+            guard delta >= Self.dragThreshold else { return }
+            didStartDrag = true
+            let dragEvent = mouseDownEvent ?? event
+            mouseDownEvent = nil
+            startFileDrag(with: dragEvent)
+        }
+
         override func mouseUp(with event: NSEvent) {
-            guard event.clickCount < 2 else { return }
+            guard event.clickCount < 2, !didStartDrag else { return }
             mouseUpAction?(event.modifierFlags)
         }
 
         override func rightMouseDown(with event: NSEvent) {
             mouseDownAction?(event.modifierFlags)
             super.rightMouseDown(with: event)
+        }
+
+        func draggingSession(
+            _ session: NSDraggingSession,
+            sourceOperationMaskFor context: NSDraggingContext
+        ) -> NSDragOperation {
+            switch context {
+            case .outsideApplication:
+                return [.copy, .move, .generic]
+            case .withinApplication:
+                return [.copy, .move]
+            @unknown default:
+                return [.copy, .move]
+            }
+        }
+
+        private func startFileDrag(with event: NSEvent) {
+            guard let urls = dragURLsProvider?(), !urls.isEmpty else { return }
+
+            onDragStarted?(urls)
+
+            let draggingItems: [NSDraggingItem]
+            if urls.count == 1 {
+                let item = NSDraggingItem(pasteboardWriter: urls[0] as NSURL)
+                let icon = NSWorkspace.shared.icon(forFile: urls[0].path)
+                icon.size = NSSize(width: 32, height: 32)
+                item.setDraggingFrame(
+                    NSRect(origin: .zero, size: NSSize(width: 32, height: 32)),
+                    contents: icon
+                )
+                draggingItems = [item]
+            } else {
+                let compositeImage = Self.compositeDragImage(
+                    for: urls[0],
+                    count: urls.count
+                )
+                draggingItems = urls.enumerated().map { index, url in
+                    let item = NSDraggingItem(pasteboardWriter: url as NSURL)
+                    let image = index == 0 ? compositeImage : NSImage()
+                    let size = index == 0 ? compositeImage.size : .zero
+                    item.setDraggingFrame(
+                        NSRect(origin: .zero, size: size),
+                        contents: image
+                    )
+                    return item
+                }
+            }
+
+            beginDraggingSession(with: draggingItems, event: event, source: self)
+        }
+
+        private static func compositeDragImage(for url: URL, count: Int) -> NSImage {
+            let iconSize: CGFloat = 32
+            let badgeSize: CGFloat = 18
+            let totalSize = NSSize(width: iconSize + 6, height: iconSize + 6)
+            let image = NSImage(size: totalSize)
+
+            image.lockFocus()
+            let icon = NSWorkspace.shared.icon(forFile: url.path)
+            icon.draw(
+                in: NSRect(x: 0, y: 4, width: iconSize, height: iconSize),
+                from: .zero,
+                operation: .sourceOver,
+                fraction: 1.0
+            )
+
+            let badgeRect = NSRect(
+                x: totalSize.width - badgeSize,
+                y: totalSize.height - badgeSize,
+                width: badgeSize,
+                height: badgeSize
+            )
+            NSColor.systemRed.setFill()
+            NSBezierPath(ovalIn: badgeRect).fill()
+
+            let countStr = count > 99 ? "99+" : "\(count)"
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 10, weight: .bold),
+                .foregroundColor: NSColor.white
+            ]
+            let textSize = (countStr as NSString).size(withAttributes: attrs)
+            let textPoint = NSPoint(
+                x: badgeRect.midX - textSize.width / 2,
+                y: badgeRect.midY - textSize.height / 2
+            )
+            (countStr as NSString).draw(at: textPoint, withAttributes: attrs)
+            image.unlockFocus()
+
+            return image
         }
     }
 }
@@ -845,13 +977,7 @@ private struct FilePaneDropDelegate: DropDelegate {
             group.enter()
             provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
                 defer { group.leave() }
-                if let data = item as? Data,
-                   let url = URL(dataRepresentation: data, relativeTo: nil)?.standardizedFileURL {
-                    droppedURLs.append(url)
-                } else if let url = item as? URL {
-                    droppedURLs.append(url.standardizedFileURL)
-                } else if let nsURL = item as? NSURL,
-                          let url = nsURL.filePathURL?.standardizedFileURL {
+                if let url = droppedFileURL(from: item) {
                     droppedURLs.append(url)
                 }
             }
@@ -859,10 +985,35 @@ private struct FilePaneDropDelegate: DropDelegate {
 
         group.notify(queue: .main) {
             let uniqueURLs = Array(Set(droppedURLs.urls)).sorted { $0.path < $1.path }
+            model.logDragDropEvent("drop.received", metadata: [
+                "side": side.rawValue,
+                "move": "\(!isCopy)",
+                "count": "\(uniqueURLs.count)",
+                "paths": uniqueURLs.map(\.path).joined(separator: "|")
+            ])
             model.receiveDroppedFiles(uniqueURLs, into: side, move: !isCopy)
         }
         return true
     }
+}
+
+private func droppedFileURL(from item: NSSecureCoding?) -> URL? {
+    if let data = item as? Data {
+        if let url = URL(dataRepresentation: data, relativeTo: nil)?.standardizedFileURL {
+            return url
+        }
+        if let string = String(data: data, encoding: .utf8),
+           let url = URL(string: string)?.standardizedFileURL {
+            return url
+        }
+    }
+    if let url = item as? URL {
+        return url.standardizedFileURL
+    }
+    if let nsURL = item as? NSURL, let url = nsURL.filePathURL?.standardizedFileURL {
+        return url
+    }
+    return nil
 }
 
 private final class DroppedURLAccumulator: @unchecked Sendable {

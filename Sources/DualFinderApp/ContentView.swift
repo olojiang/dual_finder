@@ -4,15 +4,24 @@ import DualFinderCore
 
 struct ContentView: View {
     @ObservedObject var model: DualFinderViewModel
+    @State private var isOperationHistoryPresented = false
 
     var body: some View {
         VStack(spacing: 0) {
-            AppToolbar(model: model)
+            AppToolbar(model: model, isOperationHistoryPresented: $isOperationHistoryPresented)
             Divider()
             HStack(spacing: 0) {
+                CommonLocationsSidebar(model: model)
+                    .frame(width: 220)
+                Divider()
                 FilePaneView(side: .left, model: model)
                 Divider()
                 FilePaneView(side: .right, model: model)
+                if isOperationHistoryPresented {
+                    Divider()
+                    OperationHistoryPanel(model: model)
+                        .frame(width: 300)
+                }
             }
             Divider()
             OperationQueueBar(model: model)
@@ -85,6 +94,132 @@ struct ContentView: View {
     }
 }
 
+private struct CommonLocationsSidebar: View {
+    @ObservedObject var model: DualFinderViewModel
+
+    private var favorites: [FolderBookmarkEntry] {
+        model.folderBookmarkEntries().filter(\.isFavorite)
+    }
+
+    private var recents: [FolderBookmarkEntry] {
+        Array(model.folderBookmarkEntries().filter { !$0.isFavorite }.prefix(8))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("Locations")
+                    .font(.headline)
+                Spacer()
+                IconButton(systemName: "star.badge.plus", help: "Add active folder to favorites") {
+                    model.addActiveFolderToFavorites()
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    sidebarSection("Pinned", entries: pinnedEntries)
+                    if !favorites.isEmpty {
+                        sidebarSection("Favorites", entries: favorites)
+                    }
+                    if !recents.isEmpty {
+                        sidebarSection("Recent", entries: recents)
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.bottom, 12)
+            }
+        }
+        .background(.bar.opacity(0.45))
+    }
+
+    private var pinnedEntries: [FolderBookmarkEntry] {
+        let fileManager = FileManager.default
+        return [
+            fileManager.homeDirectoryForCurrentUser,
+            fileManager.urls(for: .desktopDirectory, in: .userDomainMask).first,
+            fileManager.urls(for: .documentDirectory, in: .userDomainMask).first,
+            fileManager.urls(for: .downloadsDirectory, in: .userDomainMask).first,
+            URL(fileURLWithPath: "/Applications", isDirectory: true)
+        ]
+        .compactMap { $0 }
+        .map { FolderBookmarkEntry(url: $0, isFavorite: false) }
+    }
+
+    private func sidebarSection(_ title: String, entries: [FolderBookmarkEntry]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title.uppercased())
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 6)
+            ForEach(entries) { entry in
+                CommonLocationRow(entry: entry, isActive: isActive(entry.url)) {
+                    model.navigateToBookmarkedFolder(entry.url)
+                } removeFavorite: {
+                    model.removeFolderFavorite(entry.url)
+                }
+            }
+        }
+    }
+
+    private func isActive(_ url: URL) -> Bool {
+        model.pane(for: model.activePaneSide).selectedURL.standardizedFileURL == url.standardizedFileURL
+    }
+}
+
+private struct CommonLocationRow: View {
+    let entry: FolderBookmarkEntry
+    let isActive: Bool
+    let open: () -> Void
+    let removeFavorite: () -> Void
+
+    var body: some View {
+        Button(action: open) {
+            HStack(spacing: 8) {
+                Image(systemName: iconName)
+                    .foregroundStyle(entry.isFavorite ? Color.accentColor : Color.secondary)
+                    .frame(width: 18)
+                Text(displayName)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 0)
+            }
+            .font(.callout)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .background(isActive ? Color.accentColor.opacity(0.18) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
+        .help(entry.url.path)
+        .contextMenu {
+            if entry.isFavorite {
+                Button("Remove Favorite", action: removeFavorite)
+            }
+        }
+    }
+
+    private var iconName: String {
+        if entry.isFavorite { return "star.fill" }
+        switch entry.url.standardizedFileURL.path {
+        case FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path:
+            return "house"
+        case "/Applications":
+            return "app.gift"
+        default:
+            return "folder"
+        }
+    }
+
+    private var displayName: String {
+        entry.url.lastPathComponent.isEmpty ? entry.url.path : entry.url.lastPathComponent
+    }
+}
+
 private struct OperationQueueBar: View {
     @ObservedObject var model: DualFinderViewModel
 
@@ -135,6 +270,137 @@ private struct OperationQueueBar: View {
         case .move: "arrow.right.doc.on.clipboard"
         case .trash: "trash"
         }
+    }
+}
+
+private struct OperationHistoryPanel: View {
+    @ObservedObject var model: DualFinderViewModel
+
+    private var finishedOperations: [QueuedFileOperation] {
+        Array(model.fileOperationQueue
+            .filter { $0.status == .completed || $0.status == .failed || $0.status == .cancelled }
+            .reversed())
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Operation History")
+                    .font(.headline)
+                Spacer()
+                IconButton(systemName: "trash", help: "Clear finished operations") {
+                    model.clearFinishedFileOperations()
+                }
+                .disabled(finishedOperations.isEmpty)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+
+            if finishedOperations.isEmpty {
+                ContentUnavailableView("No finished operations", systemImage: "clock.arrow.circlepath")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(finishedOperations) { operation in
+                    OperationHistoryRow(model: model, operation: operation)
+                }
+                .listStyle(.plain)
+            }
+        }
+        .background(.bar)
+    }
+}
+
+private struct OperationHistoryRow: View {
+    @ObservedObject var model: DualFinderViewModel
+    let operation: QueuedFileOperation
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: iconName)
+                    .foregroundStyle(statusColor)
+                    .frame(width: 18)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(operation.title)
+                        .font(.caption.weight(.semibold))
+                        .lineLimit(1)
+                    Text(destinationText)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer()
+                Text(operation.status.rawValue.capitalized)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(statusColor)
+            }
+
+            Text(operation.message)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .truncationMode(.middle)
+
+            if operation.status == .failed {
+                Text(model.recoverySuggestion(for: operation))
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
+            }
+
+            HStack {
+                Text(timestampText)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                Spacer()
+                Button("Retry") {
+                    model.retryFileOperation(operation.id)
+                }
+                .buttonStyle(.borderless)
+                .disabled(!model.canRetryFileOperation(operation.id))
+            }
+        }
+        .padding(.vertical, 6)
+        .help(helpText)
+    }
+
+    private var iconName: String {
+        switch operation.status {
+        case .completed: "checkmark.circle"
+        case .failed: "exclamationmark.triangle"
+        case .cancelled: "xmark.circle"
+        case .queued: "clock"
+        case .running: "arrow.triangle.2.circlepath"
+        }
+    }
+
+    private var statusColor: Color {
+        switch operation.status {
+        case .completed: .green
+        case .failed: .orange
+        case .cancelled: .secondary
+        case .queued, .running: .accentColor
+        }
+    }
+
+    private var destinationText: String {
+        if let destination = operation.destination {
+            return destination.path
+        }
+        return operation.sources.count == 1 ? operation.sources[0].path : "\(operation.sources.count) source items"
+    }
+
+    private var timestampText: String {
+        (operation.finishedAt ?? operation.createdAt).formatted(date: .omitted, time: .shortened)
+    }
+
+    private var helpText: String {
+        let sources = operation.sources.map(\.path).joined(separator: "\n")
+        if let destination = operation.destination {
+            return "\(sources)\n→ \(destination.path)"
+        }
+        return sources
     }
 }
 
@@ -456,68 +722,50 @@ private struct AppShortcutHandler: NSViewRepresentable {
 
             monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
                 guard self?.isSuspended != true else { return event }
+                guard let action = AppShortcutMatrix.action(matching: event) else {
+                    return event
+                }
 
-                if Self.isGoToFolderShortcut(event) {
+                switch action {
+                case .goToFolder:
                     self?.goToFolder()
                     return nil
-                }
-
-                if Self.isFileSearchShortcut(event) {
+                case .fileSearch:
                     self?.showFileSearch()
                     return nil
-                }
-
-                if Self.isFolderBookmarksShortcut(event) {
+                case .folderBookmarks:
                     self?.showFolderBookmarks()
                     return nil
-                }
-
-                if Self.isBatchRenameShortcut(event) {
+                case .batchRename:
                     self?.showBatchRename()
                     return nil
-                }
-
-                if Self.isCloseWindowShortcut(event) {
+                case .closeActiveTab:
                     guard self?.closeActiveTab() == true else { return event }
                     return nil
-                }
-
-                if Self.isFocusLeftPaneShortcut(event) {
+                case .focusLeftPane:
                     self?.handlePaneFocusShortcut(event, target: .left)
                     return nil
-                }
-
-                if Self.isFocusRightPaneShortcut(event) {
+                case .focusRightPane:
                     self?.handlePaneFocusShortcut(event, target: .right)
                     return nil
-                }
-
-                if let tabIndex = Self.tabShortcutIndex(event) {
-                    self?.handleTabSelectionShortcut(event, index: tabIndex)
+                case .selectTab1, .selectTab2, .selectTab3, .selectTab4, .selectTab5, .selectTab6, .selectTab7, .selectTab8, .selectTab9:
+                    if let tabIndex = action.tabIndex {
+                        self?.handleTabSelectionShortcut(event, index: tabIndex)
+                    }
                     return nil
-                }
-
-                if Self.isNavigateBackShortcut(event) {
+                case .navigateBack:
                     self?.navigateBack()
                     return nil
-                }
-
-                if Self.isNavigateForwardShortcut(event) {
+                case .navigateForward:
                     self?.navigateForward()
                     return nil
-                }
-
-                if Self.isMoveLeftSelectionToRightShortcut(event) {
+                case .moveLeftSelectionToRight:
                     self?.moveLeftSelectionToRight()
                     return nil
-                }
-
-                if Self.isMoveRightSelectionToLeftShortcut(event) {
+                case .moveRightSelectionToLeft:
                     self?.moveRightSelectionToLeft()
                     return nil
                 }
-
-                return event
             }
         }
 
@@ -556,87 +804,6 @@ private struct AppShortcutHandler: NSViewRepresentable {
 
         deinit {
             remove()
-        }
-
-        private static func isGoToFolderShortcut(_ event: NSEvent) -> Bool {
-            let flags = shortcutModifierFlags(for: event)
-            return flags == [.command, .shift]
-                && event.charactersIgnoringModifiers?.lowercased() == "g"
-        }
-
-        private static func isFolderBookmarksShortcut(_ event: NSEvent) -> Bool {
-            let flags = shortcutModifierFlags(for: event)
-            return flags == .control
-                && event.charactersIgnoringModifiers?.lowercased() == "d"
-        }
-
-        private static func isFileSearchShortcut(_ event: NSEvent) -> Bool {
-            isControlShortcut(event, character: "s", keyCode: 1)
-        }
-
-        private static func isBatchRenameShortcut(_ event: NSEvent) -> Bool {
-            let flags = shortcutModifierFlags(for: event)
-            return flags == .control
-                && event.charactersIgnoringModifiers?.lowercased() == "m"
-        }
-
-        private static func isCloseWindowShortcut(_ event: NSEvent) -> Bool {
-            let flags = shortcutModifierFlags(for: event)
-            return flags == .command
-                && event.charactersIgnoringModifiers?.lowercased() == "w"
-        }
-
-        private static func isNavigateBackShortcut(_ event: NSEvent) -> Bool {
-            isControlShortcut(event, character: "[", keyCode: 33)
-        }
-
-        private static func isNavigateForwardShortcut(_ event: NSEvent) -> Bool {
-            isControlShortcut(event, character: "]", keyCode: 30)
-        }
-
-        private static func isFocusLeftPaneShortcut(_ event: NSEvent) -> Bool {
-            isCommandArrowShortcut(event, keyCode: 123)
-        }
-
-        private static func isFocusRightPaneShortcut(_ event: NSEvent) -> Bool {
-            isCommandArrowShortcut(event, keyCode: 124)
-        }
-
-        private static func tabShortcutIndex(_ event: NSEvent) -> Int? {
-            let flags = shortcutModifierFlags(for: event)
-            guard flags == .command,
-                  let character = event.charactersIgnoringModifiers,
-                  character.count == 1,
-                  let number = Int(character),
-                  (1...9).contains(number)
-            else {
-                return nil
-            }
-            return number - 1
-        }
-
-        private static func isMoveLeftSelectionToRightShortcut(_ event: NSEvent) -> Bool {
-            isCommandOptionArrowShortcut(event, keyCode: 124)
-        }
-
-        private static func isMoveRightSelectionToLeftShortcut(_ event: NSEvent) -> Bool {
-            isCommandOptionArrowShortcut(event, keyCode: 123)
-        }
-
-        private static func isControlShortcut(_ event: NSEvent, character: String, keyCode: UInt16) -> Bool {
-            let flags = shortcutModifierFlags(for: event)
-            return flags == .control
-                && (event.charactersIgnoringModifiers == character || event.keyCode == keyCode)
-        }
-
-        private static func isCommandOptionArrowShortcut(_ event: NSEvent, keyCode: UInt16) -> Bool {
-            let flags = shortcutModifierFlags(for: event)
-            return flags == [.command, .option] && event.keyCode == keyCode
-        }
-
-        private static func isCommandArrowShortcut(_ event: NSEvent, keyCode: UInt16) -> Bool {
-            let flags = shortcutModifierFlags(for: event)
-            return flags == .command && event.keyCode == keyCode
         }
 
         private static func shortcutModifierFlags(for event: NSEvent) -> NSEvent.ModifierFlags {
@@ -1218,6 +1385,7 @@ private struct FolderBookmarkRow: View {
 
 private struct AppToolbar: View {
     @ObservedObject var model: DualFinderViewModel
+    @Binding var isOperationHistoryPresented: Bool
     @AppStorage("appearanceMode") private var appearanceMode = AppearanceMode.system.rawValue
     @AppStorage("accentName") private var accentName = AccentChoice.blue.rawValue
 
@@ -1241,6 +1409,11 @@ private struct AppToolbar: View {
             IconButton(systemName: "magnifyingglass", help: "Recursive search") {
                 model.requestGlobalSearchDialog()
             }
+            Toggle(isOn: $isOperationHistoryPresented) {
+                Image(systemName: "clock.arrow.circlepath")
+            }
+            .toggleStyle(.button)
+            .help("Show operation history and recovery")
             Toggle(isOn: $model.showHiddenFiles) {
                 Image(systemName: model.showHiddenFiles ? "eye" : "eye.slash")
             }

@@ -269,6 +269,10 @@ final class DualFinderViewModel: ObservableObject {
         logger.debug("file-search", message, metadata: metadata)
     }
 
+    func logDragDropEvent(_ message: String, metadata: [String: String] = [:]) {
+        logger.debug("drag-drop", message, metadata: metadata)
+    }
+
     func addActiveFolderToFavorites() {
         let url = pane(for: activePaneSide).selectedURL
         folderBookmarkStore.addFavorite(url)
@@ -1171,9 +1175,11 @@ final class DualFinderViewModel: ObservableObject {
             kind: kind,
             sources: sources,
             destination: destination,
+            createdAt: Date(),
             status: .queued,
             progress: nil,
-            message: "Queued"
+            message: "Queued",
+            finishedAt: nil
         )
         pendingOperationRequests.append(request)
         fileOperationQueue.append(operation)
@@ -1287,12 +1293,57 @@ final class DualFinderViewModel: ObservableObject {
         updateQueuedOperation(id) {
             $0.status = status
             $0.message = message
+            $0.finishedAt = Date()
         }
         pendingOperationRequests.removeAll { $0.id == id }
         isProcessingFileOperations = false
         refreshAll()
         statusMessage = message
         processNextFileOperationIfNeeded()
+    }
+
+    func clearFinishedFileOperations() {
+        let activeIDs = Set(pendingOperationRequests.map(\.id))
+        fileOperationQueue.removeAll { operation in
+            !activeIDs.contains(operation.id)
+                && (operation.status == .completed || operation.status == .failed || operation.status == .cancelled)
+        }
+        statusMessage = "Cleared operation history"
+    }
+
+    func canRetryFileOperation(_ id: UUID) -> Bool {
+        guard let operation = fileOperationQueue.first(where: { $0.id == id }) else { return false }
+        guard operation.status == .failed || operation.status == .cancelled else { return false }
+        if operation.kind != .trash, operation.destination == nil { return false }
+        return operation.sources.contains { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    func retryFileOperation(_ id: UUID) {
+        guard let operation = fileOperationQueue.first(where: { $0.id == id }),
+              canRetryFileOperation(id)
+        else {
+            statusMessage = "Cannot retry operation; source item is missing"
+            return
+        }
+
+        let existingSources = operation.sources.filter { FileManager.default.fileExists(atPath: $0.path) }
+        enqueueFileOperation(operation.kind, sources: existingSources, destination: operation.destination)
+        logger.info("file-operation", "operation.retry.queued", metadata: [
+            "originalID": id.uuidString,
+            "kind": operation.kind.rawValue,
+            "count": "\(existingSources.count)"
+        ])
+    }
+
+    func recoverySuggestion(for operation: QueuedFileOperation) -> String {
+        let existingSourceCount = operation.sources.filter { FileManager.default.fileExists(atPath: $0.path) }.count
+        if existingSourceCount == 0 {
+            return "Recovery unavailable: the source item no longer exists."
+        }
+        if operation.kind != .trash, operation.destination == nil {
+            return "Recovery unavailable: the destination folder is missing from the operation record."
+        }
+        return "Fix the reported issue, then retry with \(existingSourceCount) available source item(s)."
     }
 
     private func updateQueuedOperation(_ id: UUID, mutate: (inout QueuedFileOperation) -> Void) {
