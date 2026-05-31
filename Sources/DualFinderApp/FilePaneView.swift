@@ -164,6 +164,9 @@ struct FilePaneView: View {
                                             mouseDown: { modifierFlags in
                                                 selectItemFromRowMouseDown(item.url, modifierFlags: modifierFlags)
                                             },
+                                            mouseUp: { modifierFlags in
+                                                selectItemFromRowMouseUp(item.url, modifierFlags: modifierFlags)
+                                            },
                                             doubleClick: {
                                                 activateItem(item.url)
                                             }
@@ -171,8 +174,7 @@ struct FilePaneView: View {
                                     }
                                 }
                                 .onDrag {
-                                    let urls = dragURLs(startingWith: item.url)
-                                    return NSItemProvider(object: urls.first! as NSURL)
+                                    NSItemProvider(object: item.url as NSURL)
                                 }
                         }
                     }
@@ -320,9 +322,9 @@ struct FilePaneView: View {
                     .onChange(of: isFileSearchPresented) { _, _ in
                         synchronizeFileSearchSelection()
                     }
-                    .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
-                        receiveDrop(providers)
-                    }
+                    .onDrop(of: [.fileURL], delegate: FilePaneDropDelegate(
+                        side: side, model: model, isDropTargeted: $isDropTargeted
+                    ))
                     .overlay {
                         if isDropTargeted {
                             RoundedRectangle(cornerRadius: 6)
@@ -686,42 +688,21 @@ struct FilePaneView: View {
             return
         }
 
+        let currentSelection = model.pane(for: side).selectedItemURLs
+        if currentSelection.contains(url) {
+            return
+        }
+
         model.selectItem(url, on: side)
     }
 
-    private func dragURLs(startingWith url: URL) -> [URL] {
+    private func selectItemFromRowMouseUp(_ url: URL, modifierFlags: NSEvent.ModifierFlags) {
+        guard renamingURL == nil else { return }
+        guard !modifierFlags.contains(.command), !modifierFlags.contains(.shift) else { return }
+
         let selection = model.pane(for: side).selectedItemURLs
-        guard selection.contains(url) else { return [url] }
-        let orderedSelection = model.items(for: side).map(\.url).filter { selection.contains($0) }
-        return orderedSelection.isEmpty ? [url] : orderedSelection
-    }
-
-    private func receiveDrop(_ providers: [NSItemProvider]) -> Bool {
-        let move = NSEvent.modifierFlags.contains(.command)
-        let droppedURLs = DroppedURLAccumulator()
-        let group = DispatchGroup()
-
-        for provider in providers where provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
-            group.enter()
-            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
-                defer { group.leave() }
-                if let data = item as? Data,
-                   let url = URL(dataRepresentation: data, relativeTo: nil)?.standardizedFileURL {
-                    droppedURLs.append(url)
-                } else if let url = item as? URL {
-                    droppedURLs.append(url.standardizedFileURL)
-                } else if let nsURL = item as? NSURL,
-                          let url = nsURL.filePathURL?.standardizedFileURL {
-                    droppedURLs.append(url)
-                }
-            }
-        }
-
-        group.notify(queue: .main) {
-            let uniqueURLs = Array(Set(droppedURLs.urls)).sorted { $0.path < $1.path }
-            model.receiveDroppedFiles(uniqueURLs, into: side, move: move)
-        }
-        return true
+        guard selection.contains(url), selection.count > 1 else { return }
+        model.selectItem(url, on: side)
     }
 
     private func logFileClipboardShortcut(_ operation: String, modifiers: String) -> String {
@@ -777,22 +758,26 @@ private struct FilePaneSummary {
 
 private struct RowMouseHandler: NSViewRepresentable {
     let mouseDown: (NSEvent.ModifierFlags) -> Void
+    let mouseUp: (NSEvent.ModifierFlags) -> Void
     let doubleClick: () -> Void
 
     func makeNSView(context: Context) -> MouseHandlingView {
         let view = MouseHandlingView()
         view.mouseDownAction = mouseDown
+        view.mouseUpAction = mouseUp
         view.doubleClickAction = doubleClick
         return view
     }
 
     func updateNSView(_ nsView: MouseHandlingView, context: Context) {
         nsView.mouseDownAction = mouseDown
+        nsView.mouseUpAction = mouseUp
         nsView.doubleClickAction = doubleClick
     }
 
     final class MouseHandlingView: NSView {
         var mouseDownAction: ((NSEvent.ModifierFlags) -> Void)?
+        var mouseUpAction: ((NSEvent.ModifierFlags) -> Void)?
         var doubleClickAction: (() -> Void)?
 
         override var acceptsFirstResponder: Bool { true }
@@ -813,10 +798,70 @@ private struct RowMouseHandler: NSViewRepresentable {
             }
         }
 
+        override func mouseUp(with event: NSEvent) {
+            guard event.clickCount < 2 else { return }
+            mouseUpAction?(event.modifierFlags)
+        }
+
         override func rightMouseDown(with event: NSEvent) {
             mouseDownAction?(event.modifierFlags)
             super.rightMouseDown(with: event)
         }
+    }
+}
+
+private struct FilePaneDropDelegate: DropDelegate {
+    let side: PaneSide
+    let model: DualFinderViewModel
+    @Binding var isDropTargeted: Bool
+
+    func validateDrop(info: DropInfo) -> Bool {
+        info.hasItemsConforming(to: [.fileURL])
+    }
+
+    func dropEntered(info: DropInfo) {
+        isDropTargeted = true
+    }
+
+    func dropExited(info: DropInfo) {
+        isDropTargeted = false
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        if NSEvent.modifierFlags.contains(.option) {
+            return DropProposal(operation: .copy)
+        }
+        return DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        isDropTargeted = false
+        let isCopy = NSEvent.modifierFlags.contains(.option)
+        let providers = info.itemProviders(for: [.fileURL])
+        let droppedURLs = DroppedURLAccumulator()
+        let group = DispatchGroup()
+
+        for provider in providers {
+            group.enter()
+            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+                defer { group.leave() }
+                if let data = item as? Data,
+                   let url = URL(dataRepresentation: data, relativeTo: nil)?.standardizedFileURL {
+                    droppedURLs.append(url)
+                } else if let url = item as? URL {
+                    droppedURLs.append(url.standardizedFileURL)
+                } else if let nsURL = item as? NSURL,
+                          let url = nsURL.filePathURL?.standardizedFileURL {
+                    droppedURLs.append(url)
+                }
+            }
+        }
+
+        group.notify(queue: .main) {
+            let uniqueURLs = Array(Set(droppedURLs.urls)).sorted { $0.path < $1.path }
+            model.receiveDroppedFiles(uniqueURLs, into: side, move: !isCopy)
+        }
+        return true
     }
 }
 
