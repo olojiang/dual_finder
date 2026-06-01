@@ -9,6 +9,7 @@ struct FilePaneView: View {
     @State private var renamingURL: URL?
     @State private var pendingRenameURL: URL?
     @State private var pendingRevealURL: URL?
+    @State private var pendingNewFolderMoveSources: [URL]?
     @State private var renameText = ""
     @State private var isEditingPath = false
     @State private var pathText = ""
@@ -143,6 +144,43 @@ struct FilePaneView: View {
             .padding(.horizontal, 8)
             .padding(.bottom, 6)
         }
+    }
+
+    @ViewBuilder
+    private func finderStyleContextMenuItems(for selection: Set<URL>) -> some View {
+        let ordered = model.orderedContextMenuURLs(selection, on: side)
+
+        if model.canCreateFolderWithSelection(selection) {
+            Button(newFolderWithSelectionTitle(selection.count)) {
+                beginNewFolderWithSelection(ordered)
+            }
+        }
+
+        if model.allSelectedItemsAreDirectories(in: selection, on: side) {
+            Button(openInNewTabsTitle(selection.count)) {
+                model.openSelectionInNewTabs(on: side, folderURLs: ordered)
+            }
+        }
+
+        if !ordered.isEmpty {
+            Button("Share...") {
+                model.shareItems(ordered, on: side)
+            }
+        }
+    }
+
+    private func newFolderWithSelectionTitle(_ count: Int) -> String {
+        "New Folder with Selection (\(count) \(count == 1 ? "Item" : "Items"))"
+    }
+
+    private func openInNewTabsTitle(_ count: Int) -> String {
+        count == 1 ? "Open in New Tab" : "Open in New Tabs"
+    }
+
+    private func beginNewFolderWithSelection(_ sources: [URL]) {
+        guard let created = model.createFolder(in: side) else { return }
+        pendingNewFolderMoveSources = sources
+        queueRename(created)
     }
 
     @ViewBuilder
@@ -339,6 +377,8 @@ struct FilePaneView: View {
                         }
                     }
                     .contextMenu(forSelectionType: URL.self) { selection in
+                        finderStyleContextMenuItems(for: selection)
+                        Divider()
                         pathAndTerminalContextMenuItems(for: selection)
                         archiveContextMenuItems(for: selection)
                         favoriteContextMenuItems(for: selection)
@@ -693,12 +733,39 @@ struct FilePaneView: View {
     private func commitRename() {
         guard let renamingURL else { return }
         let newName = renameText
+
+        if let moveSources = pendingNewFolderMoveSources {
+            if model.commitNewFolderWithSelection(
+                folder: renamingURL,
+                newName: newName,
+                movingSources: moveSources,
+                on: side
+            ) {
+                pendingNewFolderMoveSources = nil
+                clearRenameState()
+                restoreFileListFocus()
+            }
+            return
+        }
+
         clearRenameState()
         model.renameItem(renamingURL, to: newName, on: side)
         restoreFileListFocus()
     }
 
     private func cancelRename() {
+        if let moveSources = pendingNewFolderMoveSources, let folderURL = renamingURL {
+            pendingNewFolderMoveSources = nil
+            clearRenameState()
+            model.cancelNewFolderWithSelection(
+                folder: folderURL,
+                restoringSelection: moveSources,
+                on: side
+            )
+            restoreFileListFocus()
+            return
+        }
+
         clearRenameState()
         restoreFileListFocus()
     }
@@ -707,6 +774,7 @@ struct FilePaneView: View {
         renamingURL = nil
         pendingRenameURL = nil
         pendingRevealURL = nil
+        pendingNewFolderMoveSources = nil
         renameText = ""
         model.isInlineRenaming = false
     }

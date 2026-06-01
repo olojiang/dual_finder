@@ -281,9 +281,102 @@ final class DualFinderViewModel: ObservableObject {
     }
 
     func selectedDirectoryURLs(in selection: Set<URL>, on side: PaneSide) -> [URL] {
-        items(for: side)
-            .filter { selection.contains($0.url) && $0.isDirectoryLike }
-            .map(\.url)
+        ContextMenuSelection.orderedDirectories(in: selection, items: items(for: side))
+    }
+
+    func allSelectedItemsAreDirectories(in selection: Set<URL>, on side: PaneSide) -> Bool {
+        ContextMenuSelection.allSelectedAreDirectories(selection: selection, items: items(for: side))
+    }
+
+    func canCreateFolderWithSelection(_ selection: Set<URL>) -> Bool {
+        ContextMenuSelection.canCreateFolderWithSelection(selection)
+    }
+
+    func shareItems(_ urls: [URL], on side: PaneSide) {
+        activatePane(side)
+        let ordered = urls.isEmpty ? orderedSelection(pane(for: side).selectedItemURLs, on: side) : urls
+        guard !ordered.isEmpty else { return }
+
+        SharingServicePresenter.presentSharePicker(for: ordered)
+        statusMessage = ordered.count == 1
+            ? "Share: \(ordered[0].lastPathComponent)"
+            : "Share \(ordered.count) items"
+        logger.info("share", "picker.presented", metadata: [
+            "side": side.rawValue,
+            "count": "\(ordered.count)"
+        ])
+    }
+
+    func openSelectionInNewTabs(on side: PaneSide, folderURLs: [URL]) {
+        let directories = folderURLs.isEmpty
+            ? selectedDirectoryURLs(in: pane(for: side).selectedItemURLs, on: side)
+            : folderURLs
+        guard !directories.isEmpty else { return }
+
+        activatePane(side)
+        for url in directories {
+            _ = mutatePane(side) { pane in
+                pane.addTab(url: url)
+            }
+        }
+        persistPaneSession()
+        refresh(side)
+        statusMessage = directories.count == 1
+            ? "Opened tab: \(directories[0].lastPathComponent)"
+            : "Opened \(directories.count) tabs"
+        logger.info("tab", "tabs.opened.from-selection", metadata: [
+            "side": side.rawValue,
+            "count": "\(directories.count)"
+        ])
+    }
+
+    func moveItems(_ sources: [URL], into folder: URL, on side: PaneSide) {
+        let moveSources = ContextMenuSelection.moveSources(sources, into: folder)
+        guard !moveSources.isEmpty else { return }
+
+        activatePane(side)
+        setSelection([folder], for: side)
+        enqueueFileOperation(.move, sources: moveSources, destination: folder)
+        logger.info("file-operation", "move.into-folder.requested", metadata: [
+            "side": side.rawValue,
+            "folder": folder.path,
+            "count": "\(moveSources.count)"
+        ])
+    }
+
+    @discardableResult
+    func commitNewFolderWithSelection(
+        folder createdFolder: URL,
+        newName: String,
+        movingSources sources: [URL],
+        on side: PaneSide
+    ) -> Bool {
+        do {
+            let renamedFolder = try operationService.rename(createdFolder, to: newName)
+            refresh(side)
+            moveItems(sources, into: renamedFolder, on: side)
+            return true
+        } catch {
+            reportOperationFailure("new-folder-with-selection.failed", error: error)
+            return false
+        }
+    }
+
+    func cancelNewFolderWithSelection(
+        folder createdFolder: URL,
+        restoringSelection sources: [URL],
+        on side: PaneSide
+    ) {
+        if ContextMenuSelection.isEmptyDirectory(at: createdFolder) {
+            try? FileManager.default.removeItem(at: createdFolder)
+            refresh(side)
+            logger.info("file-operation", "new-folder-with-selection.cancelled", metadata: [
+                "side": side.rawValue,
+                "path": createdFolder.path
+            ])
+        }
+        setSelection(Set(sources), for: side)
+        statusMessage = "Cancelled new folder"
     }
 
     func addFolderToFavorites(_ url: URL) {
