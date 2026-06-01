@@ -1,6 +1,6 @@
 # Dual Finder 纪
 
-Dual Finder 纪 是一个 macOS 双栏文件管理器原型，目标是把 Finder 的系统集成和 Total Commander 风格的左右目录操作结合起来。当前实现基于 SwiftUI + AppKit，核心文件系统逻辑放在 `DualFinderCore`，桌面应用交互放在 `DualFinderApp`。
+Dual Finder 纪 是一个 macOS 双栏文件管理器，目标是把 Finder 的系统集成和 Total Commander 风格的左右目录操作结合起来。当前实现基于 SwiftUI + AppKit，核心文件系统逻辑放在 `DualFinderCore`，桌面应用交互放在 `DualFinderApp`。
 
 ## 当前状态
 
@@ -8,15 +8,15 @@ Dual Finder 纪 是一个 macOS 双栏文件管理器原型，目标是把 Finde
 - Swift：Swift Package，`swift-tools-version: 6.2`
 - 入口：`DualFinderApp`
 - 核心模块：`DualFinderCore`
-- 测试：`DualFinderCoreTests`
+- 测试：`DualFinderCoreTests`（81 项，`swift test` 全部通过）
 - 本地安装脚本：`./update_app.sh`
 
 ## 已实现功能
 
 ### 双栏浏览
 
-- 左右双栏文件列表。
-- 每栏独立 tab，支持新增、关闭、按 `Command-1...9` 切换当前栏 tab。
+- 左右双栏文件列表，左侧 **Locations** 侧边栏（Pinned、Favorites、Recent）。
+- 每栏独立 tab，支持新增、关闭、按 `Command-1...9` 切换当前栏 tab；Tab 右键可复制路径、打开终端、加入收藏。
 - 每个 tab 保留独立前进/后退历史。
 - 启动时恢复上次左右 pane 和 tab 会话。
 - 启动后窗口最大化，关闭最后窗口后退出进程。
@@ -25,7 +25,7 @@ Dual Finder 纪 是一个 macOS 双栏文件管理器原型，目标是把 Finde
 ### 导航
 
 - 双击目录进入，双击文件用系统默认应用打开。
-- 返回上级目录、回到 Home、选择任意文件夹。
+- 返回上级目录、回到 Home、选择任意文件夹；侧边栏与收藏/最近弹窗（`Control-D`）均可跳转。
 - 支持后退/前进历史。
 - 路径栏可点击编辑，支持绝对路径、`~` 和相对路径。
 - 访问受保护目录失败时提示开启 Full Disk Access，并提供打开系统设置入口。
@@ -52,7 +52,8 @@ Dual Finder 纪 是一个 macOS 双栏文件管理器原型，目标是把 Finde
 
 - 左右栏之间复制选择项。
 - 左右栏之间移动选择项。
-- 文件复制、移动和移到废纸篓进入操作队列，显示最近运行/排队任务、进度和当前项目。
+- 文件复制、移动和移到废纸篓进入操作队列，底部显示最近运行/排队任务、进度和当前项目。
+- 工具栏可打开 **Operation History** 侧栏，查看已完成/失败/已取消任务，支持恢复建议、重试和清空历史。
 - 运行中或排队中的文件操作可取消。
 - 通过系统剪贴板复制文件，再粘贴为复制或移动。
 - 复制/移动遇到同名目标时弹出冲突对话框，支持跳过、保留两者、覆盖和应用到全部。
@@ -68,27 +69,39 @@ Dual Finder 纪 是一个 macOS 双栏文件管理器原型，目标是把 Finde
 - 支持从 Finder 或另一栏拖入文件，默认移动，按住 `Option` 拖放时复制。
 - 支持从列表行拖出文件或文件夹给系统或其他应用（Terminal、飞书、微信等），多选拖拽会携带全部选中项。
 
+### 压缩与解压
+
+- 右键 **Compress to ZIP**：将同目录下所选非归档项打包为 ZIP（自动避免重名）。
+- 右键 **Extract Here** / **Extract to "名称"** / **Extract to Subfolder(s)**。
+- 解压支持 zip、tar/tar.gz/tgz/tar.bz2/tar.xz 等；7z、rar、iso 等依赖本机已安装的 `7z` 或 `unar`（如 Homebrew）。
+- 压缩与解压在后台执行，完成后刷新列表并更新状态栏。
+
 ### 预览和系统集成
 
 - 空格键 Quick Look 预览所选项目。
 - Quick Look 中支持切换相邻选择项。
 - `Command-O` 用默认应用打开选择项。
-- 右键菜单包含复制绝对路径、打开终端、批量重命名、复制到另一栏、移动到另一栏、移到废纸篓。
+- 右键菜单包含：
+  - **New Folder with Selection**：多选 ≥2 项时创建文件夹并将选中项移入（Enter 确认，Esc 取消空文件夹）。
+  - **Open in New Tab(s)**：所选均为文件夹时，每个文件夹在新 Tab 打开。
+  - **Share…**：调用 macOS 系统分享面板（含 AirDrop）。
+  - 复制绝对路径、压缩/解压、加入收藏、打开终端、批量重命名、复制/移动到另一栏、移到废纸篓。
 - 可打开日志目录。
 - 可打开 Full Disk Access 设置。
 
 ### 收藏和最近目录
 
 - 自动记录最近访问目录。
-- 可把当前目录加入收藏。
-- 可从收藏/最近目录弹窗中搜索并跳转。
-- 收藏排在最近目录之前。
+- 可把当前目录或所选文件夹加入收藏（列表右键、Tab 右键、侧边栏工具按钮）。
+- 可从收藏/最近目录弹窗（`Control-D`）或左侧 **Locations** 侧边栏搜索并跳转。
+- 收藏排在最近目录之前；侧边栏 Pinned 区固定 Home、Desktop、Documents、Downloads、Applications。
 
-### 外观
+### 外观与快捷键
 
 - 支持浅色、深色、跟随系统外观。
 - 支持多种 accent 色。
 - 工具按钮使用 SF Symbols，并带 hover tooltip。
+- **Settings → Shortcuts**：可配置命令、导航、Tab、跨栏移动等快捷键，含冲突提示与恢复默认。
 
 ### 日志
 
@@ -96,13 +109,15 @@ Dual Finder 纪 是一个 macOS 双栏文件管理器原型，目标是把 Finde
 - 每日一个日志文件。
 - 重启不清空日志。
 - 默认最多保留 7 天日志。
-- 记录启动、导航、选择、排序、tab、剪贴板、文件操作、Quick Look、权限提示等关键事件。
+- 记录启动、导航、选择、排序、tab、剪贴板、文件操作、归档、分享、Quick Look、权限提示等关键事件。
 
 ## 常用快捷键
 
+默认键位可在 **Settings → Shortcuts** 中修改。下表为出厂默认：
+
 | 快捷键 | 功能 |
 | --- | --- |
-| `Command-T` | 当前实现为新建左栏 tab |
+| `Command-T` | 新建左栏 tab |
 | `Command-Shift-T` | 新建右栏 tab |
 | `Command-1...9` | 切换当前活动栏的第 1 到第 9 个 tab |
 | `Command-Left` | 聚焦左栏 |
@@ -162,9 +177,18 @@ tail -n 200 ~/Library/Logs/DualFinder/$(date +%F).log
 ```text
 Sources/
   DualFinderCore/
+    ArchiveFormat.swift
+    ArchiveService.swift
     BatchRename.swift
+    CommandRunner.swift
+    ContextMenuSelection.swift
+    DirectoryComparisonService.swift
+    FileItem.swift
     FileNameSearch.swift
+    FileNameUtilities.swift
     FileOperationService.swift
+    FileOperationTypes.swift
+    FileSelectionResolver.swift
     FileSortRule.swift
     FileSystemService.swift
     FolderBookmarkStore.swift
@@ -173,33 +197,65 @@ Sources/
     Logging.swift
     PaneSessionStore.swift
     PaneState.swift
+    RecursiveFileSearchService.swift
   DualFinderApp/
     AppDelegate.swift
     BatchRenameDialog.swift
     ContentView.swift
     DualFinderApp.swift
     DualFinderViewModel.swift
+    FileOperationQueueModels.swift
     FilePaneView.swift
+    IconButton.swift
     PrivacyPermissionGuide.swift
     QuickLookPreviewService.swift
     SettingsView.swift
+    SharingServicePresenter.swift
+    ShortcutMatrix.swift
+    SingleInstanceGuard.swift
+    Theme.swift
 Tests/
   DualFinderCoreTests/
+    ArchiveFormatDetectorTests.swift
+    ArchiveServiceTests.swift
+    BatchRenameTests.swift
+    ContextMenuSelectionTests.swift
+    DirectoryComparisonServiceTests.swift
+    FileNameSearchTests.swift
+    FileOperationServiceTests.swift
+    FileOperationTypesTests.swift
+    FileSelectionResolverTests.swift
+    FileSortRuleTests.swift
+    FileSystemServiceTests.swift
+    FolderBookmarkStoreTests.swift
+    FolderSortRuleStoreTests.swift
+    PaneSessionStoreTests.swift
+    PaneStateTests.swift
+    RecursiveFileSearchServiceTests.swift
+    RotatingLogStoreTests.swift
+    TestSupport.swift
+local_docs/
+  update_readme.md          # README 更新与三轮审查记录
+  context_menu_enchance_1.md
+  support_zip_unzip.md
+  ...
 ```
 
 ## 架构
 
-- `DualFinderCore`：文件系统读取、文件操作、排序规则、批量重命名、搜索匹配、文件夹大小缓存、收藏/最近目录、pane/tab 状态、日志轮转。
-- `DualFinderApp`：SwiftUI 界面、AppKit 系统交互、快捷键、Quick Look、拖放、权限提示、设置页、单实例和窗口生命周期。
-- `DualFinderViewModel`：连接 UI 和 Core 的协调层，负责选择、导航、刷新、文件操作队列、目录对比、递归搜索、状态消息和日志。
+- `DualFinderCore`：文件系统读取、文件操作、排序规则、批量重命名、搜索匹配、目录对比、归档压缩/解压、右键菜单选择规则、文件夹大小缓存、收藏/最近目录、pane/tab 状态、日志轮转。
+- `DualFinderApp`：SwiftUI 界面、AppKit 系统交互（Share、Quick Look、拖放）、快捷键矩阵、侧边栏与操作历史、权限提示、设置页、单实例和窗口生命周期。
+- `DualFinderViewModel`：连接 UI 和 Core 的协调层，负责选择、导航、刷新、文件操作队列、目录对比、递归搜索、归档、分享、状态消息和日志。
 
 ```mermaid
 flowchart TB
-    User[用户] --> UI[SwiftUI / AppKit UI]
+    User[用户] --> UI[ContentView / FilePaneView]
     UI --> VM[DualFinderViewModel]
+    VM --> CMS[ContextMenuSelection]
     VM --> Pane[PaneState / FileTab]
     VM --> FS[FileSystemService]
     VM --> Ops[FileOperationService]
+    VM --> ARC[ArchiveService]
     VM --> Rename[BatchRenamePlanner]
     VM --> Search[FileNameSearch]
     VM --> RecursiveSearch[RecursiveFileSearchService]
@@ -207,9 +263,12 @@ flowchart TB
     VM --> Bookmarks[FolderBookmarkStore]
     VM --> SizeCache[FolderSizeCache]
     VM --> Logger[AppLogger]
+    VM --> Share[SharingServicePresenter]
     FS --> MacFS[macOS FileManager]
     Ops --> MacFS
     Ops --> Trash[macOS Trash]
+    ARC --> CLI[zip / ditto / tar / 7z / unar]
+    Share --> NSShare[NSSharingServicePicker]
     Logger --> Logs[~/Library/Logs/DualFinder]
 ```
 
@@ -229,36 +288,47 @@ flowchart TB
 - 递归搜索文件名和可选文本内容。
 - 左右目录递归对比。
 - 当前目录快速过滤，包括中文拼音和首字母匹配。
+- 归档格式识别、ZIP 压缩、解压到命名子目录、混合父目录拒绝。
+- 右键菜单选择规则：全目录判定、多选阈值、移动源防嵌套、空目录检测。
+
+UI 层（Share 面板、AirDrop、SwiftUI 焦点与快捷键、归档工具缺失提示）主要依赖手工验证。
 
 ## 还差哪些用户常用的重要功能
 
-下面按“普通 macOS 用户会不会高频用到”和“对双栏文件管理器价值是否明显”排序。
+下面按「普通 macOS 用户会不会高频用到」和「对双栏文件管理器价值是否明显」排序。已部分交付的项在「当前差距」中注明。
 
 | 优先级 | 功能 | 为什么重要 | 当前差距 |
 | --- | --- | --- | --- |
-| P0 | 常用位置侧边栏 | Finder 用户每天会用 Desktop、Downloads、Documents、Volumes、iCloud Drive、网络位置和收藏入口。只靠弹窗跳转不够顺手。 | 已有收藏/最近目录弹窗，但缺少常驻侧边栏、卷宗列表、iCloud/外接盘/网络位置入口。 |
-| P0 | 更完整的操作历史和失败恢复 | 大批量复制/移动最怕失败后不知道哪些成功、哪些失败。用户常需要重试、跳过、定位失败文件。 | 已有队列、进度和取消，但完成/失败历史、错误列表、重试、失败项定位还不完整。 |
-| P0 | 可配置快捷键和 Total Commander 键盘流 | 双栏工具的重度用户通常依赖 `F3/F4/F5/F6/F7/F8`、`Tab` 切栏、`Insert` 选择等键盘工作流。 | 已有一批快捷键，但还没有可配置键位、完整功能矩阵和键盘帮助页。 |
-| P1 | 路径面包屑和路径补全 | 用户频繁在父级、兄弟目录和历史路径之间跳转；可编辑纯文本路径效率有限。 | 路径栏可编辑，但缺少可点击层级、自动补全、历史/收藏建议。 |
-| P1 | 压缩包浏览、压缩和解压 | 下载、备份和交付文件经常遇到 zip/tar/gz。文件管理器通常需要右键解压、创建压缩包，进阶可把压缩包当目录看。 | 当前没有压缩/解压入口，也不能浏览压缩包内容。 |
-| P1 | Finder 标签、颜色和元数据 | macOS 用户常用标签整理文件，也会看图片尺寸、音视频时长、PDF 页数等元数据。 | 当前只显示名称、类型、大小、修改时间；未读写 Finder 标签、注释、扩展属性和 Spotlight 元数据。 |
-| P1 | 内嵌预览/信息面板 | Quick Look 很好，但整理文件时用户常希望固定右侧预览和信息面板，连续扫图、看文本、看 PDF 更快。 | 已有 Quick Look 弹窗，缺少可停靠预览面板和文件详情面板。 |
-| P1 | 批量选择和过滤增强 | 常见场景是按扩展名、日期、大小、正则批量选中，再复制/删除/重命名。 | 当前有当前目录过滤和多选，但缺少“选择同扩展名”“按条件选择/反选”“保存过滤条件”。 |
-| P2 | 更可信的目录同步 | 对比同步是双栏核心能力。用户同步代码、照片、备份目录时，需要预览计划、批量同步、删除多余项和 hash 校验。 | 已有递归对比和单项复制；缺少批量同步计划、双向策略、删除策略、校验和比较。 |
-| P2 | 打开方式和外部工具集成 | 用户经常需要“打开方式”、复制相对路径、在编辑器/终端/脚本中打开。 | 已有默认应用打开和终端打开；缺少 Open With、编辑器选择、服务菜单、脚本/自定义命令。 |
-| P2 | 多窗口和布局恢复 | 多项目、多磁盘整理时，用户会想开多个工作区，记住每组左右路径和窗口比例。 | 当前是单实例主窗口；缺少多窗口、工作区保存和 pane 比例记忆。 |
-| P2 | 正式分发体验 | 非开发者用户需要可信安装、自动更新、权限解释和少踩坑的首次启动流程。 | 当前适合本地安装；公开分发还缺 Developer ID 签名、公证、更新机制和完整权限模型。 |
+| P0 | 侧边栏扩展：卷宗、iCloud、网络位置 | 外接盘、云盘和网络共享是日常跳转目标 | 已有 Pinned + 收藏 + 最近侧边栏；仍缺 `/Volumes` 列表、iCloud Drive、SMB/AFP 入口 |
+| P0 | 失败项定位与批量恢复 | 大批量操作失败后需快速找到失败文件 | 已有历史面板、Retry、恢复建议；仍缺「Reveal in List」、按失败项批量重试 |
+| P0 | Total Commander 键盘流 | 重度用户依赖 `F3/F4/F5/F6/F7/F8`、`Tab` 切栏、`Insert` 选择 | 已有 Settings 内 Shortcut Matrix；仍缺 F 键默认映射、Tab 切栏、应用内快捷键帮助页 |
+| P1 | 路径面包屑和路径补全 | 在父级、兄弟目录间跳转比纯文本路径更高效 | 路径栏可编辑，但缺少可点击层级、自动补全、历史/收藏建议 |
+| P1 | 压缩包当目录浏览 | 部分用户希望不解压直接浏览 zip 内容 | 已支持压缩/解压；不能把压缩包挂载为虚拟目录 |
+| P1 | Finder 标签、颜色和元数据 | 标签整理与图片尺寸、音视频时长等元数据 | 当前只显示名称、类型、大小、修改时间 |
+| P1 | 内嵌预览/信息面板 | 连续扫图、看文本、看 PDF 比弹窗 Quick Look 更快 | 已有 Quick Look；缺少可停靠预览面板和文件详情面板 |
+| P1 | 批量选择和过滤增强 | 按扩展名、日期、大小、正则批量选中 | 当前有目录过滤和多选；缺少「选择同扩展名」、条件反选、保存过滤条件 |
+| P2 | 更可信的目录同步 | 批量同步、删除策略、hash 校验 | 已有递归对比和单项复制；缺少批量同步计划、双向策略、校验和 |
+| P2 | 打开方式和外部工具集成 | Open With、相对路径、服务菜单、自定义命令 | 已有默认打开和终端；缺少 Open With、编辑器选择、服务菜单 |
+| P2 | 多窗口和布局恢复 | 多工作区、pane 比例记忆 | 当前单实例主窗口；缺少多窗口与工作区 |
+| P2 | 正式分发体验 | Developer ID、公证、自动更新 | 当前适合本地 ad-hoc 安装 |
 
-如果只做下一轮，建议先做这 3 件：
+如果只做下一轮，建议优先：
 
-1. **常用位置侧边栏**：收益最大，能立刻降低跳转成本，也能承载收藏、最近、卷宗和云盘入口。
-2. **操作历史和失败恢复**：在已有队列基础上补完成/失败列表、重试、定位失败文件，能显著提升大批量操作可信度。
-3. **可配置快捷键矩阵**：补齐 `F3/F4/F5/F6/F7/F8`、`Tab` 切栏和快捷键帮助页，能更像真正的双栏文件管理器。
+1. **侧边栏卷宗与 iCloud**：在现有 Locations 面板上扩展，跳转成本最低。
+2. **失败项 Reveal + 批量重试**：在已有 Operation History 上补定位与批量恢复。
+3. **F 键与 Tab 切栏默认映射 + 快捷键帮助页**：让键盘流更接近 Total Commander。
 
 ## 当前风险
 
-- UI 自动化测试不足，真实点击、焦点、快捷键和 Quick Look 行为主要依赖手动验证。
-- 操作队列已经有进度和取消，但缺少完成历史、失败项重试、错误汇总和恢复策略。
-- 目录对比目前按大小和修改时间判断文件差异；需要高可信同步时应增加可选 hash 校验。
-- 递归搜索的内容搜索只覆盖较小文本文件，不适合替代 Spotlight 或专业全文索引。
+- UI 自动化测试不足，真实点击、焦点、快捷键、Share 和 Quick Look 行为主要依赖手动验证。
+- Share 在无 keyWindow 时静默不弹出，后续可加状态提示。
+- 目录对比按大小和修改时间判断差异；高可信同步应增加可选 hash 校验。
+- 7z/rar/iso 解压依赖本机第三方工具，未安装时错误信息需用户自行理解。
+- 递归搜索的内容搜索只覆盖较小文本文件，不能替代 Spotlight。
 - 公开分发还缺 Developer ID 签名、公证和完整权限模型。
+
+## 相关文档
+
+- [README 更新与三轮审查](local_docs/update_readme.md)
+- [右键菜单增强（Share / 新 Tab / 新建收纳）](local_docs/context_menu_enchance_1.md)
+- [压缩与解压](local_docs/support_zip_unzip.md)
