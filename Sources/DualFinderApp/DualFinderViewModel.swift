@@ -30,9 +30,19 @@ struct BatchRenameDialogRequest: Identifiable, Equatable {
     let side: PaneSide
 }
 
+struct InlineRenameRequest: Equatable {
+    let id = UUID()
+    let side: PaneSide
+    let url: URL
+}
+
 enum FileClipboardOperation: String {
     case copy
     case move
+}
+
+private extension Notification.Name {
+    static let pasteboardChanged = Notification.Name("NSPasteboardChangedNotification")
 }
 
 @MainActor
@@ -49,6 +59,8 @@ final class DualFinderViewModel: ObservableObject {
     @Published var fileSearchRequest: FileSearchRequest?
     @Published var folderBookmarkDialogRequest: FolderBookmarkDialogRequest?
     @Published var batchRenameDialogRequest: BatchRenameDialogRequest?
+    @Published var inlineRenameRequest: InlineRenameRequest?
+    @Published private(set) var pasteboardRevision = 0
     @Published private(set) var fileOperationQueue: [QueuedFileOperation] = []
     @Published var fileConflictDialogRequest: FileConflictDialogRequest?
     @Published var directoryComparisonDialogRequest: DirectoryComparisonDialogRequest?
@@ -110,6 +122,7 @@ final class DualFinderViewModel: ObservableObject {
             "leftURL": leftPane.selectedURL.path,
             "rightURL": rightPane.selectedURL.path
         ])
+        setupPasteboardObservation()
     }
 
     func items(for side: PaneSide) -> [FileItem] {
@@ -130,6 +143,216 @@ final class DualFinderViewModel: ObservableObject {
 
     func hasSelection(on side: PaneSide) -> Bool {
         !pane(for: side).selectedItemURLs.isEmpty
+    }
+
+    var activeSelectionCount: Int {
+        pane(for: activePaneSide).selectedItemURLs.count
+    }
+
+    var activeItemCount: Int {
+        items(for: activePaneSide).count
+    }
+
+    var canCopyActiveSelection: Bool {
+        MenuActionAvailability.canCopyFiles(
+            hasSelection: hasActiveSelection,
+            isInlineRenaming: isInlineRenaming
+        )
+    }
+
+    var canPasteToActivePane: Bool {
+        _ = pasteboardRevision
+        return MenuActionAvailability.canPasteFiles(
+            pasteboardHasFileURLs: FilePasteboardReader.hasFileURLs,
+            isInlineRenaming: isInlineRenaming,
+            isArchiveOperationRunning: isArchiveOperationRunning
+        )
+    }
+
+    var canTrashActiveSelection: Bool {
+        MenuActionAvailability.canTrashSelection(
+            hasSelection: hasActiveSelection,
+            isInlineRenaming: isInlineRenaming
+        )
+    }
+
+    var canEmptyTrash: Bool {
+        MenuActionAvailability.canEmptyTrash(
+            isInlineRenaming: isInlineRenaming,
+            isArchiveOperationRunning: isArchiveOperationRunning
+        )
+    }
+
+    var canCopyAbsolutePathActiveSelection: Bool {
+        MenuActionAvailability.canCopyAbsolutePath(
+            hasSelection: hasActiveSelection,
+            isInlineRenaming: isInlineRenaming
+        )
+    }
+
+    var canSelectAllInActivePane: Bool {
+        MenuActionAvailability.canSelectAll(
+            itemCount: activeItemCount,
+            isInlineRenaming: isInlineRenaming
+        )
+    }
+
+    var canRenameActiveSelection: Bool {
+        MenuActionAvailability.canRenameSelection(
+            selectionCount: activeSelectionCount,
+            isInlineRenaming: isInlineRenaming
+        )
+    }
+
+    var canBatchRenameActiveSelection: Bool {
+        MenuActionAvailability.canBatchRename(
+            hasSelection: hasActiveSelection,
+            isInlineRenaming: isInlineRenaming
+        )
+    }
+
+    var canOpenActiveSelection: Bool {
+        MenuActionAvailability.canOpenSelection(
+            hasSelection: hasActiveSelection,
+            isInlineRenaming: isInlineRenaming
+        )
+    }
+
+    var canQuickLookActiveSelection: Bool {
+        MenuActionAvailability.canQuickLook(
+            hasSelection: hasActiveSelection,
+            isInlineRenaming: isInlineRenaming
+        )
+    }
+
+    var canCreateInActivePane: Bool {
+        MenuActionAvailability.canCreateItems(
+            isInlineRenaming: isInlineRenaming,
+            isArchiveOperationRunning: isArchiveOperationRunning
+        )
+    }
+
+    var canNavigateBackActivePane: Bool {
+        MenuActionAvailability.canNavigateHistory(
+            canNavigate: pane(for: activePaneSide).canNavigateSelectedTabBack,
+            isInlineRenaming: isInlineRenaming
+        )
+    }
+
+    var canNavigateForwardActivePane: Bool {
+        MenuActionAvailability.canNavigateHistory(
+            canNavigate: pane(for: activePaneSide).canNavigateSelectedTabForward,
+            isInlineRenaming: isInlineRenaming
+        )
+    }
+
+    var canCopyFromLeftPane: Bool {
+        MenuActionAvailability.canTransferToOtherPane(
+            hasSelection: hasSelection(on: .left),
+            isInlineRenaming: isInlineRenaming,
+            isArchiveOperationRunning: isArchiveOperationRunning
+        )
+    }
+
+    var canCopyFromRightPane: Bool {
+        MenuActionAvailability.canTransferToOtherPane(
+            hasSelection: hasSelection(on: .right),
+            isInlineRenaming: isInlineRenaming,
+            isArchiveOperationRunning: isArchiveOperationRunning
+        )
+    }
+
+    var canMoveFromLeftPane: Bool { canCopyFromLeftPane }
+    var canMoveFromRightPane: Bool { canCopyFromRightPane }
+
+    var canOpenTerminalActiveSelection: Bool {
+        MenuActionAvailability.canOpenInTerminal(
+            hasSelection: hasActiveSelection,
+            isInlineRenaming: isInlineRenaming
+        )
+    }
+
+    var canShareActiveSelection: Bool {
+        MenuActionAvailability.canShare(
+            hasSelection: hasActiveSelection,
+            isInlineRenaming: isInlineRenaming
+        )
+    }
+
+    var canOpenInNewTabsActiveSelection: Bool {
+        let side = activePaneSide
+        return allSelectedItemsAreDirectories(
+            in: pane(for: side).selectedItemURLs,
+            on: side
+        ) && !isInlineRenaming
+    }
+
+    var canAddFavoriteFromActiveSelection: Bool {
+        let side = activePaneSide
+        let directories = selectedDirectoryURLs(
+            in: pane(for: side).selectedItemURLs,
+            on: side
+        )
+        guard !directories.isEmpty else { return false }
+        let hasUnfavorited = directories.contains { !isFolderFavorite($0) }
+        return hasUnfavorited && !isInlineRenaming
+    }
+
+    var canCompressActiveSelection: Bool {
+        guard !isInlineRenaming, !isArchiveOperationRunning, hasActiveSelection else { return false }
+        let urls = orderedSelection(pane(for: activePaneSide).selectedItemURLs, on: activePaneSide)
+        return ArchiveService.canCompress(urls)
+    }
+
+    var canExtractActiveSelection: Bool {
+        guard !isInlineRenaming, !isArchiveOperationRunning, hasActiveSelection else { return false }
+        let urls = orderedSelection(pane(for: activePaneSide).selectedItemURLs, on: activePaneSide)
+        return ArchiveService.hasExtractableArchives(urls)
+    }
+
+    func selectAllItems(on side: PaneSide) {
+        activatePane(side)
+        let urls = Set(items(for: side).map(\.url))
+        setSelection(urls, for: side)
+        statusMessage = "Selected \(urls.count) item(s)"
+        logger.debug("selection", "select-all", metadata: [
+            "side": side.rawValue,
+            "count": "\(urls.count)"
+        ])
+    }
+
+    func requestInlineRenameActiveSelection() {
+        let side = activePaneSide
+        let selected = pane(for: side).selectedItemURLs
+        guard canRenameActiveSelection,
+              let url = orderedSelection(selected, on: side).first else { return }
+        requestInlineRename(for: url, on: side)
+    }
+
+    func requestInlineRename(for url: URL, on side: PaneSide) {
+        activatePane(side)
+        inlineRenameRequest = InlineRenameRequest(side: side, url: url)
+    }
+
+    func shareActiveSelection() {
+        shareItems([], on: activePaneSide)
+    }
+
+    func addSelectedDirectoriesToFavorites(on side: PaneSide) {
+        let directories = selectedDirectoryURLs(
+            in: pane(for: side).selectedItemURLs,
+            on: side
+        )
+        guard !directories.isEmpty else { return }
+
+        var addedCount = 0
+        for url in directories where !isFolderFavorite(url) {
+            addFolderToFavorites(url)
+            addedCount += 1
+        }
+        if addedCount == 0 {
+            statusMessage = "Selected folders are already favorites"
+        }
     }
 
     func bindingForSelection(side: PaneSide) -> Binding<Set<URL>> {
@@ -680,6 +903,7 @@ final class DualFinderViewModel: ObservableObject {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         let didWrite = pasteboard.writeObjects(urls.map { $0 as NSURL })
+        pasteboardRevision &+= 1
         guard didWrite else {
             logger.error("clipboard", "files.copy.failed", metadata: metadataWithRequestID([
                 "side": side.rawValue,
@@ -1601,16 +1825,18 @@ final class DualFinderViewModel: ObservableObject {
     }
 
     private func fileURLsFromPasteboard() -> [URL] {
-        let objects = NSPasteboard.general.readObjects(
-            forClasses: [NSURL.self],
-            options: [.urlReadingFileURLsOnly: true]
-        ) ?? []
+        FilePasteboardReader.fileURLs()
+    }
 
-        return objects.compactMap { object in
-            if let url = object as? URL {
-                return url.standardizedFileURL
+    private func setupPasteboardObservation() {
+        NotificationCenter.default.addObserver(
+            forName: .pasteboardChanged,
+            object: NSPasteboard.general,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.pasteboardRevision &+= 1
             }
-            return (object as? NSURL)?.filePathURL?.standardizedFileURL
         }
     }
 

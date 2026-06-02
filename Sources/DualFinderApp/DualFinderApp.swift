@@ -20,57 +20,7 @@ struct DualFinderApplication: App {
                 }
         }
         .commands {
-            CommandGroup(replacing: .newItem) {
-                Button("New Left Tab") { model.addTab(on: .left) }
-                    .keyboardShortcut("t", modifiers: [.command])
-                Button("New Right Tab") { model.addTab(on: .right) }
-                    .keyboardShortcut("t", modifiers: [.command, .shift])
-            }
-            CommandGroup(after: .newItem) {
-                Button("Move Selection to Trash") {
-                    model.trashActiveSelection()
-                }
-                .keyboardShortcut(.delete, modifiers: [.command])
-                .disabled(!model.hasActiveSelection)
-
-                Button("Empty Trash") {
-                    model.emptyTrash()
-                }
-                .keyboardShortcut(.delete, modifiers: [.command, .shift])
-
-                Button("Open Selection in Ghostty or Terminal") {
-                    let side = model.activePaneSide
-                    model.openInTerminal(model.pane(for: side).selectedItemURLs, on: side)
-                }
-                .keyboardShortcut("t", modifiers: [.command, .option])
-                .disabled(!model.hasActiveSelection)
-
-                Button("Batch Rename...") {
-                    model.requestBatchRenameDialog(on: model.activePaneSide)
-                }
-                .keyboardShortcut("m", modifiers: [.control])
-                .disabled(!model.hasActiveSelection)
-
-                Button("Move Left Selection to Right") {
-                    model.moveSelection(from: .left)
-                }
-                .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
-                .disabled(!model.hasSelection(on: .left))
-
-                Button("Move Right Selection to Left") {
-                    model.moveSelection(from: .right)
-                }
-                .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
-                .disabled(!model.hasSelection(on: .right))
-            }
-            CommandGroup(after: .pasteboard) {
-                Button("Copy Absolute Path") {
-                    let side = model.activePaneSide
-                    model.copyAbsolutePaths(model.pane(for: side).selectedItemURLs, on: side)
-                }
-                .keyboardShortcut("c", modifiers: [.command, .option])
-                .disabled(!model.hasActiveSelection)
-            }
+            AppMenuCommands(model: model)
         }
 
         Settings {

@@ -35,6 +35,11 @@ struct FilePaneView: View {
             guard request?.side == side else { return }
             beginFileSearch()
         }
+        .onChange(of: model.inlineRenameRequest) { _, request in
+            guard let request, request.side == side else { return }
+            model.inlineRenameRequest = nil
+            beginRenaming(request.url)
+        }
         .onChange(of: model.paneFocusRequest) { _, request in
             guard let request, request.side == side else { return }
             model.logPaneFocusEvent("file-list.focus-request.observed", metadata: [
