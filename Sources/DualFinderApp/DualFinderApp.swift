@@ -16,6 +16,7 @@ struct DualFinderApplication: App {
                 .tint((AccentChoice(rawValue: accentName) ?? .blue).color)
                 .onAppear {
                     model.checkFullDiskAccessOnLaunch()
+                    model.checkShowWindowHotkeyOnLaunch()
                     model.refreshAll()
                 }
         }

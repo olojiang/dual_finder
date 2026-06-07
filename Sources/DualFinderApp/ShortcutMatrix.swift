@@ -3,11 +3,14 @@ import Foundation
 import SwiftUI
 
 enum AppShortcutAction: String, CaseIterable, Identifiable {
+    case newActiveTab
+    case newRightTab
     case goToFolder
     case fileSearch
     case folderBookmarks
     case batchRename
     case closeActiveTab
+    case showShortcutHelp
     case focusLeftPane
     case focusRightPane
     case selectTab1
@@ -21,6 +24,8 @@ enum AppShortcutAction: String, CaseIterable, Identifiable {
     case selectTab9
     case navigateBack
     case navigateForward
+    case copyLeftSelectionToRight
+    case copyRightSelectionToLeft
     case moveLeftSelectionToRight
     case moveRightSelectionToLeft
 
@@ -28,11 +33,14 @@ enum AppShortcutAction: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
+        case .newActiveTab: "New Tab in Active Pane"
+        case .newRightTab: "New Right Tab"
         case .goToFolder: "Go to Folder"
         case .fileSearch: "Filter Current Folder"
         case .folderBookmarks: "Open Locations"
         case .batchRename: "Batch Rename"
         case .closeActiveTab: "Close Active Tab"
+        case .showShortcutHelp: "Keyboard Shortcuts"
         case .focusLeftPane: "Focus Left Pane"
         case .focusRightPane: "Focus Right Pane"
         case .selectTab1: "Select Tab 1"
@@ -46,6 +54,8 @@ enum AppShortcutAction: String, CaseIterable, Identifiable {
         case .selectTab9: "Select Tab 9"
         case .navigateBack: "History Back"
         case .navigateForward: "History Forward"
+        case .copyLeftSelectionToRight: "Copy Left Selection to Right"
+        case .copyRightSelectionToLeft: "Copy Right Selection to Left"
         case .moveLeftSelectionToRight: "Move Left Selection to Right"
         case .moveRightSelectionToLeft: "Move Right Selection to Left"
         }
@@ -53,13 +63,15 @@ enum AppShortcutAction: String, CaseIterable, Identifiable {
 
     var group: String {
         switch self {
-        case .goToFolder, .fileSearch, .folderBookmarks, .batchRename, .closeActiveTab:
+        case .goToFolder, .fileSearch, .folderBookmarks, .batchRename, .showShortcutHelp:
             "Commands"
+        case .newActiveTab, .newRightTab, .closeActiveTab:
+            "Tabs"
         case .focusLeftPane, .focusRightPane, .navigateBack, .navigateForward:
             "Navigation"
         case .selectTab1, .selectTab2, .selectTab3, .selectTab4, .selectTab5, .selectTab6, .selectTab7, .selectTab8, .selectTab9:
             "Tabs"
-        case .moveLeftSelectionToRight, .moveRightSelectionToLeft:
+        case .copyLeftSelectionToRight, .copyRightSelectionToLeft, .moveLeftSelectionToRight, .moveRightSelectionToLeft:
             "File Operations"
         }
     }
@@ -81,6 +93,10 @@ enum AppShortcutAction: String, CaseIterable, Identifiable {
 
     var defaultBinding: AppShortcutBinding {
         switch self {
+        case .newActiveTab:
+            AppShortcutBinding(key: "t", keyCode: nil, modifiers: [.command])
+        case .newRightTab:
+            AppShortcutBinding(key: "t", keyCode: nil, modifiers: [.command, .shift])
         case .goToFolder:
             AppShortcutBinding(key: "g", keyCode: nil, modifiers: [.command, .shift])
         case .fileSearch:
@@ -91,6 +107,8 @@ enum AppShortcutAction: String, CaseIterable, Identifiable {
             AppShortcutBinding(key: "m", keyCode: nil, modifiers: [.control])
         case .closeActiveTab:
             AppShortcutBinding(key: "w", keyCode: nil, modifiers: [.command])
+        case .showShortcutHelp:
+            AppShortcutBinding(key: "/", keyCode: 44, modifiers: [.command, .shift])
         case .focusLeftPane:
             AppShortcutBinding(key: "left", keyCode: 123, modifiers: [.command])
         case .focusRightPane:
@@ -117,6 +135,10 @@ enum AppShortcutAction: String, CaseIterable, Identifiable {
             AppShortcutBinding(key: "[", keyCode: 33, modifiers: [.control])
         case .navigateForward:
             AppShortcutBinding(key: "]", keyCode: 30, modifiers: [.control])
+        case .copyLeftSelectionToRight:
+            AppShortcutBinding(key: "right", keyCode: 124, modifiers: [.command, .control])
+        case .copyRightSelectionToLeft:
+            AppShortcutBinding(key: "left", keyCode: 123, modifiers: [.command, .control])
         case .moveLeftSelectionToRight:
             AppShortcutBinding(key: "right", keyCode: 124, modifiers: [.command, .option])
         case .moveRightSelectionToLeft:
@@ -217,7 +239,8 @@ enum AppShortcutMatrix {
             ShortcutKeyChoice(id: "up", label: "↑", keyCode: 126),
             ShortcutKeyChoice(id: "down", label: "↓", keyCode: 125),
             ShortcutKeyChoice(id: "space", label: "Space", keyCode: 49),
-            ShortcutKeyChoice(id: "delete", label: "Delete", keyCode: 51)
+            ShortcutKeyChoice(id: "delete", label: "Delete", keyCode: 51),
+            ShortcutKeyChoice(id: "/", label: "/", keyCode: 44)
         ]
     }()
 

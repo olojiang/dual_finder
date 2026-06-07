@@ -44,7 +44,7 @@ struct AppMenuCommands: Commands {
 
     @ViewBuilder
     private var tabCommands: some View {
-        Button("New Left Tab") { model.addTab(on: .left) }
+        Button("New Tab in Active Pane") { model.addTab(on: model.activePaneSide) }
             .keyboardShortcut("t", modifiers: [.command])
         Button("New Right Tab") { model.addTab(on: .right) }
             .keyboardShortcut("t", modifiers: [.command, .shift])
@@ -231,6 +231,14 @@ struct AppMenuCommands: Commands {
 
     @ViewBuilder
     private var viewToolCommands: some View {
+        Button("Keyboard Shortcuts…") {
+            model.requestShortcutHelp()
+        }
+        .keyboardShortcut("/", modifiers: [.command, .shift])
+        .disabled(model.isInlineRenaming)
+
+        Divider()
+
         Button("Filter Current Folder") {
             model.requestFileSearch(on: model.activePaneSide)
         }
@@ -255,11 +263,13 @@ struct AppMenuCommands: Commands {
         Button("Copy Left Selection to Right") {
             model.copySelection(from: .left)
         }
+        .keyboardShortcut(.rightArrow, modifiers: [.command, .control])
         .disabled(!model.canCopyFromLeftPane)
 
         Button("Copy Right Selection to Left") {
             model.copySelection(from: .right)
         }
+        .keyboardShortcut(.leftArrow, modifiers: [.command, .control])
         .disabled(!model.canCopyFromRightPane)
 
         Button("Move Left Selection to Right") {

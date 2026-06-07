@@ -1,3 +1,4 @@
+import DualFinderCore
 import SwiftUI
 
 struct SettingsView: View {
@@ -18,6 +19,8 @@ struct SettingsView: View {
                         Text(accent.label).tag(accent.rawValue)
                     }
                 }
+
+                ShowWindowHotkeySettingsSection()
             }
             .padding(20)
             .tabItem {
@@ -30,6 +33,122 @@ struct SettingsView: View {
                 }
         }
         .frame(width: 720, height: 540)
+    }
+}
+
+private struct ShowWindowHotkeySettingsSection: View {
+    @State private var binding = ShowWindowHotkeyStore().binding()
+    @State private var statusMessage: String?
+
+    private let store = ShowWindowHotkeyStore()
+
+    var body: some View {
+        Section("Global Window Shortcut") {
+            LabeledContent("Active Binding", value: binding.displayLabel)
+            Picker("Key", selection: keyBinding) {
+                ForEach(ShowWindowHotkeyBinding.allowedKeys) { choice in
+                    Text(choice.label).tag(choice.id)
+                }
+            }
+            HStack(spacing: 6) {
+                Text("Modifiers")
+                Spacer()
+                ForEach(ShowWindowHotkeyModifier.allCases) { modifier in
+                    Toggle(isOn: modifierBinding(modifier)) {
+                        Text(modifier.label)
+                            .font(.callout.weight(.semibold))
+                            .frame(width: 18)
+                    }
+                    .toggleStyle(.button)
+                    .help(modifier.rawValue.capitalized)
+                }
+            }
+            if !binding.isValid {
+                Label("Use at least one of Command, Control, or Option.", systemImage: "exclamationmark.triangle")
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
+            }
+            if let statusMessage {
+                Text(statusMessage)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            LabeledContent("Login Item Helper") {
+                Text(HotkeyHelperLoginItem.isRegistered ? "Enabled" : "Not enabled")
+            }
+            Text(PrivacyPermissionGuide.showWindowHotkeyNotes)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            HStack {
+                Button("Open Login Items") {
+                    HotkeyHelperLoginItem.openLoginItemsSettings()
+                }
+                Button("Retry Helper Registration") {
+                    if HotkeyHelperLoginItem.register() {
+                        HotkeyHelperLoginItem.restartRunningHelperFromEmbeddedApp()
+                    }
+                }
+                Button("Reset Shortcut") {
+                    resetBinding()
+                }
+            }
+        }
+        .onAppear {
+            binding = store.binding()
+        }
+    }
+
+    private var keyBinding: Binding<String> {
+        Binding(
+            get: { binding.key },
+            set: { key in
+                guard let choice = ShowWindowHotkeyBinding.allowedKeys.first(where: { $0.id == key }) else { return }
+                var nextBinding = binding
+                nextBinding.key = choice.id
+                nextBinding.keyCode = choice.keyCode
+                applyBinding(nextBinding)
+            }
+        )
+    }
+
+    private func modifierBinding(_ modifier: ShowWindowHotkeyModifier) -> Binding<Bool> {
+        Binding(
+            get: { binding.modifiers.contains(modifier) },
+            set: { isOn in
+                var nextBinding = binding
+                if isOn {
+                    nextBinding.modifiers.insert(modifier)
+                } else {
+                    nextBinding.modifiers.remove(modifier)
+                }
+                applyBinding(nextBinding)
+            }
+        )
+    }
+
+    private func applyBinding(_ nextBinding: ShowWindowHotkeyBinding) {
+        binding = nextBinding
+        guard nextBinding.isValid else {
+            statusMessage = "Shortcut not saved."
+            return
+        }
+
+        do {
+            try store.setBinding(nextBinding)
+            statusMessage = "Saved. Running hotkey listeners reload automatically."
+        } catch {
+            statusMessage = "Could not save shortcut."
+        }
+    }
+
+    private func resetBinding() {
+        do {
+            try store.reset()
+            binding = store.binding()
+            statusMessage = "Restored default \(binding.displayLabel)."
+        } catch {
+            statusMessage = "Could not reset shortcut."
+        }
     }
 }
 

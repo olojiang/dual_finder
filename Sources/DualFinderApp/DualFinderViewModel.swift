@@ -36,6 +36,10 @@ struct InlineRenameRequest: Equatable {
     let url: URL
 }
 
+struct ShortcutHelpRequest: Identifiable, Equatable {
+    let id = UUID()
+}
+
 enum FileClipboardOperation: String {
     case copy
     case move
@@ -53,6 +57,7 @@ final class DualFinderViewModel: ObservableObject {
     @Published private(set) var rightItems: [FileItem] = []
     @Published var statusMessage: String = ""
     @Published var diskAccessPrompt: DiskAccessPrompt?
+    @Published var showWindowHotkeyPrompt: ShowWindowHotkeyPrompt?
     @Published private(set) var activePaneSide: PaneSide = .left
     @Published var pathEditRequest: PathEditRequest?
     @Published var paneFocusRequest: PaneFocusRequest?
@@ -65,6 +70,7 @@ final class DualFinderViewModel: ObservableObject {
     @Published var fileConflictDialogRequest: FileConflictDialogRequest?
     @Published var directoryComparisonDialogRequest: DirectoryComparisonDialogRequest?
     @Published var globalSearchDialogRequest: GlobalSearchDialogRequest?
+    @Published var shortcutHelpRequest: ShortcutHelpRequest?
     @Published private(set) var directoryComparisonResults: [DirectoryComparisonEntry] = []
     @Published private(set) var globalSearchResults: [RecursiveFileSearchResult] = []
     @Published private(set) var isGlobalSearchRunning = false
@@ -73,6 +79,7 @@ final class DualFinderViewModel: ObservableObject {
     @Published var showHiddenFiles = false {
         didSet { refreshAll() }
     }
+    @Published private(set) var uiLayoutPreferences: UILayoutPreferences
 
     private let fileSystem: FileSystemService
     private let operationService: FileOperationService
@@ -80,6 +87,7 @@ final class DualFinderViewModel: ObservableObject {
     private let paneSessionStore: PaneSessionStore
     private let folderBookmarkStore: FolderBookmarkStore
     private let folderSizeCache: FolderSizeCache
+    private let uiLayoutPreferencesStore: UILayoutPreferencesStore
     private let permissionGuide: PrivacyPermissionGuide
     private let quickLookPreviewService: QuickLookPreviewService
     private let logger: AppLogging
@@ -98,6 +106,7 @@ final class DualFinderViewModel: ObservableObject {
         paneSessionStore: PaneSessionStore = PaneSessionStore(),
         folderBookmarkStore: FolderBookmarkStore = FolderBookmarkStore(),
         folderSizeCache: FolderSizeCache = FolderSizeCache(),
+        uiLayoutPreferencesStore: UILayoutPreferencesStore = UILayoutPreferencesStore(),
         permissionGuide: PrivacyPermissionGuide = PrivacyPermissionGuide(),
         quickLookPreviewService: QuickLookPreviewService = QuickLookPreviewService(),
         logger: AppLogging
@@ -107,12 +116,14 @@ final class DualFinderViewModel: ObservableObject {
         self.paneSessionStore = paneSessionStore
         self.folderBookmarkStore = folderBookmarkStore
         self.folderSizeCache = folderSizeCache
+        self.uiLayoutPreferencesStore = uiLayoutPreferencesStore
         self.permissionGuide = permissionGuide
         self.quickLookPreviewService = quickLookPreviewService
         self.logger = logger
         let restoredPanes = paneSessionStore.load(fallbackURL: initialURL)
         leftPane = restoredPanes.left
         rightPane = restoredPanes.right
+        uiLayoutPreferences = uiLayoutPreferencesStore.load()
         operationService = FileOperationService(logger: logger)
         self.quickLookPreviewService.navigationHandler = { [weak self] direction in
             self?.previewAdjacentSelection(direction) ?? false
@@ -135,6 +146,37 @@ final class DualFinderViewModel: ObservableObject {
 
     func sortRule(for side: PaneSide) -> FileSortRule {
         sortRuleStore.rule(for: pane(for: side).selectedURL)
+    }
+
+    func adjustFileListColumn(_ column: FileListColumn, by delta: CGFloat) {
+        var preferences = uiLayoutPreferences
+        preferences.columnWidths.adjust(column, by: Double(delta))
+        uiLayoutPreferences = preferences
+    }
+
+    func setLeftPaneFraction(_ fraction: Double) {
+        var preferences = uiLayoutPreferences
+        preferences.leftPaneFraction = UILayoutPreferences.clampedFraction(fraction)
+        uiLayoutPreferences = preferences
+    }
+
+    func commitUILayoutPreferences() {
+        uiLayoutPreferencesStore.save(uiLayoutPreferences)
+    }
+
+    func setSidebarCollapsed(_ isCollapsed: Bool) {
+        var preferences = uiLayoutPreferences
+        preferences.isSidebarCollapsed = isCollapsed
+        persistUILayoutPreferences(preferences)
+    }
+
+    func toggleSidebarCollapsed() {
+        setSidebarCollapsed(!uiLayoutPreferences.isSidebarCollapsed)
+    }
+
+    private func persistUILayoutPreferences(_ preferences: UILayoutPreferences) {
+        uiLayoutPreferences = preferences
+        uiLayoutPreferencesStore.save(preferences)
     }
 
     var hasActiveSelection: Bool {
@@ -483,6 +525,12 @@ final class DualFinderViewModel: ObservableObject {
         globalSearchResults = []
     }
 
+    func requestShortcutHelp() {
+        guard !isInlineRenaming else { return }
+        shortcutHelpRequest = ShortcutHelpRequest()
+        logger.debug("shortcut-help", "requested", metadata: [:])
+    }
+
     func folderBookmarkEntries() -> [FolderBookmarkEntry] {
         folderBookmarkStore.entries()
     }
@@ -715,6 +763,46 @@ final class DualFinderViewModel: ObservableObject {
 
         statusMessage = "Full Disk Access is required for protected folders."
         handlePossiblePermissionFailure(error, path: "Full Disk Access probe")
+    }
+
+    func checkShowWindowHotkeyOnLaunch() {
+        guard HotkeyHelperLoginItem.embeddedHelperURL() != nil else { return }
+        guard !HotkeyHelperLoginItem.isRegistered else { return }
+        guard UserDefaults.standard.bool(forKey: HotkeyHelperLoginItem.registrationAttemptedKey) else { return }
+        guard showWindowHotkeyPrompt == nil else { return }
+
+        showWindowHotkeyPrompt = ShowWindowHotkeyPrompt(
+            message: """
+            Enable the Dual Finder hotkey helper so \(ShowWindowHotkeyStore().binding().displayLabel) works even when the app is quit. \
+            Approve “DualFinderHotkeyHelper” under Settings → General → Login Items. \
+            \(PrivacyPermissionGuide.showWindowHotkeyNotes)
+            """
+        )
+        logger.info("privacy", "show-window-hotkey.prompt", metadata: [
+            "binding": ShowWindowHotkeyStore().binding().displayLabel
+        ])
+    }
+
+    func openShowWindowHotkeySettings() {
+        HotkeyHelperLoginItem.openLoginItemsSettings()
+    }
+
+    func retryShowWindowHotkeyHelperRegistration() {
+        let registered = HotkeyHelperLoginItem.register()
+        if registered {
+            showWindowHotkeyPrompt = nil
+            statusMessage = "Global \(ShowWindowHotkeyStore().binding().displayLabel) hotkey helper enabled."
+        } else {
+            statusMessage = "Could not enable hotkey helper. Open Login Items and allow DualFinderHotkeyHelper."
+            openShowWindowHotkeySettings()
+        }
+        logger.info("privacy", "show-window-hotkey.retry", metadata: [
+            "registered": "\(registered)"
+        ])
+    }
+
+    func dismissShowWindowHotkeyPrompt() {
+        showWindowHotkeyPrompt = nil
     }
 
     func refresh(_ side: PaneSide) {

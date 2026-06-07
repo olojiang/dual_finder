@@ -10,13 +10,18 @@ struct ContentView: View {
         VStack(spacing: 0) {
             AppToolbar(model: model, isOperationHistoryPresented: $isOperationHistoryPresented)
             Divider()
-            HStack(spacing: 0) {
+            DualPaneSplitLayout(
+                sidebarWidth: model.uiLayoutPreferences.sidebarWidth,
+                leftPaneFraction: model.uiLayoutPreferences.leftPaneFraction,
+                onResizeLeftPaneFraction: model.setLeftPaneFraction,
+                onResizeLeftPaneEnded: model.commitUILayoutPreferences
+            ) {
                 CommonLocationsSidebar(model: model)
-                    .frame(width: 220)
-                Divider()
+            } leftPane: {
                 FilePaneView(side: .left, model: model)
-                Divider()
+            } rightPane: {
                 FilePaneView(side: .right, model: model)
+            } trailing: {
                 if isOperationHistoryPresented {
                     Divider()
                     OperationHistoryPanel(model: model)
@@ -29,6 +34,12 @@ struct ContentView: View {
         }
         .background(.background)
         .background(AppShortcutHandler(isSuspended: isGlobalShortcutSuspended) {
+            model.addTab(on: model.activePaneSide)
+        } newRightTab: {
+            model.addTab(on: .right)
+        } showShortcutHelp: {
+            model.requestShortcutHelp()
+        } goToFolder: {
             model.requestPathEditing(on: model.activePaneSide)
         } showFileSearch: {
             model.requestFileSearch(on: model.activePaneSide)
@@ -51,6 +62,10 @@ struct ContentView: View {
             model.navigateBack(model.activePaneSide)
         } navigateForward: {
             model.navigateForward(model.activePaneSide)
+        } copyLeftSelectionToRight: {
+            model.copySelection(from: .left)
+        } copyRightSelectionToLeft: {
+            model.copySelection(from: .right)
         } moveLeftSelectionToRight: {
             model.moveSelection(from: .left)
         } moveRightSelectionToLeft: {
@@ -71,6 +86,9 @@ struct ContentView: View {
         .sheet(item: $model.globalSearchDialogRequest) { _ in
             GlobalSearchDialog(model: model)
         }
+        .sheet(item: $model.shortcutHelpRequest) { _ in
+            ShortcutHelpDialog()
+        }
         .alert(item: $model.diskAccessPrompt) { prompt in
             Alert(
                 title: Text("Full Disk Access Required"),
@@ -83,6 +101,30 @@ struct ContentView: View {
                 }
             )
         }
+        .alert("Enable Global \(ShowWindowHotkeyStore().binding().displayLabel)", isPresented: showWindowHotkeyAlertBinding) {
+            Button("Open Login Items") {
+                model.openShowWindowHotkeySettings()
+            }
+            Button("Retry Registration") {
+                model.retryShowWindowHotkeyHelperRegistration()
+            }
+            Button("Later", role: .cancel) {
+                model.dismissShowWindowHotkeyPrompt()
+            }
+        } message: {
+            Text(model.showWindowHotkeyPrompt?.message ?? "")
+        }
+    }
+
+    private var showWindowHotkeyAlertBinding: Binding<Bool> {
+        Binding(
+            get: { model.showWindowHotkeyPrompt != nil },
+            set: { isPresented in
+                if !isPresented {
+                    model.dismissShowWindowHotkeyPrompt()
+                }
+            }
+        )
     }
 
     private var isGlobalShortcutSuspended: Bool {
@@ -91,11 +133,16 @@ struct ContentView: View {
             || model.fileConflictDialogRequest != nil
             || model.directoryComparisonDialogRequest != nil
             || model.globalSearchDialogRequest != nil
+            || model.shortcutHelpRequest != nil
     }
 }
 
 private struct CommonLocationsSidebar: View {
     @ObservedObject var model: DualFinderViewModel
+
+    private var isCollapsed: Bool {
+        model.uiLayoutPreferences.isSidebarCollapsed
+    }
 
     private var favorites: [FolderBookmarkEntry] {
         _ = model.folderBookmarkRevision
@@ -110,18 +157,28 @@ private struct CommonLocationsSidebar: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text("Locations")
-                    .font(.headline)
+                if !isCollapsed {
+                    Text("Locations")
+                        .font(.headline)
+                }
                 Spacer()
-                IconButton(systemName: "star.badge.plus", help: "Add active folder to favorites") {
-                    model.addActiveFolderToFavorites()
+                if !isCollapsed {
+                    IconButton(systemName: "star.badge.plus", help: "Add active folder to favorites") {
+                        model.addActiveFolderToFavorites()
+                    }
+                }
+                IconButton(
+                    systemName: isCollapsed ? "sidebar.right" : "sidebar.left",
+                    help: isCollapsed ? "Expand locations sidebar" : "Collapse locations sidebar"
+                ) {
+                    model.toggleSidebarCollapsed()
                 }
             }
-            .padding(.horizontal, 12)
+            .padding(.horizontal, isCollapsed ? 6 : 12)
             .padding(.vertical, 10)
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: isCollapsed ? .center : .leading, spacing: 14) {
                     sidebarSection("Pinned", entries: pinnedEntries)
                     if !favorites.isEmpty {
                         sidebarSection("Favorites", entries: favorites)
@@ -130,7 +187,7 @@ private struct CommonLocationsSidebar: View {
                         sidebarSection("Recent", entries: recents)
                     }
                 }
-                .padding(.horizontal, 8)
+                .padding(.horizontal, isCollapsed ? 4 : 8)
                 .padding(.bottom, 12)
             }
         }
@@ -151,17 +208,25 @@ private struct CommonLocationsSidebar: View {
     }
 
     private func sidebarSection(_ title: String, entries: [FolderBookmarkEntry]) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title.uppercased())
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 6)
+        VStack(alignment: isCollapsed ? .center : .leading, spacing: 4) {
+            if !isCollapsed {
+                Text(title.uppercased())
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+            }
             ForEach(entries) { entry in
-                CommonLocationRow(entry: entry, isActive: isActive(entry.url)) {
-                    model.navigateToBookmarkedFolder(entry.url)
-                } removeFavorite: {
-                    model.removeFolderFavorite(entry.url)
-                }
+                CommonLocationRow(
+                    entry: entry,
+                    isActive: isActive(entry.url),
+                    isCollapsed: isCollapsed,
+                    open: {
+                        model.navigateToBookmarkedFolder(entry.url)
+                    },
+                    removeFavorite: {
+                        model.removeFolderFavorite(entry.url)
+                    }
+                )
             }
         }
     }
@@ -174,23 +239,19 @@ private struct CommonLocationsSidebar: View {
 private struct CommonLocationRow: View {
     let entry: FolderBookmarkEntry
     let isActive: Bool
+    let isCollapsed: Bool
     let open: () -> Void
     let removeFavorite: () -> Void
     @State private var isRemoveConfirmationPresented = false
 
     var body: some View {
-        HStack(spacing: 8) {
-            favoriteStarButton
-            rowLabel
+        Group {
+            if isCollapsed {
+                collapsedRow
+            } else {
+                expandedRow
+            }
         }
-        .font(.callout)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(isActive ? Color.accentColor.opacity(0.18) : Color.clear)
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-        .contentShape(Rectangle())
-        .onTapGesture(perform: open)
         .help(entry.url.path)
         .contextMenu {
             if entry.isFavorite {
@@ -208,6 +269,42 @@ private struct CommonLocationRow: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Remove \"\(displayName)\" from your favorites?")
+        }
+    }
+
+    private var expandedRow: some View {
+        HStack(spacing: 8) {
+            favoriteStarButton
+            rowLabel
+        }
+        .font(.callout)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(isActive ? Color.accentColor.opacity(0.18) : Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .contentShape(Rectangle())
+        .onTapGesture(perform: open)
+    }
+
+    private var collapsedRow: some View {
+        Button(action: open) {
+            rowIcon
+                .frame(width: 28, height: 28)
+                .background(isActive ? Color.accentColor.opacity(0.18) : Color.clear)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private var rowIcon: some View {
+        if entry.isFavorite {
+            Image(systemName: "star.fill")
+                .foregroundStyle(Color.accentColor)
+        } else {
+            Image(systemName: iconName)
+                .foregroundStyle(Color.secondary)
         }
     }
 
@@ -649,8 +746,186 @@ private struct GlobalSearchDialog: View {
     }
 }
 
+private struct ShortcutHelpDialog: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var query = ""
+    @FocusState private var isSearchFocused: Bool
+
+    private var filteredGroups: [ShortcutHelpGroup] {
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
+        guard !trimmedQuery.isEmpty else { return ShortcutHelpCatalog.groups }
+
+        return ShortcutHelpCatalog.groups.compactMap { group in
+            let entries = group.entries.filter { entry in
+                entry.searchText.localizedLowercase.contains(trimmedQuery)
+            }
+            return entries.isEmpty ? nil : ShortcutHelpGroup(title: group.title, entries: entries)
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Image(systemName: "keyboard")
+                    .foregroundStyle(.secondary)
+                Text("Keyboard Shortcuts")
+                    .font(.headline)
+                Spacer()
+                IconButton(systemName: "xmark", help: "Close") {
+                    dismiss()
+                }
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 14)
+
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                TextField("Search shortcuts", text: $query)
+                    .textFieldStyle(.plain)
+                    .focused($isSearchFocused)
+                if !query.isEmpty {
+                    Button {
+                        query = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .help("Clear search")
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+            .padding(.horizontal, 18)
+            .padding(.bottom, 10)
+
+            if filteredGroups.isEmpty {
+                ContentUnavailableView("No shortcuts found", systemImage: "keyboard.badge.ellipsis")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List {
+                    ForEach(filteredGroups) { group in
+                        Section(group.title) {
+                            ForEach(group.entries) { entry in
+                                HStack(spacing: 12) {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(entry.title)
+                                            .lineLimit(1)
+                                        if let note = entry.note {
+                                            Text(note)
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(1)
+                                        }
+                                    }
+                                    Spacer()
+                                    Text(entry.shortcut)
+                                        .font(.system(.body, design: .monospaced))
+                                        .fontWeight(.semibold)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
+                                .padding(.vertical, 3)
+                            }
+                        }
+                    }
+                }
+                .listStyle(.inset)
+            }
+        }
+        .frame(width: 640, height: 620)
+        .onAppear {
+            isSearchFocused = true
+        }
+    }
+}
+
+private struct ShortcutHelpGroup: Identifiable {
+    let title: String
+    let entries: [ShortcutHelpEntry]
+
+    var id: String { title }
+}
+
+private struct ShortcutHelpEntry: Identifiable {
+    let title: String
+    let shortcut: String
+    let note: String?
+
+    var id: String { "\(title)-\(shortcut)" }
+    var searchText: String { "\(title) \(shortcut) \(note ?? "")" }
+}
+
+private enum ShortcutHelpCatalog {
+    static var groups: [ShortcutHelpGroup] {
+        [
+            ShortcutHelpGroup(title: "Tabs", entries: [
+                entry(.newActiveTab, note: "Uses the focused pane"),
+                entry(.newRightTab),
+                entry(.closeActiveTab),
+                ShortcutHelpEntry(
+                    title: "Select Tab 1...9",
+                    shortcut: "\(AppShortcutMatrix.binding(for: .selectTab1).displayText) ... \(AppShortcutMatrix.binding(for: .selectTab9).displayText)",
+                    note: "Current active pane"
+                )
+            ]),
+            ShortcutHelpGroup(title: "Navigation", entries: [
+                entry(.focusLeftPane),
+                entry(.focusRightPane),
+                entry(.navigateBack),
+                entry(.navigateForward),
+                ShortcutHelpEntry(title: "Go to Parent Folder", shortcut: "⌘↑", note: nil),
+                ShortcutHelpEntry(title: "Open Selection or Enter Folder", shortcut: "⌘↓", note: nil),
+                entry(.goToFolder),
+                entry(.folderBookmarks)
+            ]),
+            ShortcutHelpGroup(title: "Search and Tools", entries: [
+                entry(.fileSearch),
+                ShortcutHelpEntry(title: "Focus Filter Input", shortcut: "⌃E", note: "When folder filter is open"),
+                ShortcutHelpEntry(title: "Recursive Search", shortcut: "Menu", note: nil),
+                ShortcutHelpEntry(title: "Compare Directories", shortcut: "Menu", note: nil),
+                entry(.showShortcutHelp)
+            ]),
+            ShortcutHelpGroup(title: "Selection and Files", entries: [
+                ShortcutHelpEntry(title: "Select All", shortcut: "⌘A", note: nil),
+                ShortcutHelpEntry(title: "Rename", shortcut: "Return", note: "Single selected item"),
+                entry(.batchRename),
+                ShortcutHelpEntry(title: "Open Selection", shortcut: "⌘O", note: nil),
+                ShortcutHelpEntry(title: "Quick Look", shortcut: "Space", note: nil),
+                ShortcutHelpEntry(title: "Calculate Folder Size", shortcut: "⌃Space", note: nil)
+            ]),
+            ShortcutHelpGroup(title: "Clipboard and Transfer", entries: [
+                ShortcutHelpEntry(title: "Copy Files", shortcut: "⌘C", note: nil),
+                ShortcutHelpEntry(title: "Copy Absolute Path", shortcut: "⌘⌥C", note: nil),
+                ShortcutHelpEntry(title: "Paste Files", shortcut: "⌘V", note: nil),
+                ShortcutHelpEntry(title: "Paste and Move", shortcut: "⌘⌥V", note: nil),
+                ShortcutHelpEntry(title: "Move Selection to Trash", shortcut: "⌘Delete", note: nil),
+                ShortcutHelpEntry(title: "Empty Trash", shortcut: "⌘⇧Delete", note: nil),
+                ShortcutHelpEntry(title: "Open in Ghostty or Terminal", shortcut: "⌘⌥T", note: nil),
+                entry(.copyLeftSelectionToRight),
+                entry(.copyRightSelectionToLeft),
+                entry(.moveLeftSelectionToRight),
+                entry(.moveRightSelectionToLeft)
+            ])
+        ]
+    }
+
+    private static func entry(_ action: AppShortcutAction, note: String? = nil) -> ShortcutHelpEntry {
+        ShortcutHelpEntry(
+            title: action.title,
+            shortcut: AppShortcutMatrix.binding(for: action).displayText,
+            note: note
+        )
+    }
+}
+
 private struct AppShortcutHandler: NSViewRepresentable {
     let isSuspended: Bool
+    let newActiveTab: () -> Void
+    let newRightTab: () -> Void
+    let showShortcutHelp: () -> Void
     let goToFolder: () -> Void
     let showFileSearch: () -> Void
     let showFolderBookmarks: () -> Void
@@ -661,11 +936,16 @@ private struct AppShortcutHandler: NSViewRepresentable {
     let logShortcutEvent: (String, [String: String]) -> Void
     let navigateBack: () -> Void
     let navigateForward: () -> Void
+    let copyLeftSelectionToRight: () -> Void
+    let copyRightSelectionToLeft: () -> Void
     let moveLeftSelectionToRight: () -> Void
     let moveRightSelectionToLeft: () -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
+            newActiveTab: newActiveTab,
+            newRightTab: newRightTab,
+            showShortcutHelp: showShortcutHelp,
             goToFolder: goToFolder,
             showFileSearch: showFileSearch,
             showFolderBookmarks: showFolderBookmarks,
@@ -676,6 +956,8 @@ private struct AppShortcutHandler: NSViewRepresentable {
             logShortcutEvent: logShortcutEvent,
             navigateBack: navigateBack,
             navigateForward: navigateForward,
+            copyLeftSelectionToRight: copyLeftSelectionToRight,
+            copyRightSelectionToLeft: copyRightSelectionToLeft,
             moveLeftSelectionToRight: moveLeftSelectionToRight,
             moveRightSelectionToLeft: moveRightSelectionToLeft,
             isSuspended: isSuspended
@@ -688,6 +970,9 @@ private struct AppShortcutHandler: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.newActiveTab = newActiveTab
+        context.coordinator.newRightTab = newRightTab
+        context.coordinator.showShortcutHelp = showShortcutHelp
         context.coordinator.goToFolder = goToFolder
         context.coordinator.showFileSearch = showFileSearch
         context.coordinator.showFolderBookmarks = showFolderBookmarks
@@ -698,6 +983,8 @@ private struct AppShortcutHandler: NSViewRepresentable {
         context.coordinator.logShortcutEvent = logShortcutEvent
         context.coordinator.navigateBack = navigateBack
         context.coordinator.navigateForward = navigateForward
+        context.coordinator.copyLeftSelectionToRight = copyLeftSelectionToRight
+        context.coordinator.copyRightSelectionToLeft = copyRightSelectionToLeft
         context.coordinator.moveLeftSelectionToRight = moveLeftSelectionToRight
         context.coordinator.moveRightSelectionToLeft = moveRightSelectionToLeft
         context.coordinator.isSuspended = isSuspended
@@ -708,6 +995,9 @@ private struct AppShortcutHandler: NSViewRepresentable {
     }
 
     final class Coordinator {
+        var newActiveTab: () -> Void
+        var newRightTab: () -> Void
+        var showShortcutHelp: () -> Void
         var goToFolder: () -> Void
         var showFileSearch: () -> Void
         var showFolderBookmarks: () -> Void
@@ -718,12 +1008,17 @@ private struct AppShortcutHandler: NSViewRepresentable {
         var logShortcutEvent: (String, [String: String]) -> Void
         var navigateBack: () -> Void
         var navigateForward: () -> Void
+        var copyLeftSelectionToRight: () -> Void
+        var copyRightSelectionToLeft: () -> Void
         var moveLeftSelectionToRight: () -> Void
         var moveRightSelectionToLeft: () -> Void
         var isSuspended: Bool
         private var monitor: Any?
 
         init(
+            newActiveTab: @escaping () -> Void,
+            newRightTab: @escaping () -> Void,
+            showShortcutHelp: @escaping () -> Void,
             goToFolder: @escaping () -> Void,
             showFileSearch: @escaping () -> Void,
             showFolderBookmarks: @escaping () -> Void,
@@ -734,10 +1029,15 @@ private struct AppShortcutHandler: NSViewRepresentable {
             logShortcutEvent: @escaping (String, [String: String]) -> Void,
             navigateBack: @escaping () -> Void,
             navigateForward: @escaping () -> Void,
+            copyLeftSelectionToRight: @escaping () -> Void,
+            copyRightSelectionToLeft: @escaping () -> Void,
             moveLeftSelectionToRight: @escaping () -> Void,
             moveRightSelectionToLeft: @escaping () -> Void,
             isSuspended: Bool
         ) {
+            self.newActiveTab = newActiveTab
+            self.newRightTab = newRightTab
+            self.showShortcutHelp = showShortcutHelp
             self.goToFolder = goToFolder
             self.showFileSearch = showFileSearch
             self.showFolderBookmarks = showFolderBookmarks
@@ -748,6 +1048,8 @@ private struct AppShortcutHandler: NSViewRepresentable {
             self.logShortcutEvent = logShortcutEvent
             self.navigateBack = navigateBack
             self.navigateForward = navigateForward
+            self.copyLeftSelectionToRight = copyLeftSelectionToRight
+            self.copyRightSelectionToLeft = copyRightSelectionToLeft
             self.moveLeftSelectionToRight = moveLeftSelectionToRight
             self.moveRightSelectionToLeft = moveRightSelectionToLeft
             self.isSuspended = isSuspended
@@ -763,6 +1065,12 @@ private struct AppShortcutHandler: NSViewRepresentable {
                 }
 
                 switch action {
+                case .newActiveTab:
+                    self?.newActiveTab()
+                    return nil
+                case .newRightTab:
+                    self?.newRightTab()
+                    return nil
                 case .goToFolder:
                     self?.goToFolder()
                     return nil
@@ -777,6 +1085,9 @@ private struct AppShortcutHandler: NSViewRepresentable {
                     return nil
                 case .closeActiveTab:
                     guard self?.closeActiveTab() == true else { return event }
+                    return nil
+                case .showShortcutHelp:
+                    self?.showShortcutHelp()
                     return nil
                 case .focusLeftPane:
                     self?.handlePaneFocusShortcut(event, target: .left)
@@ -794,6 +1105,12 @@ private struct AppShortcutHandler: NSViewRepresentable {
                     return nil
                 case .navigateForward:
                     self?.navigateForward()
+                    return nil
+                case .copyLeftSelectionToRight:
+                    self?.copyLeftSelectionToRight()
+                    return nil
+                case .copyRightSelectionToLeft:
+                    self?.copyRightSelectionToLeft()
                     return nil
                 case .moveLeftSelectionToRight:
                     self?.moveLeftSelectionToRight()

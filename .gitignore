@@ -5,3 +5,8 @@
 release/
 *.xcuserdata/
 DerivedData/
+signing/apple_keys/*.env
+signing/apple_keys/*.p12
+signing/apple_keys/*.pem
+signing/apple_keys/*.p8
+signing/apple_keys/*.key

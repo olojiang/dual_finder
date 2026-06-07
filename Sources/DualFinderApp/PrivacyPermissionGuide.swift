@@ -1,4 +1,5 @@
 import AppKit
+import DualFinderCore
 import Foundation
 
 struct PrivacyPermissionGuide {
@@ -8,6 +9,16 @@ struct PrivacyPermissionGuide {
     private static let privacySettingsURL = URL(
         string: "x-apple.systempreferences:com.apple.preference.security?Privacy"
     )
+
+    /// The global show-window shortcut uses Carbon hotkeys and does not require Accessibility.
+    /// The optional login-item helper only needs approval under Login Items.
+    static var showWindowHotkeyNotes: String {
+        """
+        Dual Finder registers \(ShowWindowHotkeyStore().binding().displayLabel) with the system hotkey API (Carbon), not Accessibility, so rebuilding \
+        with the same bundle id and codesign identity should not reset Accessibility permissions.
+        When the login-item helper is enabled, macOS may ask once under Settings → General → Login Items.
+        """
+    }
 
     func openFullDiskAccessSettings() {
         if let fullDiskAccessURL = Self.fullDiskAccessURL, NSWorkspace.shared.open(fullDiskAccessURL) {
@@ -67,5 +78,10 @@ struct PrivacyPermissionGuide {
 struct DiskAccessPrompt: Identifiable {
     let id = UUID()
     let path: String
+    let message: String
+}
+
+struct ShowWindowHotkeyPrompt: Identifiable {
+    let id = UUID()
     let message: String
 }

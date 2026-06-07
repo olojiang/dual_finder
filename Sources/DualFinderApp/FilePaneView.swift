@@ -258,6 +258,7 @@ struct FilePaneView: View {
                         ForEach(visibleItems) { item in
                             FileRow(
                                 item: item,
+                                columnWidths: model.uiLayoutPreferences.columnWidths,
                                 isRenaming: renamingURL == item.url,
                                 renameText: $renameText,
                                 commitRename: commitRename,
@@ -554,22 +555,35 @@ struct FilePaneView: View {
 
     private var sortHeader: some View {
         HStack(spacing: 8) {
-            SortHeaderButton(title: "Name", field: .name, rule: model.sortRule(for: side)) {
-                model.selectSortField(.name, for: side)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            SortHeaderButton(title: "Type", field: .type, rule: model.sortRule(for: side)) {
-                model.selectSortField(.type, for: side)
-            }
-            .frame(width: 112, alignment: .leading)
-            SortHeaderButton(title: "Size", field: .size, rule: model.sortRule(for: side)) {
-                model.selectSortField(.size, for: side)
-            }
-            .frame(width: 86, alignment: .trailing)
-            SortHeaderButton(title: "Modified", field: .modifiedAt, rule: model.sortRule(for: side)) {
-                model.selectSortField(.modifiedAt, for: side)
-            }
-            .frame(width: 126, alignment: .trailing)
+            Color.clear.frame(width: 20)
+            FileListColumnLayout(
+                columnWidths: model.uiLayoutPreferences.columnWidths,
+                showsResizeHandles: true,
+                onResizeColumn: { column, delta in
+                    model.adjustFileListColumn(column, by: delta)
+                },
+                onResizeEnded: model.commitUILayoutPreferences,
+                name: {
+                    SortHeaderButton(title: "Name", field: .name, rule: model.sortRule(for: side)) {
+                        model.selectSortField(.name, for: side)
+                    }
+                },
+                type: {
+                    SortHeaderButton(title: "Type", field: .type, rule: model.sortRule(for: side)) {
+                        model.selectSortField(.type, for: side)
+                    }
+                },
+                size: {
+                    SortHeaderButton(title: "Size", field: .size, rule: model.sortRule(for: side)) {
+                        model.selectSortField(.size, for: side)
+                    }
+                },
+                modified: {
+                    SortHeaderButton(title: "Modified", field: .modifiedAt, rule: model.sortRule(for: side)) {
+                        model.selectSortField(.modifiedAt, for: side)
+                    }
+                }
+            )
         }
         .font(.caption)
         .foregroundStyle(.secondary)
@@ -1011,7 +1025,7 @@ private struct RowMouseHandler: NSViewRepresentable {
 
             let draggingItems: [NSDraggingItem]
             if urls.count == 1 {
-                let item = NSDraggingItem(pasteboardWriter: urls[0] as NSURL)
+                let item = NSDraggingItem(pasteboardWriter: FileDragPasteboardWriter(url: urls[0]))
                 let icon = NSWorkspace.shared.icon(forFile: urls[0].path)
                 icon.size = NSSize(width: 32, height: 32)
                 item.setDraggingFrame(
@@ -1025,11 +1039,11 @@ private struct RowMouseHandler: NSViewRepresentable {
                     count: urls.count
                 )
                 draggingItems = urls.enumerated().map { index, url in
-                    let item = NSDraggingItem(pasteboardWriter: url as NSURL)
-                    let image = index == 0 ? compositeImage : NSImage()
-                    let size = index == 0 ? compositeImage.size : .zero
+                    let item = NSDraggingItem(pasteboardWriter: FileDragPasteboardWriter(url: url))
+                    let image = index == 0 ? compositeImage : Self.transparentDragImage()
+                    let size = index == 0 ? compositeImage.size : NSSize(width: 1, height: 1)
                     item.setDraggingFrame(
-                        NSRect(origin: .zero, size: size),
+                        NSRect(origin: NSPoint(x: index, y: -index), size: size),
                         contents: image
                     )
                     return item
@@ -1037,6 +1051,15 @@ private struct RowMouseHandler: NSViewRepresentable {
             }
 
             beginDraggingSession(with: draggingItems, event: event, source: self)
+        }
+
+        private static func transparentDragImage() -> NSImage {
+            let image = NSImage(size: NSSize(width: 1, height: 1))
+            image.lockFocus()
+            NSColor.clear.setFill()
+            NSRect(x: 0, y: 0, width: 1, height: 1).fill()
+            image.unlockFocus()
+            return image
         }
 
         private static func compositeDragImage(for url: URL, count: Int) -> NSImage {
@@ -1078,6 +1101,48 @@ private struct RowMouseHandler: NSViewRepresentable {
 
             return image
         }
+    }
+}
+
+private final class FileDragPasteboardWriter: NSObject, NSPasteboardWriting {
+    private static let fileURLType = NSPasteboard.PasteboardType("public.file-url")
+    private static let urlType = NSPasteboard.PasteboardType("public.url")
+    private static let legacyFilenamesType = NSPasteboard.PasteboardType("NSFilenamesPboardType")
+
+    private let url: URL
+
+    init(url: URL) {
+        self.url = url.standardizedFileURL
+        super.init()
+    }
+
+    func writableTypes(for pasteboard: NSPasteboard) -> [NSPasteboard.PasteboardType] {
+        [
+            Self.fileURLType,
+            Self.urlType,
+            .string,
+            Self.legacyFilenamesType
+        ]
+    }
+
+    func pasteboardPropertyList(forType type: NSPasteboard.PasteboardType) -> Any? {
+        switch type {
+        case Self.fileURLType, Self.urlType:
+            return url.absoluteString
+        case .string:
+            return url.path
+        case Self.legacyFilenamesType:
+            return [url.path]
+        default:
+            return nil
+        }
+    }
+
+    func writingOptions(
+        forType type: NSPasteboard.PasteboardType,
+        pasteboard: NSPasteboard
+    ) -> NSPasteboard.WritingOptions {
+        []
     }
 }
 
@@ -1174,6 +1239,7 @@ private final class DroppedURLAccumulator: @unchecked Sendable {
 
 private struct FileRow: View {
     let item: FileItem
+    let columnWidths: FileListColumnWidths
     let isRenaming: Bool
     @Binding var renameText: String
     let commitRename: () -> Void
@@ -1182,26 +1248,30 @@ private struct FileRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: iconName)
-                .foregroundStyle(item.isDirectoryLike ? Color.accentColor : Color.secondary)
+            FinderFileIcon(url: item.url)
                 .frame(width: 20)
-            nameView
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Text(item.type)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .frame(width: 112, alignment: .leading)
-            Text(sizeText)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-                .frame(width: 86, alignment: .trailing)
-            Text(dateText)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(width: 126, alignment: .trailing)
+            FileListColumnLayout(
+                columnWidths: columnWidths,
+                name: { nameView },
+                type: {
+                    Text(item.type)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                },
+                size: {
+                    Text(sizeText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                },
+                modified: {
+                    Text(dateText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            )
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 2)
@@ -1228,15 +1298,6 @@ private struct FileRow: View {
             Text(item.name)
                 .lineLimit(1)
                 .truncationMode(.middle)
-        }
-    }
-
-    private var iconName: String {
-        switch item.kind {
-        case .folder: "folder"
-        case .package: "shippingbox"
-        case .alias: "arrowshape.turn.up.right"
-        case .file, .other: "doc"
         }
     }
 
