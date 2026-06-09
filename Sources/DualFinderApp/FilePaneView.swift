@@ -34,9 +34,11 @@ struct FilePaneView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            paneHeader
-            tabStrip
-            fileList
+            if !terminalModel.isMaximized {
+                paneHeader
+                tabStrip
+                fileList
+            }
             terminalPanel
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -493,13 +495,15 @@ struct FilePaneView: View {
     @ViewBuilder
     private var terminalPanel: some View {
         if terminalModel.isExpanded {
-            LayoutResizeHandle(
-                axis: .horizontal,
-                length: nil,
-                onDrag: { delta in
-                    terminalModel.resize(by: delta)
-                }
-            )
+            if !terminalModel.isMaximized {
+                LayoutResizeHandle(
+                    axis: .horizontal,
+                    length: nil,
+                    onDrag: { delta in
+                        terminalModel.resize(by: delta)
+                    }
+                )
+            }
             EmbeddedTerminalPanel(
                 side: side,
                 paneModel: terminalModel,
@@ -508,7 +512,8 @@ struct FilePaneView: View {
                     model.openInTerminal(Set([directory]), on: side)
                 }
             )
-            .frame(height: terminalModel.height)
+            .frame(height: terminalModel.isMaximized ? nil : terminalModel.height)
+            .frame(maxHeight: terminalModel.isMaximized ? .infinity : nil)
         }
     }
 

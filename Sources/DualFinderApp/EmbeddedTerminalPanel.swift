@@ -6,6 +6,7 @@ import SwiftTerm
 @MainActor
 final class EmbeddedTerminalPaneModel: ObservableObject {
     @Published var isExpanded = false
+    @Published var isMaximized = false
     @Published var height: CGFloat = 220
     @Published var tabs: [EmbeddedTerminalTabModel] = []
     @Published var selectedTabID: UUID?
@@ -13,6 +14,7 @@ final class EmbeddedTerminalPaneModel: ObservableObject {
     func toggle(currentDirectory: URL) {
         if isExpanded {
             isExpanded = false
+            isMaximized = false
         } else {
             ensureTab(currentDirectory: currentDirectory)
             isExpanded = true
@@ -21,9 +23,11 @@ final class EmbeddedTerminalPaneModel: ObservableObject {
 
     func collapse() {
         isExpanded = false
+        isMaximized = false
     }
 
     func resize(by delta: CGFloat) {
+        guard !isMaximized else { return }
         height = min(max(height - delta, 140), 420)
     }
 
@@ -33,6 +37,12 @@ final class EmbeddedTerminalPaneModel: ObservableObject {
         selectedTabID = tab.id
     }
 
+    func toggleMaximized(currentDirectory: URL) {
+        ensureTab(currentDirectory: currentDirectory)
+        isExpanded = true
+        isMaximized.toggle()
+    }
+
     func closeTab(_ id: UUID) {
         tabs.first(where: { $0.id == id })?.stop()
         guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
@@ -40,6 +50,7 @@ final class EmbeddedTerminalPaneModel: ObservableObject {
         if tabs.isEmpty {
             selectedTabID = nil
             isExpanded = false
+            isMaximized = false
         } else if selectedTabID == id {
             selectedTabID = tabs[min(index, tabs.count - 1)].id
         }
@@ -194,6 +205,13 @@ struct EmbeddedTerminalPanel: View {
             }
             .buttonStyle(.borderless)
             .help("New terminal tab")
+            Button {
+                paneModel.toggleMaximized(currentDirectory: currentDirectory)
+            } label: {
+                Image(systemName: paneModel.isMaximized ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+            }
+            .buttonStyle(.borderless)
+            .help(paneModel.isMaximized ? "Restore terminal" : "Maximize terminal")
             if let selectedTab {
                 EmbeddedTerminalHeaderControls(
                     tab: selectedTab,
