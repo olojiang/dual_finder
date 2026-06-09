@@ -156,9 +156,9 @@ cat > "$HELPER_APP/Contents/Info.plist" <<'HELPER_PLIST'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.5</string>
+    <string>0.1.6</string>
     <key>CFBundleVersion</key>
-    <string>5</string>
+    <string>6</string>
     <key>LSUIElement</key>
     <true/>
     <key>LSMinimumSystemVersion</key>
@@ -187,9 +187,9 @@ cat > "$CONTENTS/Info.plist" <<PLIST
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.5</string>
+    <string>0.1.6</string>
     <key>CFBundleVersion</key>
-    <string>5</string>
+    <string>6</string>
     <key>CFBundleIconFile</key>
     <string>DualFinder</string>
     <key>LSMinimumSystemVersion</key>

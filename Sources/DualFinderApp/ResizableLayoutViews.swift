@@ -17,8 +17,6 @@ struct LayoutResizeHandle: View {
 
     @State private var isHovering = false
     @State private var isDragging = false
-    @State private var didDrag = false
-    @State private var lastDragTranslation: CGFloat = 0
 
     var body: some View {
         Color.clear
@@ -35,34 +33,15 @@ struct LayoutResizeHandle: View {
                     )
             }
             .contentShape(Rectangle())
-            .onHover { hovering in
-                isHovering = hovering
-                if hovering {
-                    resizeCursor.push()
-                } else {
-                    NSCursor.pop()
-                }
+            .overlay {
+                LayoutResizeTrackingView(
+                    axis: axis,
+                    onDrag: onDrag,
+                    onDragEnded: onDragEnded,
+                    onHoverChanged: { isHovering = $0 },
+                    onDraggingChanged: { isDragging = $0 }
+                )
             }
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { value in
-                        isDragging = true
-                        let translation = axis == .vertical ? value.translation.width : value.translation.height
-                        let delta = translation - lastDragTranslation
-                        lastDragTranslation = translation
-                        guard delta != 0 else { return }
-                        didDrag = true
-                        onDrag(delta)
-                    }
-                    .onEnded { _ in
-                        isDragging = false
-                        lastDragTranslation = 0
-                        if didDrag {
-                            onDragEnded?()
-                        }
-                        didDrag = false
-                    }
-            )
             .accessibilityLabel("Resize")
     }
 
@@ -74,6 +53,108 @@ struct LayoutResizeHandle: View {
             return Color.accentColor.opacity(0.45)
         }
         return Color.secondary.opacity(0.16)
+    }
+
+}
+
+private struct LayoutResizeTrackingView: NSViewRepresentable {
+    let axis: LayoutResizeHandle.Axis
+    let onDrag: (CGFloat) -> Void
+    let onDragEnded: (() -> Void)?
+    let onHoverChanged: (Bool) -> Void
+    let onDraggingChanged: (Bool) -> Void
+
+    func makeNSView(context: Context) -> LayoutResizeTrackingNSView {
+        let view = LayoutResizeTrackingNSView(frame: .zero)
+        updateNSView(view, context: context)
+        return view
+    }
+
+    func updateNSView(_ nsView: LayoutResizeTrackingNSView, context: Context) {
+        nsView.axis = axis
+        nsView.onDrag = onDrag
+        nsView.onDragEnded = onDragEnded
+        nsView.onHoverChanged = onHoverChanged
+        nsView.onDraggingChanged = onDraggingChanged
+    }
+}
+
+private final class LayoutResizeTrackingNSView: NSView {
+    var axis: LayoutResizeHandle.Axis = .vertical {
+        didSet {
+            window?.invalidateCursorRects(for: self)
+        }
+    }
+    var onDrag: (CGFloat) -> Void = { _ in }
+    var onDragEnded: (() -> Void)?
+    var onHoverChanged: (Bool) -> Void = { _ in }
+    var onDraggingChanged: (Bool) -> Void = { _ in }
+
+    private var trackingArea: NSTrackingArea?
+
+    override var acceptsFirstResponder: Bool { true }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingArea {
+            removeTrackingArea(trackingArea)
+        }
+        let options: NSTrackingArea.Options = [
+            .activeInKeyWindow,
+            .mouseEnteredAndExited,
+            .inVisibleRect
+        ]
+        let area = NSTrackingArea(rect: bounds, options: options, owner: self)
+        addTrackingArea(area)
+        trackingArea = area
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: resizeCursor)
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        onHoverChanged(true)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        onHoverChanged(false)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let window else { return }
+        onDraggingChanged(true)
+        var didDrag = false
+        var previousLocation = event.locationInWindow
+
+        while true {
+            guard let nextEvent = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) else {
+                break
+            }
+
+            if nextEvent.type == .leftMouseUp {
+                break
+            }
+
+            let location = nextEvent.locationInWindow
+            let delta = axis == .vertical
+                ? location.x - previousLocation.x
+                : location.y - previousLocation.y
+            previousLocation = location
+            guard delta != 0 else { continue }
+            didDrag = true
+            onDrag(delta)
+        }
+
+        onDraggingChanged(false)
+        if didDrag {
+            onDragEnded?()
+        }
     }
 
     private var resizeCursor: NSCursor {

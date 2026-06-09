@@ -4,30 +4,15 @@ import DualFinderCore
 
 struct ContentView: View {
     @ObservedObject var model: DualFinderViewModel
+    @StateObject private var leftTerminalModel = EmbeddedTerminalPaneModel()
+    @StateObject private var rightTerminalModel = EmbeddedTerminalPaneModel()
     @State private var isOperationHistoryPresented = false
 
     var body: some View {
         VStack(spacing: 0) {
             AppToolbar(model: model, isOperationHistoryPresented: $isOperationHistoryPresented)
             Divider()
-            DualPaneSplitLayout(
-                sidebarWidth: model.uiLayoutPreferences.sidebarWidth,
-                leftPaneFraction: model.uiLayoutPreferences.leftPaneFraction,
-                onResizeLeftPaneFraction: model.setLeftPaneFraction,
-                onResizeLeftPaneEnded: model.commitUILayoutPreferences
-            ) {
-                CommonLocationsSidebar(model: model)
-            } leftPane: {
-                FilePaneView(side: .left, model: model)
-            } rightPane: {
-                FilePaneView(side: .right, model: model)
-            } trailing: {
-                if isOperationHistoryPresented {
-                    Divider()
-                    OperationHistoryPanel(model: model)
-                        .frame(width: 300)
-                }
-            }
+            mainContent
             Divider()
             OperationQueueBar(model: model)
             StatusBar(message: model.statusMessage)
@@ -48,7 +33,12 @@ struct ContentView: View {
         } showBatchRename: {
             model.requestBatchRenameDialog(on: model.activePaneSide)
         } closeActiveTab: {
-            model.closeSelectedTab(on: model.activePaneSide)
+            if closeFocusedTerminalTab() {
+                return true
+            }
+            return model.closeSelectedTab(on: model.activePaneSide)
+        } handleTerminalShortcut: { event in
+            handleTerminalShortcut(event)
         } focusPane: { side, requestID in
             model.requestPaneFocus(side, requestID: requestID, source: "cmd-arrow")
         } selectTab: { index, requestID in
@@ -114,6 +104,135 @@ struct ContentView: View {
         } message: {
             Text(model.showWindowHotkeyPrompt?.message ?? "")
         }
+    }
+
+    private func closeFocusedTerminalTab() -> Bool {
+        guard let focusedView = NSApp.keyWindow?.firstResponder as? NSView else { return false }
+        return leftTerminalModel.closeTab(containing: focusedView)
+            || rightTerminalModel.closeTab(containing: focusedView)
+    }
+
+    private func handleTerminalShortcut(_ event: NSEvent) -> Bool {
+        guard let focusedTerminal = focusedTerminal(in: event.window ?? NSApp.keyWindow) else {
+            return false
+        }
+
+        if let direction = EmbeddedTerminalFocusDirection.commandArrowDirection(for: event) {
+            focusedTerminal.model.focusAdjacentTab(from: focusedTerminal.tabID, direction: direction)
+            return true
+        }
+
+        if let index = terminalOptionNumberIndex(for: event) {
+            focusedTerminal.model.selectTab(atZeroBasedIndex: index, focus: true)
+            return true
+        }
+
+        return false
+    }
+
+    private func focusedTerminal(in window: NSWindow?) -> (model: EmbeddedTerminalPaneModel, tabID: UUID)? {
+        guard let focusedView = window?.firstResponder as? NSView else { return nil }
+        if let tabID = leftTerminalModel.tabID(containing: focusedView) {
+            return (leftTerminalModel, tabID)
+        }
+        if let tabID = rightTerminalModel.tabID(containing: focusedView) {
+            return (rightTerminalModel, tabID)
+        }
+        return nil
+    }
+
+    private func terminalOptionNumberIndex(for event: NSEvent) -> Int? {
+        let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        guard flags == [.option],
+              let character = event.charactersIgnoringModifiers?.first,
+              let number = character.wholeNumberValue,
+              (1...9).contains(number) else {
+            return nil
+        }
+        return number - 1
+    }
+
+    @ViewBuilder
+    private var mainContent: some View {
+        if let maximizedSide = maximizedTerminalSide {
+            maximizedTerminalPanel(for: maximizedSide)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            DualPaneSplitLayout(
+                sidebarWidth: model.uiLayoutPreferences.sidebarWidth,
+                leftPaneFraction: model.uiLayoutPreferences.leftPaneFraction,
+                onResizeLeftPaneFraction: model.setLeftPaneFraction,
+                onResizeLeftPaneEnded: model.commitUILayoutPreferences
+            ) {
+                CommonLocationsSidebar(model: model)
+            } leftPane: {
+                FilePaneView(
+                    side: .left,
+                    model: model,
+                    terminalModel: leftTerminalModel,
+                    onToggleTerminalMaximized: toggleTerminalMaximized
+                )
+            } rightPane: {
+                FilePaneView(
+                    side: .right,
+                    model: model,
+                    terminalModel: rightTerminalModel,
+                    onToggleTerminalMaximized: toggleTerminalMaximized
+                )
+            } trailing: {
+                if isOperationHistoryPresented {
+                    Divider()
+                    OperationHistoryPanel(model: model)
+                        .frame(width: 300)
+                }
+            }
+        }
+    }
+
+    private var maximizedTerminalSide: PaneSide? {
+        if leftTerminalModel.isMaximized {
+            return .left
+        }
+        if rightTerminalModel.isMaximized {
+            return .right
+        }
+        return nil
+    }
+
+    private func maximizedTerminalPanel(for side: PaneSide) -> some View {
+        EmbeddedTerminalPanel(
+            side: side,
+            paneModel: terminalModel(for: side),
+            currentDirectory: terminalDirectory(for: side),
+            openExternal: { directory in
+                model.openInTerminal(Set([directory]), on: side)
+            },
+            toggleMaximized: {
+                toggleTerminalMaximized(side)
+            }
+        )
+    }
+
+    private func toggleTerminalMaximized(_ side: PaneSide) {
+        let terminalModel = terminalModel(for: side)
+        let otherSide: PaneSide = side == .left ? .right : .left
+        if !terminalModel.isMaximized {
+            self.terminalModel(for: otherSide).isMaximized = false
+        }
+        terminalModel.toggleMaximized(currentDirectory: terminalDirectory(for: side))
+    }
+
+    private func terminalModel(for side: PaneSide) -> EmbeddedTerminalPaneModel {
+        side == .left ? leftTerminalModel : rightTerminalModel
+    }
+
+    private func terminalDirectory(for side: PaneSide) -> URL {
+        let url = model.pane(for: side).selectedURL
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue {
+            return url.standardizedFileURL
+        }
+        return url.deletingLastPathComponent().standardizedFileURL
     }
 
     private var showWindowHotkeyAlertBinding: Binding<Bool> {
@@ -931,6 +1050,7 @@ private struct AppShortcutHandler: NSViewRepresentable {
     let showFolderBookmarks: () -> Void
     let showBatchRename: () -> Void
     let closeActiveTab: () -> Bool
+    let handleTerminalShortcut: (NSEvent) -> Bool
     let focusPane: (PaneSide, String) -> Void
     let selectTab: (Int, String) -> Void
     let logShortcutEvent: (String, [String: String]) -> Void
@@ -951,6 +1071,7 @@ private struct AppShortcutHandler: NSViewRepresentable {
             showFolderBookmarks: showFolderBookmarks,
             showBatchRename: showBatchRename,
             closeActiveTab: closeActiveTab,
+            handleTerminalShortcut: handleTerminalShortcut,
             focusPane: focusPane,
             selectTab: selectTab,
             logShortcutEvent: logShortcutEvent,
@@ -978,6 +1099,7 @@ private struct AppShortcutHandler: NSViewRepresentable {
         context.coordinator.showFolderBookmarks = showFolderBookmarks
         context.coordinator.showBatchRename = showBatchRename
         context.coordinator.closeActiveTab = closeActiveTab
+        context.coordinator.handleTerminalShortcut = handleTerminalShortcut
         context.coordinator.focusPane = focusPane
         context.coordinator.selectTab = selectTab
         context.coordinator.logShortcutEvent = logShortcutEvent
@@ -1003,6 +1125,7 @@ private struct AppShortcutHandler: NSViewRepresentable {
         var showFolderBookmarks: () -> Void
         var showBatchRename: () -> Void
         var closeActiveTab: () -> Bool
+        var handleTerminalShortcut: (NSEvent) -> Bool
         var focusPane: (PaneSide, String) -> Void
         var selectTab: (Int, String) -> Void
         var logShortcutEvent: (String, [String: String]) -> Void
@@ -1024,6 +1147,7 @@ private struct AppShortcutHandler: NSViewRepresentable {
             showFolderBookmarks: @escaping () -> Void,
             showBatchRename: @escaping () -> Void,
             closeActiveTab: @escaping () -> Bool,
+            handleTerminalShortcut: @escaping (NSEvent) -> Bool,
             focusPane: @escaping (PaneSide, String) -> Void,
             selectTab: @escaping (Int, String) -> Void,
             logShortcutEvent: @escaping (String, [String: String]) -> Void,
@@ -1043,6 +1167,7 @@ private struct AppShortcutHandler: NSViewRepresentable {
             self.showFolderBookmarks = showFolderBookmarks
             self.showBatchRename = showBatchRename
             self.closeActiveTab = closeActiveTab
+            self.handleTerminalShortcut = handleTerminalShortcut
             self.focusPane = focusPane
             self.selectTab = selectTab
             self.logShortcutEvent = logShortcutEvent
@@ -1060,6 +1185,9 @@ private struct AppShortcutHandler: NSViewRepresentable {
 
             monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
                 guard self?.isSuspended != true else { return event }
+                if self?.handleTerminalShortcut(event) == true {
+                    return nil
+                }
                 guard let action = AppShortcutMatrix.action(matching: event) else {
                     return event
                 }

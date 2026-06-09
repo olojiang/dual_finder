@@ -1,15 +1,21 @@
-import AppKit
+@preconcurrency import AppKit
 import SwiftUI
 import DualFinderCore
 import SwiftTerm
 
 @MainActor
 final class EmbeddedTerminalPaneModel: ObservableObject {
+    static let minimumHeight: CGFloat = 140
+    static let maximumHeight: CGFloat = 420
+    static let minimumSplitFraction = 0.18
+    static let maximumSplitFraction = 0.82
+
     @Published var isExpanded = false
     @Published var isMaximized = false
     @Published var height: CGFloat = 220
     @Published var tabs: [EmbeddedTerminalTabModel] = []
     @Published var selectedTabID: UUID?
+    @Published var layout: EmbeddedTerminalLayout?
 
     func toggle(currentDirectory: URL) {
         if isExpanded {
@@ -28,13 +34,46 @@ final class EmbeddedTerminalPaneModel: ObservableObject {
 
     func resize(by delta: CGFloat) {
         guard !isMaximized else { return }
-        height = min(max(height - delta, 140), 420)
+        resize(to: height - delta)
+    }
+
+    func resize(to height: CGFloat) {
+        guard !isMaximized else { return }
+        self.height = Self.clampedHeight(height)
+    }
+
+    static func clampedHeight(_ height: CGFloat) -> CGFloat {
+        min(max(height, minimumHeight), maximumHeight)
     }
 
     func addTab(currentDirectory: URL) {
-        let tab = EmbeddedTerminalTabModel(workingDirectory: currentDirectory)
+        let tab = makeTab(currentDirectory: currentDirectory)
         tabs.append(tab)
         selectedTabID = tab.id
+        if let layout {
+            self.layout = layout.replacingLeaf(selectedLeafID(in: layout), with: .leaf(tab.id))
+        } else {
+            layout = .leaf(tab.id)
+        }
+    }
+
+    func selectTab(_ id: UUID) {
+        selectedTabID = id
+        guard let layout, !layout.containsLeaf(id) else { return }
+        self.layout = layout.replacingLeaf(selectedLeafID(in: layout), with: .leaf(id))
+    }
+
+    @discardableResult
+    func selectTab(atZeroBasedIndex index: Int, focus: Bool = false) -> EmbeddedTerminalTabModel? {
+        guard tabs.indices.contains(index) else { return nil }
+        let tab = tabs[index]
+        selectTab(tab.id)
+        if focus {
+            DispatchQueue.main.async {
+                tab.focus()
+            }
+        }
+        return tab
     }
 
     func toggleMaximized(currentDirectory: URL) {
@@ -49,19 +88,276 @@ final class EmbeddedTerminalPaneModel: ObservableObject {
         tabs.remove(at: index)
         if tabs.isEmpty {
             selectedTabID = nil
+            layout = nil
             isExpanded = false
             isMaximized = false
         } else if selectedTabID == id {
             selectedTabID = tabs[min(index, tabs.count - 1)].id
         }
+        layout = layout?.removingLeaf(id)
+        if layout == nil, let selectedTabID {
+            layout = .leaf(selectedTabID)
+        }
+    }
+
+    func splitSelected(direction: EmbeddedTerminalSplitDirection, currentDirectory: URL) {
+        ensureTab(currentDirectory: currentDirectory)
+        guard let selectedTabID else { return }
+        split(tabID: selectedTabID, direction: direction, currentDirectory: currentDirectory)
+    }
+
+    func split(tabID: UUID, direction: EmbeddedTerminalSplitDirection, currentDirectory: URL) {
+        guard tabs.contains(where: { $0.id == tabID }) else { return }
+        let newTab = makeTab(currentDirectory: currentDirectory)
+        tabs.append(newTab)
+        let replacement = EmbeddedTerminalLayout.split(
+            id: UUID(),
+            direction: direction,
+            fraction: 0.5,
+            first: .leaf(tabID),
+            second: .leaf(newTab.id)
+        )
+        layout = (layout ?? .leaf(tabID)).replacingLeaf(tabID, with: replacement)
+        self.selectedTabID = newTab.id
+    }
+
+    func resizeSplit(id: UUID, by delta: CGFloat, availableLength: CGFloat) {
+        guard availableLength > 0, let layout else { return }
+        let ratioDelta = Double(delta / availableLength)
+        self.layout = layout.updatingSplit(id: id) { fraction in
+            Self.clampedSplitFraction(fraction + ratioDelta)
+        }
+    }
+
+    func resizeSplit(id: UUID, to fraction: Double) {
+        guard let layout else { return }
+        self.layout = layout.updatingSplit(id: id) { _ in
+            Self.clampedSplitFraction(fraction)
+        }
+    }
+
+    func tab(with id: UUID) -> EmbeddedTerminalTabModel? {
+        tabs.first(where: { $0.id == id })
+    }
+
+    func tabID(containing view: NSView) -> UUID? {
+        tabs.first { tab in
+            view === tab.terminalView || view.isDescendant(of: tab.terminalView)
+        }?.id
+    }
+
+    @discardableResult
+    func closeTab(containing view: NSView) -> Bool {
+        guard let id = tabID(containing: view) else { return false }
+        closeTab(id)
+        return true
+    }
+
+    @discardableResult
+    func focusAdjacentTab(from id: UUID, direction: EmbeddedTerminalFocusDirection) -> Bool {
+        guard let adjacentID = layout?.adjacentLeaf(to: id, direction: direction),
+              let tab = tab(with: adjacentID) else {
+            return false
+        }
+        selectTab(adjacentID)
+        DispatchQueue.main.async {
+            tab.focus()
+        }
+        return true
+    }
+
+    static func clampedSplitFraction(_ fraction: Double) -> Double {
+        min(max(fraction, minimumSplitFraction), maximumSplitFraction)
+    }
+
+    private func makeTab(currentDirectory: URL) -> EmbeddedTerminalTabModel {
+        let tab = EmbeddedTerminalTabModel(workingDirectory: currentDirectory)
+        tab.onProcessTerminated = { [weak self] tab in
+            self?.closeTab(tab.id)
+        }
+        return tab
     }
 
     private func ensureTab(currentDirectory: URL) {
         guard tabs.isEmpty else {
             selectedTabID = selectedTabID ?? tabs.first?.id
+            layout = layout ?? selectedTabID.map { .leaf($0) }
             return
         }
         addTab(currentDirectory: currentDirectory)
+    }
+
+    private func selectedLeafID(in layout: EmbeddedTerminalLayout) -> UUID {
+        if let selectedTabID, layout.containsLeaf(selectedTabID) {
+            return selectedTabID
+        }
+        return layout.firstLeafID ?? tabs.first?.id ?? UUID()
+    }
+}
+
+enum EmbeddedTerminalSplitDirection: Equatable {
+    case sideBySide
+    case stacked
+}
+
+enum EmbeddedTerminalFocusDirection: Equatable {
+    case left
+    case right
+    case up
+    case down
+
+    static func commandArrowDirection(for event: NSEvent) -> EmbeddedTerminalFocusDirection? {
+        let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        guard flags == [.command] else { return nil }
+
+        switch event.keyCode {
+        case 123:
+            return .left
+        case 124:
+            return .right
+        case 126:
+            return .up
+        case 125:
+            return .down
+        default:
+            return nil
+        }
+    }
+}
+
+indirect enum EmbeddedTerminalLayout: Equatable {
+    case leaf(UUID)
+    case split(
+        id: UUID,
+        direction: EmbeddedTerminalSplitDirection,
+        fraction: Double,
+        first: EmbeddedTerminalLayout,
+        second: EmbeddedTerminalLayout
+    )
+
+    var firstLeafID: UUID? {
+        switch self {
+        case .leaf(let id):
+            return id
+        case .split(_, _, _, let first, let second):
+            return first.firstLeafID ?? second.firstLeafID
+        }
+    }
+
+    func containsLeaf(_ id: UUID) -> Bool {
+        switch self {
+        case .leaf(let leafID):
+            return leafID == id
+        case .split(_, _, _, let first, let second):
+            return first.containsLeaf(id) || second.containsLeaf(id)
+        }
+    }
+
+    func replacingLeaf(_ targetID: UUID, with replacement: EmbeddedTerminalLayout) -> EmbeddedTerminalLayout {
+        switch self {
+        case .leaf(let id):
+            return id == targetID ? replacement : self
+        case .split(let id, let direction, let fraction, let first, let second):
+            return .split(
+                id: id,
+                direction: direction,
+                fraction: fraction,
+                first: first.replacingLeaf(targetID, with: replacement),
+                second: second.replacingLeaf(targetID, with: replacement)
+            )
+        }
+    }
+
+    func removingLeaf(_ targetID: UUID) -> EmbeddedTerminalLayout? {
+        switch self {
+        case .leaf(let id):
+            return id == targetID ? nil : self
+        case .split(let id, let direction, let fraction, let first, let second):
+            let newFirst = first.removingLeaf(targetID)
+            let newSecond = second.removingLeaf(targetID)
+            switch (newFirst, newSecond) {
+            case let (first?, second?):
+                return .split(id: id, direction: direction, fraction: fraction, first: first, second: second)
+            case let (first?, nil):
+                return first
+            case let (nil, second?):
+                return second
+            case (nil, nil):
+                return nil
+            }
+        }
+    }
+
+    func updatingSplit(id targetID: UUID, update: (Double) -> Double) -> EmbeddedTerminalLayout {
+        switch self {
+        case .leaf:
+            return self
+        case .split(let id, let direction, let fraction, let first, let second):
+            return .split(
+                id: id,
+                direction: direction,
+                fraction: id == targetID ? update(fraction) : fraction,
+                first: first.updatingSplit(id: targetID, update: update),
+                second: second.updatingSplit(id: targetID, update: update)
+            )
+        }
+    }
+
+    func adjacentLeaf(to targetID: UUID, direction: EmbeddedTerminalFocusDirection) -> UUID? {
+        switch self {
+        case .leaf:
+            return nil
+        case .split(_, let splitDirection, _, let first, let second):
+            if first.containsLeaf(targetID) {
+                if let nested = first.adjacentLeaf(to: targetID, direction: direction) {
+                    return nested
+                }
+                switch (splitDirection, direction) {
+                case (.sideBySide, .right):
+                    return second.boundaryLeaf(facing: .left)
+                case (.stacked, .down):
+                    return second.boundaryLeaf(facing: .up)
+                default:
+                    return nil
+                }
+            }
+
+            if second.containsLeaf(targetID) {
+                if let nested = second.adjacentLeaf(to: targetID, direction: direction) {
+                    return nested
+                }
+                switch (splitDirection, direction) {
+                case (.sideBySide, .left):
+                    return first.boundaryLeaf(facing: .right)
+                case (.stacked, .up):
+                    return first.boundaryLeaf(facing: .down)
+                default:
+                    return nil
+                }
+            }
+
+            return nil
+        }
+    }
+
+    private func boundaryLeaf(facing direction: EmbeddedTerminalFocusDirection) -> UUID? {
+        switch self {
+        case .leaf(let id):
+            return id
+        case .split(_, let splitDirection, _, let first, let second):
+            switch (splitDirection, direction) {
+            case (.sideBySide, .left):
+                return first.boundaryLeaf(facing: direction)
+            case (.sideBySide, .right):
+                return second.boundaryLeaf(facing: direction)
+            case (.stacked, .up):
+                return first.boundaryLeaf(facing: direction)
+            case (.stacked, .down):
+                return second.boundaryLeaf(facing: direction)
+            default:
+                return first.firstLeafID ?? second.firstLeafID
+            }
+        }
     }
 }
 
@@ -73,6 +369,7 @@ final class EmbeddedTerminalTabModel: ObservableObject, Identifiable {
     @Published private(set) var isRunning = false
 
     let terminalView: LocalProcessTerminalView
+    var onProcessTerminated: ((EmbeddedTerminalTabModel) -> Void)?
     private var hasStarted = false
 
     init(workingDirectory: URL) {
@@ -90,7 +387,6 @@ final class EmbeddedTerminalTabModel: ObservableObject, Identifiable {
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
         let executable = FileManager.default.fileExists(atPath: shell) ? shell : "/bin/zsh"
         let shellName = URL(fileURLWithPath: executable).lastPathComponent
-        terminalView.feed(text: "Dual Finder Terminal\n\(workingDirectory.path)\n\n")
         terminalView.startProcess(
             executable: executable,
             execName: "-\(shellName)",
@@ -118,14 +414,15 @@ final class EmbeddedTerminalTabModel: ObservableObject, Identifiable {
         terminalView.caretViewTracksFocus = true
     }
 
-    private func updateWorkingDirectory(_ directory: String?) {
+    func handleWorkingDirectoryUpdate(_ directory: String?) {
         guard let directory, !directory.isEmpty else { return }
-        let previousAutomaticTitle = Self.title(for: workingDirectory)
         let url = URL(fileURLWithPath: directory, isDirectory: true).standardizedFileURL
         workingDirectory = url
-        if title == previousAutomaticTitle || title.isEmpty {
-            title = Self.title(for: url)
-        }
+        title = Self.title(for: url)
+    }
+
+    func handleTerminalTitle(_ title: String) {
+        self.title = Self.title(for: workingDirectory)
     }
 
     private static func title(for directory: URL) -> String {
@@ -140,23 +437,33 @@ extension EmbeddedTerminalTabModel: LocalProcessTerminalViewDelegate {
     nonisolated func setTerminalTitle(source: LocalProcessTerminalView, title: String) {
         Task { @MainActor [weak self] in
             guard let self else { return }
-            self.title = title.isEmpty ? Self.title(for: self.workingDirectory) : title
+            self.handleTerminalTitle(title)
         }
     }
 
     nonisolated func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {
         Task { @MainActor [weak self] in
-            self?.updateWorkingDirectory(directory)
+            self?.handleWorkingDirectoryUpdate(directory)
         }
     }
 
     nonisolated func processTerminated(source: TerminalView, exitCode: Int32?) {
         Task { @MainActor [weak self] in
-            guard let self else { return }
-            self.isRunning = false
-            let status = exitCode.map { String($0) } ?? "unknown"
-            self.terminalView.feed(text: "\n[process exited: \(status)]\n")
+            self?.handleProcessTerminated(exitCode: exitCode)
         }
+    }
+}
+
+extension EmbeddedTerminalTabModel {
+    func handleProcessTerminated(exitCode: Int32?) {
+        isRunning = false
+        if let onProcessTerminated {
+            onProcessTerminated(self)
+            return
+        }
+
+        let status = exitCode.map { String($0) } ?? "unknown"
+        terminalView.feed(text: "\n[process exited: \(status)]\n")
     }
 }
 
@@ -165,6 +472,7 @@ struct EmbeddedTerminalPanel: View {
     @ObservedObject var paneModel: EmbeddedTerminalPaneModel
     let currentDirectory: URL
     let openExternal: (URL) -> Void
+    let toggleMaximized: () -> Void
 
     private var selectedTab: EmbeddedTerminalTabModel? {
         if let selectedTabID = paneModel.selectedTabID,
@@ -178,11 +486,49 @@ struct EmbeddedTerminalPanel: View {
         VStack(spacing: 0) {
             header
             Divider()
-            if let selectedTab {
-                EmbeddedTerminalTabView(tab: selectedTab)
+            if let layout = paneModel.layout {
+                EmbeddedTerminalLayoutView(
+                    layout: layout,
+                    paneModel: paneModel,
+                    currentDirectory: currentDirectory
+                )
+            } else if let selectedTab {
+                EmbeddedTerminalTabView(
+                    tab: selectedTab,
+                    isSelected: selectedTab.id == paneModel.selectedTabID,
+                    select: {
+                        paneModel.selectTab(selectedTab.id)
+                    }
+                )
             }
         }
         .background(Color(nsColor: .textBackgroundColor))
+        .background(EmbeddedTerminalShortcutHandler(
+            focusedTabID: { window in
+                focusedTerminalTabID(in: window)
+            },
+            splitSideBySide: {
+                splitFocusedTerminal(direction: .sideBySide)
+            },
+            splitStacked: {
+                splitFocusedTerminal(direction: .stacked)
+            }
+        ))
+    }
+
+    private func splitFocusedTerminal(direction: EmbeddedTerminalSplitDirection) {
+        if let focusedTabID = focusedTerminalTabID(in: NSApp.keyWindow) {
+            paneModel.split(tabID: focusedTabID, direction: direction, currentDirectory: currentDirectory)
+        } else {
+            paneModel.splitSelected(direction: direction, currentDirectory: currentDirectory)
+        }
+    }
+
+    private func focusedTerminalTabID(in window: NSWindow?) -> UUID? {
+        guard let firstResponder = window?.firstResponder as? NSView else { return nil }
+        return paneModel.tabs.first { tab in
+            firstResponder === tab.terminalView || firstResponder.isDescendant(of: tab.terminalView)
+        }?.id
     }
 
     private var header: some View {
@@ -206,7 +552,21 @@ struct EmbeddedTerminalPanel: View {
             .buttonStyle(.borderless)
             .help("New terminal tab")
             Button {
-                paneModel.toggleMaximized(currentDirectory: currentDirectory)
+                paneModel.splitSelected(direction: .sideBySide, currentDirectory: currentDirectory)
+            } label: {
+                Image(systemName: "rectangle.split.2x1")
+            }
+            .buttonStyle(.borderless)
+            .help("Split terminal right (Command-D)")
+            Button {
+                paneModel.splitSelected(direction: .stacked, currentDirectory: currentDirectory)
+            } label: {
+                Image(systemName: "rectangle.split.1x2")
+            }
+            .buttonStyle(.borderless)
+            .help("Split terminal down (Command-Shift-D)")
+            Button {
+                toggleMaximized()
             } label: {
                 Image(systemName: paneModel.isMaximized ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
             }
@@ -234,7 +594,7 @@ struct EmbeddedTerminalPanel: View {
     private func terminalTabButton(_ tab: EmbeddedTerminalTabModel) -> some View {
         HStack(spacing: 4) {
             Button {
-                paneModel.selectedTabID = tab.id
+                paneModel.selectTab(tab.id)
             } label: {
                 HStack(spacing: 4) {
                     Circle()
@@ -266,6 +626,134 @@ struct EmbeddedTerminalPanel: View {
     }
 }
 
+private struct EmbeddedTerminalLayoutView: View {
+    let layout: EmbeddedTerminalLayout
+    @ObservedObject var paneModel: EmbeddedTerminalPaneModel
+    let currentDirectory: URL
+
+    @State private var activeResizeSplitID: UUID?
+    @State private var dragStartFraction: Double?
+    @State private var dragStartAvailableLength: CGFloat = 0
+    @State private var dragAccumulatedDelta: CGFloat = 0
+    @State private var dragPreviewFraction: Double?
+
+    var body: some View {
+        GeometryReader { geometry in
+            content(for: layout, size: geometry.size)
+        }
+    }
+
+    private func content(for layout: EmbeddedTerminalLayout, size: CGSize) -> AnyView {
+        switch layout {
+        case .leaf(let tabID):
+            if let tab = paneModel.tab(with: tabID) {
+                return AnyView(EmbeddedTerminalTabView(
+                    tab: tab,
+                    isSelected: paneModel.selectedTabID == tabID,
+                    select: {
+                        paneModel.selectTab(tabID)
+                    }
+                ))
+            } else {
+                return AnyView(Color.clear)
+            }
+        case .split(let id, let direction, let fraction, let first, let second):
+            switch direction {
+            case .sideBySide:
+                let availableWidth = max(size.width - 5, 1)
+                return AnyView(ZStack(alignment: .leading) {
+                    HStack(spacing: 0) {
+                        content(for: first, size: CGSize(width: availableWidth * fraction, height: size.height))
+                            .frame(width: availableWidth * fraction)
+                        splitResizeHandle(id: id, fraction: fraction, availableLength: availableWidth, axis: .vertical)
+                        content(for: second, size: CGSize(width: availableWidth * (1 - fraction), height: size.height))
+                            .frame(width: availableWidth * (1 - fraction))
+                    }
+                    splitPreviewLine(id: id, direction: direction, availableLength: availableWidth)
+                })
+            case .stacked:
+                let availableHeight = max(size.height - 5, 1)
+                return AnyView(ZStack(alignment: .top) {
+                    VStack(spacing: 0) {
+                        content(for: first, size: CGSize(width: size.width, height: availableHeight * fraction))
+                            .frame(height: availableHeight * fraction)
+                        splitResizeHandle(id: id, fraction: fraction, availableLength: availableHeight, axis: .horizontal)
+                        content(for: second, size: CGSize(width: size.width, height: availableHeight * (1 - fraction)))
+                            .frame(height: availableHeight * (1 - fraction))
+                    }
+                    splitPreviewLine(id: id, direction: direction, availableLength: availableHeight)
+                })
+            }
+        }
+    }
+
+    private func splitResizeHandle(
+        id: UUID,
+        fraction: Double,
+        availableLength: CGFloat,
+        axis: LayoutResizeHandle.Axis
+    ) -> some View {
+        LayoutResizeHandle(
+            axis: axis,
+            length: nil,
+            onDrag: { delta in
+                beginSplitDragIfNeeded(id: id, fraction: fraction, availableLength: availableLength)
+                dragAccumulatedDelta += delta
+                let nextFraction = (dragStartFraction ?? fraction)
+                    + Double(dragAccumulatedDelta / max(dragStartAvailableLength, 1))
+                dragPreviewFraction = EmbeddedTerminalPaneModel.clampedSplitFraction(nextFraction)
+            },
+            onDragEnded: {
+                if activeResizeSplitID == id, let dragPreviewFraction {
+                    paneModel.resizeSplit(id: id, to: dragPreviewFraction)
+                }
+                resetSplitDrag()
+            }
+        )
+    }
+
+    @ViewBuilder
+    private func splitPreviewLine(
+        id: UUID,
+        direction: EmbeddedTerminalSplitDirection,
+        availableLength: CGFloat
+    ) -> some View {
+        if activeResizeSplitID == id, let dragPreviewFraction {
+            let offset = availableLength * dragPreviewFraction + 2.5
+            switch direction {
+            case .sideBySide:
+                Rectangle()
+                    .fill(Color.accentColor.opacity(0.85))
+                    .frame(width: 1)
+                    .offset(x: offset)
+                    .allowsHitTesting(false)
+            case .stacked:
+                Rectangle()
+                    .fill(Color.accentColor.opacity(0.85))
+                    .frame(height: 1)
+                    .offset(y: offset)
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+
+    private func beginSplitDragIfNeeded(id: UUID, fraction: Double, availableLength: CGFloat) {
+        guard activeResizeSplitID == nil else { return }
+        activeResizeSplitID = id
+        dragStartFraction = fraction
+        dragStartAvailableLength = max(availableLength, 1)
+        dragAccumulatedDelta = 0
+    }
+
+    private func resetSplitDrag() {
+        activeResizeSplitID = nil
+        dragStartFraction = nil
+        dragStartAvailableLength = 0
+        dragAccumulatedDelta = 0
+        dragPreviewFraction = nil
+    }
+}
+
 private struct EmbeddedTerminalHeaderControls: View {
     @ObservedObject var tab: EmbeddedTerminalTabModel
     let openExternal: (URL) -> Void
@@ -294,18 +782,101 @@ private struct EmbeddedTerminalHeaderControls: View {
 
 private struct EmbeddedTerminalTabView: View {
     @ObservedObject var tab: EmbeddedTerminalTabModel
+    let isSelected: Bool
+    let select: () -> Void
 
     var body: some View {
         EmbeddedLocalTerminalView(tab: tab)
             .background(Color(nsColor: tab.terminalView.nativeBackgroundColor))
             .onTapGesture {
+                select()
                 tab.focus()
             }
         .onAppear {
             tab.startIfNeeded()
-            DispatchQueue.main.async {
-                tab.focus()
+            if isSelected {
+                DispatchQueue.main.async {
+                    tab.focus()
+                }
             }
+        }
+    }
+}
+
+private struct EmbeddedTerminalShortcutHandler: NSViewRepresentable {
+    let focusedTabID: (NSWindow?) -> UUID?
+    let splitSideBySide: () -> Void
+    let splitStacked: () -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        context.coordinator.install()
+        return NSView(frame: .zero)
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.focusedTabID = focusedTabID
+        context.coordinator.splitSideBySide = splitSideBySide
+        context.coordinator.splitStacked = splitStacked
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(
+            focusedTabID: focusedTabID,
+            splitSideBySide: splitSideBySide,
+            splitStacked: splitStacked
+        )
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.uninstall()
+    }
+
+    final class Coordinator {
+        var focusedTabID: (NSWindow?) -> UUID?
+        var splitSideBySide: () -> Void
+        var splitStacked: () -> Void
+        private var monitor: Any?
+
+        init(
+            focusedTabID: @escaping (NSWindow?) -> UUID?,
+            splitSideBySide: @escaping () -> Void,
+            splitStacked: @escaping () -> Void
+        ) {
+            self.focusedTabID = focusedTabID
+            self.splitSideBySide = splitSideBySide
+            self.splitStacked = splitStacked
+        }
+
+        func install() {
+            guard monitor == nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                self?.handle(event) == true ? nil : event
+            }
+        }
+
+        func uninstall() {
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+            }
+            monitor = nil
+        }
+
+        private func handle(_ event: NSEvent) -> Bool {
+            guard event.charactersIgnoringModifiers?.lowercased() == "d",
+                  event.modifierFlags.contains(.command),
+                  !event.modifierFlags.contains(.option),
+                  !event.modifierFlags.contains(.control),
+                  focusedTabID(event.window) != nil
+            else {
+                return false
+            }
+
+            if event.modifierFlags.contains(.shift) {
+                splitStacked()
+            } else {
+                splitSideBySide()
+            }
+            return true
         }
     }
 }

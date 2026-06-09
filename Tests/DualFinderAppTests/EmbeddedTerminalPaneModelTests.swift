@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import Testing
 @testable import DualFinderApp
 
@@ -32,6 +33,52 @@ struct EmbeddedTerminalPaneModelTests {
         #expect(model.tabs.isEmpty)
         #expect(model.selectedTabID == nil)
         #expect(!model.isExpanded)
+    }
+
+    @Test("process exit closes the matching terminal")
+    func processExitClosesMatchingTerminal() throws {
+        let model = EmbeddedTerminalPaneModel()
+        model.toggle(currentDirectory: URL(fileURLWithPath: "/tmp", isDirectory: true))
+        let tab = try #require(model.tabs.first)
+
+        tab.handleProcessTerminated(exitCode: 0)
+
+        #expect(model.tabs.isEmpty)
+        #expect(model.selectedTabID == nil)
+        #expect(model.layout == nil)
+        #expect(!model.isExpanded)
+    }
+
+    @Test("process exit removes only its split leaf")
+    func processExitRemovesOnlyItsSplitLeaf() throws {
+        let model = EmbeddedTerminalPaneModel()
+        let directory = URL(fileURLWithPath: "/tmp", isDirectory: true)
+
+        model.toggle(currentDirectory: directory)
+        let firstTab = try #require(model.tabs.first)
+        model.splitSelected(direction: .sideBySide, currentDirectory: directory)
+        let remainingTabID = try #require(model.selectedTabID)
+
+        firstTab.handleProcessTerminated(exitCode: 0)
+
+        #expect(model.tabs.map(\.id) == [remainingTabID])
+        #expect(model.selectedTabID == remainingTabID)
+        #expect(model.layout == .leaf(remainingTabID))
+        #expect(model.isExpanded)
+    }
+
+    @Test("focused terminal descendant can be closed")
+    func focusedTerminalDescendantCanBeClosed() throws {
+        let model = EmbeddedTerminalPaneModel()
+        model.toggle(currentDirectory: URL(fileURLWithPath: "/tmp", isDirectory: true))
+        let tab = try #require(model.tabs.first)
+        let nestedView = NSView(frame: .zero)
+        tab.terminalView.addSubview(nestedView)
+
+        let didClose = model.closeTab(containing: nestedView)
+
+        #expect(didClose)
+        #expect(model.tabs.isEmpty)
     }
 
     @Test("height resize is clamped")
@@ -90,6 +137,134 @@ struct EmbeddedTerminalPaneModelTests {
         model.resize(by: -1_000)
 
         #expect(model.height == 220)
+    }
+
+    @Test("splitting selected terminal creates a second pane")
+    func splittingSelectedTerminalCreatesSecondPane() throws {
+        let model = EmbeddedTerminalPaneModel()
+        let directory = URL(fileURLWithPath: "/tmp", isDirectory: true)
+
+        model.toggle(currentDirectory: directory)
+        let originalTabID = try #require(model.selectedTabID)
+
+        model.splitSelected(direction: .sideBySide, currentDirectory: directory)
+
+        #expect(model.tabs.count == 2)
+        #expect(model.selectedTabID != originalTabID)
+        guard case .split(_, .sideBySide, 0.5, .leaf(originalTabID), .leaf(let newTabID)) = model.layout else {
+            Issue.record("Expected a side-by-side split layout")
+            return
+        }
+        #expect(model.selectedTabID == newTabID)
+    }
+
+    @Test("splitting an explicit terminal ignores stale selected tab")
+    func splittingExplicitTerminalIgnoresStaleSelectedTab() throws {
+        let model = EmbeddedTerminalPaneModel()
+        let directory = URL(fileURLWithPath: "/tmp", isDirectory: true)
+
+        model.toggle(currentDirectory: directory)
+        let firstTabID = try #require(model.selectedTabID)
+        model.splitSelected(direction: .stacked, currentDirectory: directory)
+        let secondTabID = try #require(model.selectedTabID)
+
+        model.split(tabID: firstTabID, direction: .sideBySide, currentDirectory: directory)
+
+        #expect(model.tabs.count == 3)
+        #expect(model.selectedTabID != secondTabID)
+        guard case .split(_, .stacked, _, .split(_, .sideBySide, _, .leaf(firstTabID), .leaf), .leaf(secondTabID)) = model.layout else {
+            Issue.record("Expected the focused first terminal leaf to be split, not the stale selected tab")
+            return
+        }
+    }
+
+    @Test("split resizing is clamped")
+    func splitResizingIsClamped() throws {
+        let model = EmbeddedTerminalPaneModel()
+        let directory = URL(fileURLWithPath: "/tmp", isDirectory: true)
+
+        model.toggle(currentDirectory: directory)
+        model.splitSelected(direction: .stacked, currentDirectory: directory)
+        guard case .split(let splitID, _, _, _, _) = model.layout else {
+            Issue.record("Expected a split layout")
+            return
+        }
+
+        model.resizeSplit(id: splitID, by: 1_000, availableLength: 1_000)
+        guard case .split(_, _, let highFraction, _, _) = model.layout else {
+            Issue.record("Expected a split layout after resize")
+            return
+        }
+        #expect(highFraction == 0.82)
+
+        model.resizeSplit(id: splitID, by: -1_000, availableLength: 1_000)
+        guard case .split(_, _, let lowFraction, _, _) = model.layout else {
+            Issue.record("Expected a split layout after resize")
+            return
+        }
+        #expect(lowFraction == 0.18)
+    }
+
+    @Test("terminal split focus moves by direction")
+    func terminalSplitFocusMovesByDirection() throws {
+        let model = EmbeddedTerminalPaneModel()
+        let directory = URL(fileURLWithPath: "/tmp", isDirectory: true)
+
+        model.toggle(currentDirectory: directory)
+        let leftTabID = try #require(model.selectedTabID)
+        model.splitSelected(direction: .sideBySide, currentDirectory: directory)
+        let rightTabID = try #require(model.selectedTabID)
+
+        #expect(model.focusAdjacentTab(from: rightTabID, direction: .left))
+        #expect(model.selectedTabID == leftTabID)
+        #expect(model.focusAdjacentTab(from: leftTabID, direction: .right))
+        #expect(model.selectedTabID == rightTabID)
+    }
+
+    @Test("terminal stacked split focus moves vertically")
+    func terminalStackedSplitFocusMovesVertically() throws {
+        let model = EmbeddedTerminalPaneModel()
+        let directory = URL(fileURLWithPath: "/tmp", isDirectory: true)
+
+        model.toggle(currentDirectory: directory)
+        let topTabID = try #require(model.selectedTabID)
+        model.splitSelected(direction: .stacked, currentDirectory: directory)
+        let bottomTabID = try #require(model.selectedTabID)
+
+        #expect(model.focusAdjacentTab(from: bottomTabID, direction: .up))
+        #expect(model.selectedTabID == topTabID)
+        #expect(model.focusAdjacentTab(from: topTabID, direction: .down))
+        #expect(model.selectedTabID == bottomTabID)
+    }
+
+    @Test("terminal tab index selection focuses requested tab")
+    func terminalTabIndexSelectionFocusesRequestedTab() throws {
+        let model = EmbeddedTerminalPaneModel()
+        let directory = URL(fileURLWithPath: "/tmp", isDirectory: true)
+
+        model.toggle(currentDirectory: directory)
+        model.addTab(currentDirectory: directory.appendingPathComponent("second", isDirectory: true))
+        model.addTab(currentDirectory: directory.appendingPathComponent("third", isDirectory: true))
+
+        let selected = try #require(model.selectTab(atZeroBasedIndex: 1))
+
+        #expect(selected.workingDirectory.lastPathComponent == "second")
+        #expect(model.selectedTabID == selected.id)
+    }
+
+    @Test("terminal tab title follows working directory basename")
+    func terminalTabTitleFollowsWorkingDirectoryBasename() {
+        let tab = EmbeddedTerminalTabModel(
+            workingDirectory: URL(fileURLWithPath: "/Users/hunter/Workspace/dual_finder", isDirectory: true)
+        )
+
+        #expect(tab.title == "dual_finder")
+
+        tab.handleTerminalTitle("hunter@host:~/Workspace/dual_finder")
+        #expect(tab.title == "dual_finder")
+
+        tab.handleWorkingDirectoryUpdate("/Users/hunter")
+        #expect(tab.title == "hunter")
     }
 
     @Test("terminal tab starts a PTY session")

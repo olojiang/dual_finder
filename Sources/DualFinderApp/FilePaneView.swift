@@ -17,6 +17,8 @@ private enum FileListMetrics {
 struct FilePaneView: View {
     let side: PaneSide
     @ObservedObject var model: DualFinderViewModel
+    @ObservedObject var terminalModel: EmbeddedTerminalPaneModel
+    let onToggleTerminalMaximized: (PaneSide) -> Void
     @State private var renamingURL: URL?
     @State private var pendingRenameURL: URL?
     @State private var pendingRevealURL: URL?
@@ -27,7 +29,9 @@ struct FilePaneView: View {
     @State private var isFileSearchPresented = false
     @State private var fileSearchQuery = ""
     @State private var isDropTargeted = false
-    @StateObject private var terminalModel = EmbeddedTerminalPaneModel()
+    @State private var terminalResizeStartHeight: CGFloat?
+    @State private var terminalResizeAccumulatedDelta: CGFloat = 0
+    @State private var terminalResizePreviewHeight: CGFloat?
     @FocusState private var isFileListFocused: Bool
     @FocusState private var isPathFieldFocused: Bool
     @FocusState private var isFileSearchFocused: Bool
@@ -495,26 +499,62 @@ struct FilePaneView: View {
     @ViewBuilder
     private var terminalPanel: some View {
         if terminalModel.isExpanded {
-            if !terminalModel.isMaximized {
-                LayoutResizeHandle(
-                    axis: .horizontal,
-                    length: nil,
-                    onDrag: { delta in
-                        terminalModel.resize(by: delta)
+            ZStack(alignment: .top) {
+                VStack(spacing: 0) {
+                    if !terminalModel.isMaximized {
+                        LayoutResizeHandle(
+                            axis: .horizontal,
+                            length: nil,
+                            onDrag: { delta in
+                                beginTerminalResizeIfNeeded()
+                                terminalResizeAccumulatedDelta += delta
+                                let nextHeight = (terminalResizeStartHeight ?? terminalModel.height)
+                                    + terminalResizeAccumulatedDelta
+                                terminalResizePreviewHeight = EmbeddedTerminalPaneModel.clampedHeight(nextHeight)
+                            },
+                            onDragEnded: {
+                                if let terminalResizePreviewHeight {
+                                    terminalModel.resize(to: terminalResizePreviewHeight)
+                                }
+                                resetTerminalResize()
+                            }
+                        )
                     }
-                )
-            }
-            EmbeddedTerminalPanel(
-                side: side,
-                paneModel: terminalModel,
-                currentDirectory: terminalDirectory,
-                openExternal: { directory in
-                    model.openInTerminal(Set([directory]), on: side)
+                    EmbeddedTerminalPanel(
+                        side: side,
+                        paneModel: terminalModel,
+                        currentDirectory: terminalDirectory,
+                        openExternal: { directory in
+                            model.openInTerminal(Set([directory]), on: side)
+                        },
+                        toggleMaximized: {
+                            onToggleTerminalMaximized(side)
+                        }
+                    )
+                    .frame(height: terminalModel.isMaximized ? nil : terminalModel.height)
+                    .frame(maxHeight: terminalModel.isMaximized ? .infinity : nil)
                 }
-            )
-            .frame(height: terminalModel.isMaximized ? nil : terminalModel.height)
-            .frame(maxHeight: terminalModel.isMaximized ? .infinity : nil)
+                if let terminalResizePreviewHeight, !terminalModel.isMaximized {
+                    Rectangle()
+                        .fill(Color.accentColor.opacity(0.85))
+                        .frame(height: 1)
+                        .offset(y: terminalModel.height - terminalResizePreviewHeight)
+                        .allowsHitTesting(false)
+                }
+            }
         }
+    }
+
+    private func beginTerminalResizeIfNeeded() {
+        guard terminalResizeStartHeight == nil else { return }
+        terminalResizeStartHeight = terminalModel.height
+        terminalResizeAccumulatedDelta = 0
+    }
+
+    private func resetTerminalResize() {
+        terminalResizeStartHeight = nil
+        terminalResizeAccumulatedDelta = 0
+        terminalResizePreviewHeight = nil
     }
 
     private var terminalDirectory: URL {
