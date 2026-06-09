@@ -191,18 +191,35 @@ struct EmbeddedTerminalPaneModelTests {
         }
 
         model.resizeSplit(id: splitID, by: 1_000, availableLength: 1_000)
-        guard case .split(_, _, let highFraction, _, _) = model.layout else {
-            Issue.record("Expected a split layout after resize")
-            return
-        }
-        #expect(highFraction == 0.82)
-
-        model.resizeSplit(id: splitID, by: -1_000, availableLength: 1_000)
         guard case .split(_, _, let lowFraction, _, _) = model.layout else {
             Issue.record("Expected a split layout after resize")
             return
         }
         #expect(lowFraction == 0.18)
+
+        model.resizeSplit(id: splitID, by: -1_000, availableLength: 1_000)
+        guard case .split(_, _, let highFraction, _, _) = model.layout else {
+            Issue.record("Expected a split layout after resize")
+            return
+        }
+        #expect(highFraction == 0.82)
+    }
+
+    @Test("split drag deltas match visual divider movement")
+    func splitDragDeltasMatchVisualDividerMovement() {
+        let sideBySideDelta = EmbeddedTerminalPaneModel.splitFractionDelta(
+            for: .sideBySide,
+            dragDelta: 100,
+            availableLength: 1_000
+        )
+        let stackedDelta = EmbeddedTerminalPaneModel.splitFractionDelta(
+            for: .stacked,
+            dragDelta: 100,
+            availableLength: 1_000
+        )
+
+        #expect(abs(sideBySideDelta - 0.1) < 0.0001)
+        #expect(abs(stackedDelta + 0.1) < 0.0001)
     }
 
     @Test("terminal split focus moves by direction")
@@ -265,6 +282,38 @@ struct EmbeddedTerminalPaneModelTests {
 
         tab.handleWorkingDirectoryUpdate("/Users/hunter")
         #expect(tab.title == "hunter")
+    }
+
+    @Test("terminal working directory update accepts file URLs and paths")
+    func terminalWorkingDirectoryUpdateAcceptsFileURLsAndPaths() throws {
+        let fileURL = try #require(EmbeddedTerminalTabModel.workingDirectoryURL(from: "file:///Users/hunter/Workspace"))
+        let pathURL = try #require(EmbeddedTerminalTabModel.workingDirectoryURL(from: "/Users/hunter/Workspace"))
+
+        #expect(fileURL.path == "/Users/hunter/Workspace")
+        #expect(pathURL.path == "/Users/hunter/Workspace")
+        #expect(EmbeddedTerminalTabModel.workingDirectoryURL(from: nil) == nil)
+    }
+
+    @Test("zsh terminal configuration installs cwd integration directory")
+    func zshTerminalConfigurationInstallsCWDIntegrationDirectory() throws {
+        let configuration = EmbeddedTerminalShellIntegration.configuration(
+            forShell: "/bin/zsh",
+            processEnvironment: [
+                "HOME": "/Users/hunter",
+                "USER": "hunter",
+                "PATH": "/usr/bin:/bin"
+            ]
+        )
+        let environment: [String: String] = Dictionary(uniqueKeysWithValues: configuration.environment.compactMap { item -> (String, String)? in
+            let pair = item.split(separator: "=", maxSplits: 1).map(String.init)
+            guard pair.count == 2 else { return nil }
+            return (pair[0], pair[1])
+        })
+
+        #expect(configuration.executable == "/bin/zsh")
+        #expect(configuration.execName == "-zsh")
+        #expect(environment["TERM"] == "xterm-256color")
+        #expect(environment["ZDOTDIR"]?.hasSuffix("/DualFinder/ShellIntegration") == true)
     }
 
     @Test("terminal tab starts a PTY session")

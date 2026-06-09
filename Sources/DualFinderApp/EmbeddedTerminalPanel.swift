@@ -123,7 +123,12 @@ final class EmbeddedTerminalPaneModel: ObservableObject {
 
     func resizeSplit(id: UUID, by delta: CGFloat, availableLength: CGFloat) {
         guard availableLength > 0, let layout else { return }
-        let ratioDelta = Double(delta / availableLength)
+        guard let direction = layout.splitDirection(id: id) else { return }
+        let ratioDelta = Self.splitFractionDelta(
+            for: direction,
+            dragDelta: delta,
+            availableLength: availableLength
+        )
         self.layout = layout.updatingSplit(id: id) { fraction in
             Self.clampedSplitFraction(fraction + ratioDelta)
         }
@@ -168,6 +173,16 @@ final class EmbeddedTerminalPaneModel: ObservableObject {
 
     static func clampedSplitFraction(_ fraction: Double) -> Double {
         min(max(fraction, minimumSplitFraction), maximumSplitFraction)
+    }
+
+    static func splitFractionDelta(
+        for direction: EmbeddedTerminalSplitDirection,
+        dragDelta: CGFloat,
+        availableLength: CGFloat
+    ) -> Double {
+        guard availableLength > 0 else { return 0 }
+        let normalizedDelta = direction == .stacked ? -dragDelta : dragDelta
+        return Double(normalizedDelta / availableLength)
     }
 
     private func makeTab(currentDirectory: URL) -> EmbeddedTerminalTabModel {
@@ -303,6 +318,18 @@ indirect enum EmbeddedTerminalLayout: Equatable {
         }
     }
 
+    func splitDirection(id targetID: UUID) -> EmbeddedTerminalSplitDirection? {
+        switch self {
+        case .leaf:
+            return nil
+        case .split(let id, let direction, _, let first, let second):
+            if id == targetID {
+                return direction
+            }
+            return first.splitDirection(id: targetID) ?? second.splitDirection(id: targetID)
+        }
+    }
+
     func adjacentLeaf(to targetID: UUID, direction: EmbeddedTerminalFocusDirection) -> UUID? {
         switch self {
         case .leaf:
@@ -384,12 +411,14 @@ final class EmbeddedTerminalTabModel: ObservableObject, Identifiable {
         hasStarted = true
         isRunning = true
 
-        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-        let executable = FileManager.default.fileExists(atPath: shell) ? shell : "/bin/zsh"
-        let shellName = URL(fileURLWithPath: executable).lastPathComponent
+        let configuration = EmbeddedTerminalShellIntegration.configuration(
+            forShell: ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        )
         terminalView.startProcess(
-            executable: executable,
-            execName: "-\(shellName)",
+            executable: configuration.executable,
+            args: configuration.args,
+            environment: configuration.environment,
+            execName: configuration.execName,
             currentDirectory: workingDirectory.path
         )
     }
@@ -415,8 +444,7 @@ final class EmbeddedTerminalTabModel: ObservableObject, Identifiable {
     }
 
     func handleWorkingDirectoryUpdate(_ directory: String?) {
-        guard let directory, !directory.isEmpty else { return }
-        let url = URL(fileURLWithPath: directory, isDirectory: true).standardizedFileURL
+        guard let url = Self.workingDirectoryURL(from: directory) else { return }
         workingDirectory = url
         title = Self.title(for: url)
     }
@@ -429,6 +457,226 @@ final class EmbeddedTerminalTabModel: ObservableObject, Identifiable {
         let name = directory.lastPathComponent
         return name.isEmpty ? directory.path : name
     }
+
+    static func workingDirectoryURL(from directory: String?) -> URL? {
+        guard let directory, !directory.isEmpty else { return nil }
+
+        if directory.hasPrefix("file://"),
+           let url = URL(string: directory),
+           url.isFileURL {
+            return url.standardizedFileURL
+        }
+
+        return URL(fileURLWithPath: directory, isDirectory: true).standardizedFileURL
+    }
+}
+
+struct EmbeddedTerminalShellConfiguration: Equatable {
+    let executable: String
+    let args: [String]
+    let environment: [String]
+    let execName: String?
+}
+
+enum EmbeddedTerminalShellIntegration {
+    private static let appSupportDirectoryName = "DualFinder"
+    private static let integrationDirectoryName = "ShellIntegration"
+
+    static func configuration(
+        forShell shell: String,
+        fileManager: FileManager = .default,
+        processEnvironment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> EmbeddedTerminalShellConfiguration {
+        let executable = fileManager.fileExists(atPath: shell) ? shell : "/bin/zsh"
+        let shellName = URL(fileURLWithPath: executable).lastPathComponent
+        let integrationDirectory = ensureIntegrationFiles(fileManager: fileManager)
+        var environment = terminalEnvironment(processEnvironment: processEnvironment)
+
+        switch shellName {
+        case "zsh":
+            if let integrationDirectory {
+                environment["ZDOTDIR"] = integrationDirectory.path
+            }
+            return EmbeddedTerminalShellConfiguration(
+                executable: executable,
+                args: [],
+                environment: environmentArray(environment),
+                execName: "-\(shellName)"
+            )
+        case "bash":
+            if let integrationDirectory {
+                return EmbeddedTerminalShellConfiguration(
+                    executable: executable,
+                    args: ["--rcfile", integrationDirectory.appendingPathComponent("bashrc").path, "-i"],
+                    environment: environmentArray(environment),
+                    execName: nil
+                )
+            }
+            return EmbeddedTerminalShellConfiguration(
+                executable: executable,
+                args: [],
+                environment: environmentArray(environment),
+                execName: "-\(shellName)"
+            )
+        case "fish":
+            if let integrationDirectory {
+                return EmbeddedTerminalShellConfiguration(
+                    executable: executable,
+                    args: ["-C", "source \(fishEscapedPath(integrationDirectory.appendingPathComponent("config.fish").path))"],
+                    environment: environmentArray(environment),
+                    execName: nil
+                )
+            }
+            return EmbeddedTerminalShellConfiguration(
+                executable: executable,
+                args: [],
+                environment: environmentArray(environment),
+                execName: shellName
+            )
+        default:
+            return EmbeddedTerminalShellConfiguration(
+                executable: executable,
+                args: [],
+                environment: environmentArray(environment),
+                execName: "-\(shellName)"
+            )
+        }
+    }
+
+    private static func terminalEnvironment(processEnvironment: [String: String]) -> [String: String] {
+        var environment = processEnvironment
+        environment["TERM"] = "xterm-256color"
+        environment["COLORTERM"] = "truecolor"
+        environment["LANG"] = environment["LANG"] ?? "en_US.UTF-8"
+        return environment
+    }
+
+    private static func environmentArray(_ environment: [String: String]) -> [String] {
+        environment
+            .sorted { $0.key < $1.key }
+            .map { "\($0.key)=\($0.value)" }
+    }
+
+    private static func ensureIntegrationFiles(fileManager: FileManager) -> URL? {
+        guard let directory = integrationDirectory(fileManager: fileManager) else { return nil }
+
+        do {
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+            try writeIfChanged(zshenv, to: directory.appendingPathComponent(".zshenv"), fileManager: fileManager)
+            try writeIfChanged(zprofile, to: directory.appendingPathComponent(".zprofile"), fileManager: fileManager)
+            try writeIfChanged(zshrc, to: directory.appendingPathComponent(".zshrc"), fileManager: fileManager)
+            try writeIfChanged(zlogin, to: directory.appendingPathComponent(".zlogin"), fileManager: fileManager)
+            try writeIfChanged(bashrc, to: directory.appendingPathComponent("bashrc"), fileManager: fileManager)
+            try writeIfChanged(fishConfig, to: directory.appendingPathComponent("config.fish"), fileManager: fileManager)
+            return directory
+        } catch {
+            return nil
+        }
+    }
+
+    private static func integrationDirectory(fileManager: FileManager) -> URL? {
+        guard let applicationSupport = fileManager.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first else {
+            return nil
+        }
+
+        return applicationSupport
+            .appendingPathComponent(appSupportDirectoryName, isDirectory: true)
+            .appendingPathComponent(integrationDirectoryName, isDirectory: true)
+    }
+
+    private static func writeIfChanged(_ contents: String, to url: URL, fileManager: FileManager) throws {
+        if let existing = try? String(contentsOf: url, encoding: .utf8), existing == contents {
+            return
+        }
+        try contents.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    private static func fishEscapedPath(_ path: String) -> String {
+        "'" + path.replacingOccurrences(of: "'", with: "\\'") + "'"
+    }
+
+    private static let cwdReporter = """
+if [ -z "${DUAL_FINDER_CWD_HOOK_INSTALLED:-}" ]; then
+    DUAL_FINDER_CWD_HOOK_INSTALLED=1
+    _dualfinder_report_cwd() {
+        printf '\\033]7;%s\\007' "$PWD"
+    }
+fi
+"""
+
+    private static let zshenv = """
+if [ -z "${DUAL_FINDER_SOURCED_USER_ZSHENV:-}" ]; then
+    DUAL_FINDER_SOURCED_USER_ZSHENV=1
+    [ -r "$HOME/.zshenv" ] && . "$HOME/.zshenv"
+fi
+"""
+
+    private static let zprofile = """
+if [ -z "${DUAL_FINDER_SOURCED_USER_ZPROFILE:-}" ]; then
+    DUAL_FINDER_SOURCED_USER_ZPROFILE=1
+    [ -r "$HOME/.zprofile" ] && . "$HOME/.zprofile"
+fi
+"""
+
+    private static let zlogin = """
+if [ -z "${DUAL_FINDER_SOURCED_USER_ZLOGIN:-}" ]; then
+    DUAL_FINDER_SOURCED_USER_ZLOGIN=1
+    [ -r "$HOME/.zlogin" ] && . "$HOME/.zlogin"
+fi
+"""
+
+    private static let zshrc = """
+if [ -z "${DUAL_FINDER_SOURCED_USER_ZSHRC:-}" ]; then
+    DUAL_FINDER_SOURCED_USER_ZSHRC=1
+    [ -r "$HOME/.zshrc" ] && . "$HOME/.zshrc"
+fi
+
+if [ -z "${DUAL_FINDER_ZSH_CWD_HOOK_INSTALLED:-}" ]; then
+    DUAL_FINDER_ZSH_CWD_HOOK_INSTALLED=1
+    _dualfinder_report_cwd() {
+        printf '\\033]7;%s\\007' "$PWD"
+    }
+    autoload -Uz add-zsh-hook 2>/dev/null
+    if (( $+functions[add-zsh-hook] )); then
+        add-zsh-hook precmd _dualfinder_report_cwd
+    else
+        precmd_functions+=(_dualfinder_report_cwd)
+    fi
+    _dualfinder_report_cwd
+fi
+"""
+
+    private static let bashrc = """
+if [ -z "${DUAL_FINDER_SOURCED_USER_BASH:-}" ]; then
+    DUAL_FINDER_SOURCED_USER_BASH=1
+    if [ -r "$HOME/.bash_profile" ]; then
+        . "$HOME/.bash_profile"
+    elif [ -r "$HOME/.bashrc" ]; then
+        . "$HOME/.bashrc"
+    fi
+fi
+
+\(cwdReporter)
+case ";${PROMPT_COMMAND:-};" in
+    *";_dualfinder_report_cwd;"*) ;;
+    *) PROMPT_COMMAND="_dualfinder_report_cwd${PROMPT_COMMAND:+;$PROMPT_COMMAND}" ;;
+esac
+_dualfinder_report_cwd
+"""
+
+    private static let fishConfig = """
+if test -r "$HOME/.config/fish/config.fish"
+    source "$HOME/.config/fish/config.fish"
+end
+
+function __dualfinder_report_cwd --on-event fish_prompt
+    printf '\\033]7;%s\\007' "$PWD"
+end
+__dualfinder_report_cwd
+"""
 }
 
 extension EmbeddedTerminalTabModel: LocalProcessTerminalViewDelegate {
@@ -540,7 +788,16 @@ struct EmbeddedTerminalPanel: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 4) {
                     ForEach(paneModel.tabs) { tab in
-                        terminalTabButton(tab)
+                        EmbeddedTerminalTabButton(
+                            tab: tab,
+                            isSelected: tab.id == paneModel.selectedTabID,
+                            select: {
+                                paneModel.selectTab(tab.id)
+                            },
+                            close: {
+                                paneModel.closeTab(tab.id)
+                            }
+                        )
                     }
                 }
             }
@@ -590,12 +847,17 @@ struct EmbeddedTerminalPanel: View {
         .frame(height: 32)
         .background(.bar)
     }
+}
 
-    private func terminalTabButton(_ tab: EmbeddedTerminalTabModel) -> some View {
+private struct EmbeddedTerminalTabButton: View {
+    @ObservedObject var tab: EmbeddedTerminalTabModel
+    let isSelected: Bool
+    let select: () -> Void
+    let close: () -> Void
+
+    var body: some View {
         HStack(spacing: 4) {
-            Button {
-                paneModel.selectTab(tab.id)
-            } label: {
+            Button(action: select) {
                 HStack(spacing: 4) {
                     Circle()
                         .fill(tab.isRunning ? Color.green : Color.secondary.opacity(0.5))
@@ -607,9 +869,7 @@ struct EmbeddedTerminalPanel: View {
             }
             .buttonStyle(.plain)
             .help(tab.workingDirectory.path)
-            Button {
-                paneModel.closeTab(tab.id)
-            } label: {
+            Button(action: close) {
                 Image(systemName: "xmark")
                     .font(.caption2)
             }
@@ -619,7 +879,7 @@ struct EmbeddedTerminalPanel: View {
         .font(.caption)
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
-        .background(tab.id == paneModel.selectedTabID ? Color.accentColor.opacity(0.18) : Color.secondary.opacity(0.08))
+        .background(isSelected ? Color.accentColor.opacity(0.18) : Color.secondary.opacity(0.08))
         .clipShape(RoundedRectangle(cornerRadius: 6))
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(tab.title) terminal tab")
@@ -665,7 +925,13 @@ private struct EmbeddedTerminalLayoutView: View {
                     HStack(spacing: 0) {
                         content(for: first, size: CGSize(width: availableWidth * fraction, height: size.height))
                             .frame(width: availableWidth * fraction)
-                        splitResizeHandle(id: id, fraction: fraction, availableLength: availableWidth, axis: .vertical)
+                        splitResizeHandle(
+                            id: id,
+                            direction: direction,
+                            fraction: fraction,
+                            availableLength: availableWidth,
+                            axis: .vertical
+                        )
                         content(for: second, size: CGSize(width: availableWidth * (1 - fraction), height: size.height))
                             .frame(width: availableWidth * (1 - fraction))
                     }
@@ -677,7 +943,13 @@ private struct EmbeddedTerminalLayoutView: View {
                     VStack(spacing: 0) {
                         content(for: first, size: CGSize(width: size.width, height: availableHeight * fraction))
                             .frame(height: availableHeight * fraction)
-                        splitResizeHandle(id: id, fraction: fraction, availableLength: availableHeight, axis: .horizontal)
+                        splitResizeHandle(
+                            id: id,
+                            direction: direction,
+                            fraction: fraction,
+                            availableLength: availableHeight,
+                            axis: .horizontal
+                        )
                         content(for: second, size: CGSize(width: size.width, height: availableHeight * (1 - fraction)))
                             .frame(height: availableHeight * (1 - fraction))
                     }
@@ -689,6 +961,7 @@ private struct EmbeddedTerminalLayoutView: View {
 
     private func splitResizeHandle(
         id: UUID,
+        direction: EmbeddedTerminalSplitDirection,
         fraction: Double,
         availableLength: CGFloat,
         axis: LayoutResizeHandle.Axis
@@ -700,7 +973,11 @@ private struct EmbeddedTerminalLayoutView: View {
                 beginSplitDragIfNeeded(id: id, fraction: fraction, availableLength: availableLength)
                 dragAccumulatedDelta += delta
                 let nextFraction = (dragStartFraction ?? fraction)
-                    + Double(dragAccumulatedDelta / max(dragStartAvailableLength, 1))
+                    + EmbeddedTerminalPaneModel.splitFractionDelta(
+                        for: direction,
+                        dragDelta: dragAccumulatedDelta,
+                        availableLength: max(dragStartAvailableLength, 1)
+                    )
                 dragPreviewFraction = EmbeddedTerminalPaneModel.clampedSplitFraction(nextFraction)
             },
             onDragEnded: {
