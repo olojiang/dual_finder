@@ -3,6 +3,8 @@ set -euo pipefail
 
 APP_NAME="Dual Finder 纪"
 BUNDLE_ID="com.local.dualfinder"
+APP_VERSION="0.1.7"
+APP_BUILD="7"
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RELEASE_DIR="$ROOT_DIR/release"
 APP_BUNDLE="$RELEASE_DIR/$APP_NAME.app"
@@ -142,7 +144,7 @@ mkdir -p "$HELPER_MACOS"
 cp "$ROOT_DIR/.build/release/DualFinderHotkeyHelper" "$HELPER_MACOS/$HELPER_APP_NAME"
 chmod +x "$HELPER_MACOS/$HELPER_APP_NAME"
 
-cat > "$HELPER_APP/Contents/Info.plist" <<'HELPER_PLIST'
+cat > "$HELPER_APP/Contents/Info.plist" <<HELPER_PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -156,9 +158,9 @@ cat > "$HELPER_APP/Contents/Info.plist" <<'HELPER_PLIST'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.6</string>
+    <string>$APP_VERSION</string>
     <key>CFBundleVersion</key>
-    <string>6</string>
+    <string>$APP_BUILD</string>
     <key>LSUIElement</key>
     <true/>
     <key>LSMinimumSystemVersion</key>
@@ -187,9 +189,9 @@ cat > "$CONTENTS/Info.plist" <<PLIST
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.6</string>
+    <string>$APP_VERSION</string>
     <key>CFBundleVersion</key>
-    <string>6</string>
+    <string>$APP_BUILD</string>
     <key>CFBundleIconFile</key>
     <string>DualFinder</string>
     <key>LSMinimumSystemVersion</key>
