@@ -2,47 +2,70 @@
 
 ## 问题
 
+### 初版需求
+
 Dual Finder 的主界面有三处布局是写死的，窗口非全屏时体验不佳：
 
-1. **文件列表列宽固定**：Name / Type / Size / Modified 列宽写死在 `FilePaneView`，Type、Size、Modified 在非全屏窗口里经常太窄，内容被截断。
-2. **左右 pane 等宽**：`ContentView` 用 `HStack` 均分左右文件面板，无法按个人习惯调整比例。
-3. **Locations 侧栏不可折叠**：侧栏固定 220pt，占用横向空间；无法收成仅图标的窄栏。
+1. **文件列表列宽固定**：Name / Type / Size / Modified 列宽写死，非全屏时常被截断。
+2. **左右 pane 等宽**：无法按个人习惯调整比例。
+3. **Locations 侧栏不可折叠**：固定 220pt，无法收成仅图标的窄栏。
 
 以上状态也不会被记住，重启后恢复默认。
 
+### 初版实现后的反馈（v0.1.5）
+
+1. **表头过高**：列分隔拖拽条在表头里纵向撑满，行高异常。
+2. **左右 pane 列宽联动**：调整左侧 pane 列宽时，右侧 pane 跟着变。
+3. **pane 分隔条抖动**：拖拽中间分隔条时布局来回跳动，跟手性差。
+4. **列宽拖拽方向反直觉**：向左拖时，左侧列反而变宽（因错误调整了分隔线右侧列）。
+
 ## 影响
 
-- 小窗口或分屏时，Modified 日期、Size 等列经常看不全。
-- 左右 pane 无法按任务调整（例如左侧浏览、右侧预览）。
-- 侧栏长期占宽，压缩双 pane 可用空间。
-- 每次重启都要重新适应默认布局。
+- 表头占用过多垂直空间，文件列表可视区域变小。
+- 左右 pane 无法独立优化列宽（例如左看文件名、右看 Modified）。
+- pane 分隔拖拽体验差，用户难以精确调整比例。
+- 列宽调整与 Finder / 常见文件管理器习惯相反，学习成本高。
 
 ## 解决核心思路
 
-在 `DualFinderCore` 增加 `UILayoutPreferencesStore`，用 `UserDefaults` JSON 持久化：
+### 持久化（DualFinderCore）
 
-- 三列固定宽度（Type / Size / Modified）
-- 左右 pane 比例（`leftPaneFraction`）
-- 侧栏折叠状态（`isSidebarCollapsed`）
+`UILayoutPreferencesStore` 用 `UserDefaults` JSON 保存：
 
-App 层提供可复用 SwiftUI 组件：
+| 字段 | 说明 |
+|------|------|
+| `leftColumnWidths` / `rightColumnWidths` | 左右 pane **各自独立**的三列宽度 |
+| `leftPaneFraction` | 双 pane 区域中左 pane 占比 |
+| `isSidebarCollapsed` | Locations 侧栏折叠状态 |
 
-- `FileListColumnLayout`：表头带拖拽手柄，数据行复用同一列宽
-- `DualPaneSplitLayout`：左右 pane 之间的可拖拽分隔条
-- `CommonLocationsSidebar`：折叠/展开切换，折叠时仅显示图标
+兼容旧版 `columnWidths` 单字段：加载时复制到左右 pane。
 
-拖拽过程中只更新内存中的 `@Published` 状态；**拖拽结束**或**点击折叠按钮**时再写入 `UserDefaults`，减少频繁 IO。
+### 列宽拖拽语义（Core）
+
+`FileListColumnBoundary` 定义每条分隔线调整**右侧固定列**，并反向应用鼠标 delta。原因是 Name 列占剩余空间，固定列从右侧锚定；这样分隔线才会按鼠标移动距离同步移动：
+
+| 分隔线位置 | 调整的列 |
+|-----------|---------|
+| Name \| Type | Type |
+| Type \| Size | Size |
+| Size \| Modified | Modified |
+
+### UI 层（DualFinderApp）
+
+- **表头手柄**：固定高度 16pt，表头行高 22pt，不再纵向撑满。
+- **pane 分隔拖拽**：拖拽期间只显示 1pt 目标指示线，**不**重排左右 pane、也不每帧写 ViewModel；以 drag 开始时的 fraction 与 availableWidth 为基准累加 delta；松手后一次性 `setLeftPaneFraction` + `commitUILayoutPreferences`。
+- **列宽拖拽**：`adjustFileListColumn(_:for:by:)` 按 `PaneSide` 更新对应 pane；drag end 再持久化。
 
 ## 关键文件
 
 | 文件 | 职责 |
 |------|------|
-| `Sources/DualFinderCore/UILayoutPreferencesStore.swift` | 布局偏好模型、列宽 clamp、UserDefaults 读写 |
-| `Sources/DualFinderApp/ResizableLayoutViews.swift` | `LayoutResizeHandle`、`FileListColumnLayout`、`DualPaneSplitLayout` |
-| `Sources/DualFinderApp/DualFinderViewModel.swift` | 暴露 `uiLayoutPreferences` 与调整/提交 API |
-| `Sources/DualFinderApp/ContentView.swift` | 侧栏折叠 UI、双 pane 分割布局 |
-| `Sources/DualFinderApp/FilePaneView.swift` | 表头列宽拖拽、行内列对齐 |
-| `Tests/DualFinderCoreTests/UILayoutPreferencesStoreTests.swift` | 持久化、clamp、默认值测试 |
+| `Sources/DualFinderCore/UILayoutPreferencesStore.swift` | 偏好模型、per-pane 列宽、legacy 迁移、`FileListColumnBoundary` |
+| `Sources/DualFinderApp/ResizableLayoutViews.swift` | 拖拽手柄、列布局、pane 分割（含 drag 会话状态） |
+| `Sources/DualFinderApp/DualFinderViewModel.swift` | `columnWidths(for:)`、`adjustFileListColumn(for:)` |
+| `Sources/DualFinderApp/FilePaneView.swift` | 表头/行内列布局，按 `side` 取列宽 |
+| `Sources/DualFinderApp/ContentView.swift` | 侧栏折叠、双 pane 分割 |
+| `Tests/DualFinderCoreTests/UILayoutPreferencesStoreTests.swift` | 持久化、迁移、clamp、boundary 映射 |
 
 ## 设计
 
@@ -52,48 +75,68 @@ App 层提供可复用 SwiftUI 组件：
 flowchart TB
     subgraph Core["DualFinderCore"]
         Prefs[UILayoutPreferences]
+        Boundary[FileListColumnBoundary]
         Store[UILayoutPreferencesStore]
         Prefs --> Store
+        Boundary --> Prefs
         Store --> UD[(UserDefaults)]
     end
 
     subgraph App["DualFinderApp"]
         VM[DualFinderViewModel]
-        CV[ContentView]
-        FPV[FilePaneView]
-        RLV[ResizableLayoutViews]
+        Split[DualPaneSplitLayout]
+        Cols[FileListColumnLayout]
+        FPV_L[FilePaneView left]
+        FPV_R[FilePaneView right]
     end
 
-    UD --> Store
-    Store --> VM
-    VM --> CV
-    VM --> FPV
-    RLV --> CV
-    RLV --> FPV
-    VM -->|commit on drag end| Store
+    UD --> Store --> VM
+    VM --> Split
+    VM --> FPV_L
+    VM --> FPV_R
+    Cols --> FPV_L
+    Cols --> FPV_R
+    Split -->|drag preview local state| Split
+    Split -->|drag ended| VM
 ```
 
-### 数据流
+### pane 分隔拖拽时序
 
 ```mermaid
 sequenceDiagram
     participant User
-    participant Handle as LayoutResizeHandle
+    participant Split as DualPaneSplitLayout
     participant VM as DualFinderViewModel
     participant Store as UILayoutPreferencesStore
-    participant UD as UserDefaults
 
-    User->>Handle: 拖拽列宽 / pane 分隔条
-    Handle->>VM: adjustFileListColumn / setLeftPaneFraction
-    VM->>VM: 更新 uiLayoutPreferences（内存）
-    User->>Handle: 释放鼠标
-    Handle->>VM: commitUILayoutPreferences()
-    VM->>Store: save(preferences)
-    Store->>UD: JSON encode
+    User->>Split: 开始拖拽分隔条
+    Split->>Split: 记录 startFraction + startAvailableWidth
+    loop 拖拽中
+        User->>Split: delta
+        Split->>Split: preview = start + accumulatedDelta / startWidth
+        Note over Split: 不写 ViewModel，避免 GeometryReader 反馈抖动
+    end
+    User->>Split: 释放
+    Split->>VM: setLeftPaneFraction(preview)
+    Split->>VM: commitUILayoutPreferences()
+    VM->>Store: save
+```
 
-    Note over User,UD: 侧栏折叠为点击操作，立即 save
-    User->>VM: toggleSidebarCollapsed()
-    VM->>Store: save(preferences)
+### 列宽调整时序
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Header as FilePaneView sortHeader
+    participant VM as DualFinderViewModel
+    participant Store as UILayoutPreferencesStore
+
+    User->>Header: 拖拽 Name|Type 分隔线向左
+    Header->>VM: adjustFileListColumn(.type, for: .left, by: -Δ)
+    Note over VM: 只改 leftColumnWidths.type
+    User->>Header: 释放
+    Header->>VM: commitUILayoutPreferences()
+    VM->>Store: save leftColumnWidths + rightColumnWidths
 ```
 
 ### 数据关系
@@ -101,7 +144,8 @@ sequenceDiagram
 ```mermaid
 erDiagram
     UILayoutPreferences {
-        FileListColumnWidths columnWidths
+        FileListColumnWidths leftColumnWidths
+        FileListColumnWidths rightColumnWidths
         double leftPaneFraction
         bool isSidebarCollapsed
     }
@@ -110,65 +154,70 @@ erDiagram
         double size
         double modified
     }
-    UILayoutPreferences ||--|| FileListColumnWidths : contains
-    UILayoutPreferencesStore ||--o| UILayoutPreferences : load/save
+    FileListColumnBoundary {
+        string afterName
+        string afterType
+        string afterSize
+    }
+    UILayoutPreferences ||--|| FileListColumnWidths : left
+    UILayoutPreferences ||--|| FileListColumnWidths : right
+    FileListColumnBoundary ||--|| FileListColumn : resizedColumn
 ```
 
 ## 默认值与边界
 
 | 项 | 默认 | 范围 |
 |----|------|------|
-| Type 列宽 | 112 | 64 – 280 |
-| Size 列宽 | 86 | 56 – 160 |
-| Modified 列宽 | 126 | 88 – 240 |
+| 每 pane Type 列宽 | 112 | 64 – 280 |
+| 每 pane Size 列宽 | 86 | 56 – 160 |
+| 每 pane Modified 列宽 | 126 | 88 – 240 |
 | 左 pane 比例 | 0.5 | 0.2 – 0.8 |
-| 侧栏展开宽 | 220 | 固定 |
-| 侧栏折叠宽 | 52 | 固定 |
+| 表头行高 | 22pt | 固定 |
+| 列分隔手柄高 | 16pt | 固定 |
+| 侧栏展开 / 折叠 | 220 / 52 pt | 固定 |
 
-- Name 列始终占据剩余空间，不参与固定宽度存储。
-- 损坏或越界的持久化数据在 `load()` / `save()` 时会被 clamp。
-- 无已存数据时回退到 `.default`。
-- 左右 pane 比例相对「侧栏与可选 Operation History 之外的双 pane 区域」计算。
+- Name 列占剩余空间，不持久化。
+- 旧 `columnWidths` JSON 自动迁移为左右相同列宽。
+- pane 比例相对侧栏与 Operation History 之外的双 pane 区域。
 
 ## 使用方法
 
-1. **调整列宽**：在任意 pane 表头 Type / Size / Modified 列之间的分隔线 hover（光标变为左右箭头），拖拽即可。左右 pane 共享同一套列宽。
-2. **调整左右 pane 宽度**：拖拽左右 pane 之间的竖向分隔条。
-3. **折叠 Locations 侧栏**：点击侧栏标题栏右侧的 `sidebar.left` 按钮；折叠后仅显示文件夹/收藏图标，hover 可看完整路径；再点 `sidebar.right` 展开。
-
-所有调整在拖拽结束或点击折叠后自动保存，重启后恢复。
+1. **调整列宽**：在**某个 pane** 表头列分隔线上 hover（↔），拖拽。左右 pane 列宽**互不影响**。
+2. **调整左右 pane 宽度**：拖拽两 pane 之间的竖向分隔条，松手后保存。
+3. **折叠 Locations 侧栏**：侧栏标题栏右侧 `sidebar.left` / `sidebar.right` 按钮。
 
 ## 跨平台说明
 
-当前项目 `Package.swift` 仅声明 `macOS(.v14)`，UI 实现依赖 AppKit（`NSCursor`、现有 SwiftUI-macOS 栈）。**暂无 Windows 构建目标**；若未来移植，需将 `ResizableLayoutViews` 中的 AppKit 依赖抽象为平台适配层。
+项目仅 `macOS(.v14)`，拖拽使用 AppKit `NSCursor`。暂无 Windows 构建；移植时需抽象光标与拖拽手势。
 
 ## 测试覆盖
 
-`UILayoutPreferencesStoreTests` 覆盖：
+`UILayoutPreferencesStoreTests` + `FileListColumnBoundaryTests`：
 
-- 列宽、pane 比例、侧栏折叠状态的 round-trip 持久化
-- 非法值的 clamp
-- 无数据时的默认值回退
-- `FileListColumnWidths.adjust` 与 `sidebarWidth` 计算
+- 左右独立列宽 round-trip
+- legacy `columnWidths` 迁移
+- clamp、默认值
+- `columnWidths(for:)`、`FileListColumnBoundary.resizedColumn` 映射
 
-SwiftUI 拖拽交互未做 UI 自动化测试（与项目其他 UI 一致）；持久化与 clamp 逻辑在 Core 层单测覆盖。
+SwiftUI 拖拽手感未做 UI 自动化；Core 层覆盖持久化与边界语义。
 
-## Review 记录（3 轮）
+## Review 记录（3 轮 · v0.1.5 修复）
 
 ### 第 1 轮：功能与 bug
 
-- 确认表头才有 resize handle，数据行用等宽 spacer，避免每行出现拖拽条。
-- 表头增加 20pt 图标占位，与 `FileRow` 对齐。
-- `DualPaneSplitLayout` 用 fraction × availableWidth，避免硬编码 min width 导致比例失真。
+- 表头手柄 `length: 16`，表头 `frame(height: 22)`，消除纵向撑满。
+- `leftColumnWidths` / `rightColumnWidths` 解耦左右 pane。
+- `FileListColumnBoundary` 改为调整分隔线**右侧**固定列，并反向应用 delta，修正右锚定列导致的错列拖动。
+- 去掉 Modified 右侧手柄；Modified 宽度通过 Size | Modified 分隔线调整。
 
-### 第 2 轮：性能与边界
+### 第 2 轮：性能与竞态
 
-- 拖拽中只改内存，drag end 再 `commitUILayoutPreferences()`，避免逐像素写 UserDefaults。
-- 侧栏折叠为离散操作，点击即持久化。
-- clamp 防止极端列宽或 pane 比例破坏布局。
+- pane 分隔：拖拽只更新目标指示线，避免每帧 `@Published` 或重排 pane 内容导致 GeometryReader 反馈抖动。
+- 以 drag 开始时的 `availableWidth` 为分母，避免布局变化导致 delta 换算漂移。
+- 列宽 / pane 比例均在 drag end 写 UserDefaults；侧栏折叠仍即时保存。
 
 ### 第 3 轮：可维护性
 
-- 持久化放 Core（`UILayoutPreferencesStore`），与 `PaneSessionStore`、`FolderSortRuleStore` 一致。
-- 可复用布局组件集中在 `ResizableLayoutViews.swift`，`FilePaneView` / `ContentView` 只负责组装。
-- 无 REST API / TypeScript；服务端性能不适用。
+- boundary → column 映射在 Core，可单测，App 只消费。
+- `DualPaneSplitLayout` 自包含 drag 会话状态，ViewModel 保持薄层。
+- 无 REST / TS；macOS 专用 API 隔离在 `ResizableLayoutViews`。

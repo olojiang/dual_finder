@@ -12,11 +12,17 @@ let package = Package(
         .executable(name: "DualFinderApp", targets: ["DualFinderApp"]),
         .executable(name: "DualFinderHotkeyHelper", targets: ["DualFinderHotkeyHelper"])
     ],
+    dependencies: [
+        .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", from: "1.13.0")
+    ],
     targets: [
         .target(name: "DualFinderCore"),
         .executableTarget(
             name: "DualFinderApp",
-            dependencies: ["DualFinderCore"],
+            dependencies: [
+                "DualFinderCore",
+                .product(name: "SwiftTerm", package: "SwiftTerm")
+            ],
             linkerSettings: [
                 .linkedFramework("Carbon")
             ]

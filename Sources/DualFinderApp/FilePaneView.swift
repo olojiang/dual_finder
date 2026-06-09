@@ -3,6 +3,17 @@ import SwiftUI
 import DualFinderCore
 import UniformTypeIdentifiers
 
+@MainActor
+private enum FileListMetrics {
+    static let horizontalPadding: CGFloat = 16
+    static let iconColumnWidth: CGFloat = 20
+    static let iconColumnSpacing: CGFloat = 8
+
+    static var verticalScrollerGutter: CGFloat {
+        NSScroller.scrollerWidth(for: .regular, scrollerStyle: NSScroller.preferredScrollerStyle)
+    }
+}
+
 struct FilePaneView: View {
     let side: PaneSide
     @ObservedObject var model: DualFinderViewModel
@@ -16,6 +27,7 @@ struct FilePaneView: View {
     @State private var isFileSearchPresented = false
     @State private var fileSearchQuery = ""
     @State private var isDropTargeted = false
+    @StateObject private var terminalModel = EmbeddedTerminalPaneModel()
     @FocusState private var isFileListFocused: Bool
     @FocusState private var isPathFieldFocused: Bool
     @FocusState private var isFileSearchFocused: Bool
@@ -25,6 +37,7 @@ struct FilePaneView: View {
             paneHeader
             tabStrip
             fileList
+            terminalPanel
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onChange(of: model.pathEditRequest) { _, request in
@@ -85,6 +98,12 @@ struct FilePaneView: View {
             }
             IconButton(systemName: "xmark.square", help: "Close tab") {
                 model.closeSelectedTab(on: side)
+            }
+            IconButton(
+                systemName: terminalModel.isExpanded ? "terminal.fill" : "terminal",
+                help: terminalModel.isExpanded ? "Collapse embedded terminal" : "Show embedded terminal"
+            ) {
+                terminalModel.toggle(currentDirectory: terminalDirectory)
             }
         }
         .padding(.horizontal, 8)
@@ -258,7 +277,7 @@ struct FilePaneView: View {
                         ForEach(visibleItems) { item in
                             FileRow(
                                 item: item,
-                                columnWidths: model.uiLayoutPreferences.columnWidths,
+                                columnWidths: model.columnWidths(for: side),
                                 isRenaming: renamingURL == item.url,
                                 renameText: $renameText,
                                 commitRename: commitRename,
@@ -471,6 +490,37 @@ struct FilePaneView: View {
         }
     }
 
+    @ViewBuilder
+    private var terminalPanel: some View {
+        if terminalModel.isExpanded {
+            LayoutResizeHandle(
+                axis: .horizontal,
+                length: nil,
+                onDrag: { delta in
+                    terminalModel.resize(by: delta)
+                }
+            )
+            EmbeddedTerminalPanel(
+                side: side,
+                paneModel: terminalModel,
+                currentDirectory: terminalDirectory,
+                openExternal: { directory in
+                    model.openInTerminal(Set([directory]), on: side)
+                }
+            )
+            .frame(height: terminalModel.height)
+        }
+    }
+
+    private var terminalDirectory: URL {
+        let url = model.pane(for: side).selectedURL
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue {
+            return url.standardizedFileURL
+        }
+        return url.deletingLastPathComponent().standardizedFileURL
+    }
+
     private var visibleItems: [FileItem] {
         let allItems = model.items(for: side)
         guard isFileSearchPresented else { return allItems }
@@ -554,13 +604,13 @@ struct FilePaneView: View {
     }
 
     private var sortHeader: some View {
-        HStack(spacing: 8) {
-            Color.clear.frame(width: 20)
+        HStack(spacing: FileListMetrics.iconColumnSpacing) {
+            Color.clear.frame(width: FileListMetrics.iconColumnWidth)
             FileListColumnLayout(
-                columnWidths: model.uiLayoutPreferences.columnWidths,
+                columnWidths: model.columnWidths(for: side),
                 showsResizeHandles: true,
                 onResizeColumn: { column, delta in
-                    model.adjustFileListColumn(column, by: delta)
+                    model.adjustFileListColumn(column, for: side, by: delta)
                 },
                 onResizeEnded: model.commitUILayoutPreferences,
                 name: {
@@ -587,8 +637,10 @@ struct FilePaneView: View {
         }
         .font(.caption)
         .foregroundStyle(.secondary)
-        .padding(.horizontal, 16)
-        .padding(.vertical, 4)
+        .padding(.leading, FileListMetrics.horizontalPadding)
+        .padding(.trailing, FileListMetrics.horizontalPadding + FileListMetrics.verticalScrollerGutter)
+        .padding(.vertical, 2)
+        .frame(height: 22)
         .background(.bar)
     }
 
@@ -1247,9 +1299,9 @@ private struct FileRow: View {
     @FocusState private var isRenameFocused: Bool
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: FileListMetrics.iconColumnSpacing) {
             FinderFileIcon(url: item.url)
-                .frame(width: 20)
+                .frame(width: FileListMetrics.iconColumnWidth)
             FileListColumnLayout(
                 columnWidths: columnWidths,
                 name: { nameView },

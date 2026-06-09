@@ -148,9 +148,15 @@ final class DualFinderViewModel: ObservableObject {
         sortRuleStore.rule(for: pane(for: side).selectedURL)
     }
 
-    func adjustFileListColumn(_ column: FileListColumn, by delta: CGFloat) {
+    func columnWidths(for side: PaneSide) -> FileListColumnWidths {
+        uiLayoutPreferences.columnWidths(for: side)
+    }
+
+    func adjustFileListColumn(_ column: FileListColumn, for side: PaneSide, by delta: CGFloat) {
         var preferences = uiLayoutPreferences
-        preferences.columnWidths.adjust(column, by: Double(delta))
+        var widths = preferences.columnWidths(for: side)
+        widths.adjust(column, by: Double(delta))
+        preferences.setColumnWidths(widths, for: side)
         uiLayoutPreferences = preferences
     }
 

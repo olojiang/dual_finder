@@ -7,6 +7,27 @@ public enum FileListColumn: String, Codable, CaseIterable, Sendable {
     case modified
 }
 
+public enum FileListColumnBoundary: String, CaseIterable, Sendable {
+    case afterName
+    case afterType
+    case afterSize
+
+    public var resizedColumn: FileListColumn {
+        switch self {
+        case .afterName:
+            return .type
+        case .afterSize:
+            return .modified
+        case .afterType:
+            return .size
+        }
+    }
+
+    public func columnDelta(forDragDelta delta: Double) -> Double {
+        -delta
+    }
+}
+
 public struct FileListColumnWidths: Codable, Equatable, Sendable {
     public var type: Double
     public var size: Double
@@ -50,18 +71,56 @@ public struct FileListColumnWidths: Codable, Equatable, Sendable {
 }
 
 public struct UILayoutPreferences: Codable, Equatable, Sendable {
-    public var columnWidths: FileListColumnWidths
+    public var leftColumnWidths: FileListColumnWidths
+    public var rightColumnWidths: FileListColumnWidths
     public var leftPaneFraction: Double
     public var isSidebarCollapsed: Bool
 
     public init(
-        columnWidths: FileListColumnWidths = .default,
+        leftColumnWidths: FileListColumnWidths = .default,
+        rightColumnWidths: FileListColumnWidths = .default,
         leftPaneFraction: Double = 0.5,
         isSidebarCollapsed: Bool = false
     ) {
-        self.columnWidths = columnWidths.clamped()
+        self.leftColumnWidths = leftColumnWidths.clamped()
+        self.rightColumnWidths = rightColumnWidths.clamped()
         self.leftPaneFraction = Self.clampedFraction(leftPaneFraction)
         self.isSidebarCollapsed = isSidebarCollapsed
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case leftColumnWidths
+        case rightColumnWidths
+        case columnWidths
+        case leftPaneFraction
+        case isSidebarCollapsed
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        if let leftColumnWidths = try container.decodeIfPresent(FileListColumnWidths.self, forKey: .leftColumnWidths),
+           let rightColumnWidths = try container.decodeIfPresent(FileListColumnWidths.self, forKey: .rightColumnWidths) {
+            self.leftColumnWidths = leftColumnWidths
+            self.rightColumnWidths = rightColumnWidths
+        } else if let shared = try container.decodeIfPresent(FileListColumnWidths.self, forKey: .columnWidths) {
+            self.leftColumnWidths = shared
+            self.rightColumnWidths = shared
+        } else {
+            self.leftColumnWidths = .default
+            self.rightColumnWidths = .default
+        }
+        self.leftPaneFraction = try container.decodeIfPresent(Double.self, forKey: .leftPaneFraction)
+            .map(Self.clampedFraction) ?? 0.5
+        self.isSidebarCollapsed = try container.decodeIfPresent(Bool.self, forKey: .isSidebarCollapsed) ?? false
+        clamp()
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(leftColumnWidths, forKey: .leftColumnWidths)
+        try container.encode(rightColumnWidths, forKey: .rightColumnWidths)
+        try container.encode(leftPaneFraction, forKey: .leftPaneFraction)
+        try container.encode(isSidebarCollapsed, forKey: .isSidebarCollapsed)
     }
 
     public static let `default` = UILayoutPreferences()
@@ -75,8 +134,23 @@ public struct UILayoutPreferences: Codable, Equatable, Sendable {
         isSidebarCollapsed ? Self.sidebarCollapsedWidth : Self.sidebarExpandedWidth
     }
 
+    public func columnWidths(for side: PaneSide) -> FileListColumnWidths {
+        switch side {
+        case .left: leftColumnWidths
+        case .right: rightColumnWidths
+        }
+    }
+
+    public mutating func setColumnWidths(_ widths: FileListColumnWidths, for side: PaneSide) {
+        switch side {
+        case .left: leftColumnWidths = widths.clamped()
+        case .right: rightColumnWidths = widths.clamped()
+        }
+    }
+
     public mutating func clamp() {
-        columnWidths = columnWidths.clamped()
+        leftColumnWidths = leftColumnWidths.clamped()
+        rightColumnWidths = rightColumnWidths.clamped()
         leftPaneFraction = Self.clampedFraction(leftPaneFraction)
     }
 
