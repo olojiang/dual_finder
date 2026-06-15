@@ -9,6 +9,11 @@ struct FileOperationTypesTests {
         #expect(FileOperationOptions().defaultConflictResolution == .keepBoth)
     }
 
+    @Test("exposes largerWins as a conflict resolution option")
+    func exposesLargerWinsConflictResolution() {
+        #expect(FileOperationConflictResolution.allCases.contains(.largerWins))
+    }
+
     @Test("reports byte based progress before item based progress")
     func reportsByteBasedProgress() {
         let progress = FileOperationProgress(

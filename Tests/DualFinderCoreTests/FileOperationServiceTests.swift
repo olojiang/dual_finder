@@ -157,6 +157,141 @@ struct FileOperationServiceTests {
         #expect(!FileManager.default.fileExists(atPath: destination.appendingPathComponent("source 2.txt").path))
     }
 
+    @Test("largerWins resolution overwrites when source is larger than destination")
+    func largerWinsOverwritesWhenSourceLarger() throws {
+        let root = try TemporaryDirectory()
+        let source = root.url.appendingPathComponent("source.txt")
+        let destination = root.url.appendingPathComponent("destination", isDirectory: true)
+        try Data(repeating: 1, count: 1024).write(to: source)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        try Data(repeating: 2, count: 256).write(to: destination.appendingPathComponent("source.txt"))
+
+        try FileOperationService(logger: CapturingLogger()).copy(
+            [source],
+            to: destination,
+            conflictResolver: { _ in .largerWins }
+        )
+
+        let copy = destination.appendingPathComponent("source.txt")
+        #expect(try Data(contentsOf: copy).count == 1024)
+        #expect(!FileManager.default.fileExists(atPath: destination.appendingPathComponent("source 2.txt").path))
+    }
+
+    @Test("largerWins resolution overwrites when source equals destination size")
+    func largerWinsOverwritesWhenSourceEqual() throws {
+        let root = try TemporaryDirectory()
+        let source = root.url.appendingPathComponent("source.txt")
+        let destination = root.url.appendingPathComponent("destination", isDirectory: true)
+        try Data(repeating: 1, count: 512).write(to: source)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        try Data(repeating: 2, count: 512).write(to: destination.appendingPathComponent("source.txt"))
+
+        try FileOperationService(logger: CapturingLogger()).copy(
+            [source],
+            to: destination,
+            conflictResolver: { _ in .largerWins }
+        )
+
+        #expect(try Data(contentsOf: destination.appendingPathComponent("source.txt")).count == 512)
+        #expect(!FileManager.default.fileExists(atPath: destination.appendingPathComponent("source 2.txt").path))
+    }
+
+    @Test("largerWins resolution skips when destination is larger than source")
+    func largerWinsSkipsWhenDestinationLarger() throws {
+        let root = try TemporaryDirectory()
+        let source = root.url.appendingPathComponent("source.txt")
+        let destination = root.url.appendingPathComponent("destination", isDirectory: true)
+        try Data(repeating: 1, count: 256).write(to: source)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        try Data(repeating: 2, count: 1024).write(to: destination.appendingPathComponent("source.txt"))
+
+        try FileOperationService(logger: CapturingLogger()).copy(
+            [source],
+            to: destination,
+            conflictResolver: { _ in .largerWins }
+        )
+
+        let existing = destination.appendingPathComponent("source.txt")
+        #expect(try Data(contentsOf: existing).count == 1024)
+        #expect(!FileManager.default.fileExists(atPath: destination.appendingPathComponent("source 2.txt").path))
+    }
+
+    @Test("largerWins resolution moves source when it is larger than destination")
+    func largerWinsMovesWhenSourceLarger() throws {
+        let root = try TemporaryDirectory()
+        let source = root.url.appendingPathComponent("source.txt")
+        let destination = root.url.appendingPathComponent("destination", isDirectory: true)
+        try Data(repeating: 1, count: 1024).write(to: source)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        try Data(repeating: 2, count: 256).write(to: destination.appendingPathComponent("source.txt"))
+
+        try FileOperationService(logger: CapturingLogger()).move(
+            [source],
+            to: destination,
+            conflictResolver: { _ in .largerWins }
+        )
+
+        #expect(!FileManager.default.fileExists(atPath: source.path))
+        #expect(try Data(contentsOf: destination.appendingPathComponent("source.txt")).count == 1024)
+    }
+
+    @Test("largerWins resolution keeps source in place when destination is larger")
+    func largerWinsKeepsSourceWhenDestinationLarger() throws {
+        let root = try TemporaryDirectory()
+        let source = root.url.appendingPathComponent("source.txt")
+        let destination = root.url.appendingPathComponent("destination", isDirectory: true)
+        try Data(repeating: 1, count: 256).write(to: source)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        try Data(repeating: 2, count: 1024).write(to: destination.appendingPathComponent("source.txt"))
+
+        try FileOperationService(logger: CapturingLogger()).move(
+            [source],
+            to: destination,
+            conflictResolver: { _ in .largerWins }
+        )
+
+        #expect(FileManager.default.fileExists(atPath: source.path))
+        #expect(try Data(contentsOf: destination.appendingPathComponent("source.txt")).count == 1024)
+    }
+
+    @Test("largerWinsResolution returns overwrite when source is larger or equal")
+    func largerWinsResolutionStaticHelperComparesSizes() throws {
+        let root = try TemporaryDirectory()
+        let source = root.url.appendingPathComponent("source.txt")
+        let destination = root.url.appendingPathComponent("destination", isDirectory: true)
+        try Data(repeating: 1, count: 1024).write(to: source)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        try Data(repeating: 2, count: 256).write(to: destination.appendingPathComponent("source.txt"))
+
+        let largerConflict = FileOperationConflict(
+            source: source,
+            destination: destination.appendingPathComponent("source.txt")
+        )
+        #expect(FileOperationService.largerWinsResolution(for: largerConflict) == .overwrite)
+
+        try Data(repeating: 3, count: 2048).write(to: destination.appendingPathComponent("source.txt"))
+        let smallerConflict = FileOperationConflict(
+            source: source,
+            destination: destination.appendingPathComponent("source.txt")
+        )
+        #expect(FileOperationService.largerWinsResolution(for: smallerConflict) == .skip)
+
+        try Data(repeating: 4, count: 1024).write(to: destination.appendingPathComponent("source.txt"))
+        let equalConflict = FileOperationConflict(
+            source: source,
+            destination: destination.appendingPathComponent("source.txt")
+        )
+        #expect(FileOperationService.largerWinsResolution(for: equalConflict) == .overwrite)
+    }
+
+    @Test("largerWinsResolution falls back to skip when sizes cannot be read")
+    func largerWinsResolutionFallsBackToSkipWhenSizesUnknown() {
+        let missing = URL(fileURLWithPath: "/tmp/dual-finder-larger-wins-missing-\(UUID().uuidString).txt")
+        let conflict = FileOperationConflict(source: missing, destination: missing)
+
+        #expect(FileOperationService.largerWinsResolution(for: conflict) == .skip)
+    }
+
     @Test("reports copy progress")
     func reportsCopyProgress() throws {
         let root = try TemporaryDirectory()

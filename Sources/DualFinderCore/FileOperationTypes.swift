@@ -4,6 +4,7 @@ public enum FileOperationConflictResolution: String, Sendable, CaseIterable {
     case overwrite
     case skip
     case keepBoth
+    case largerWins
 }
 
 public struct FileOperationOptions: Sendable {

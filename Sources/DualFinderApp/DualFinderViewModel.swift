@@ -67,7 +67,18 @@ final class DualFinderViewModel: ObservableObject {
     @Published var inlineRenameRequest: InlineRenameRequest?
     @Published private(set) var pasteboardRevision = 0
     @Published private(set) var fileOperationQueue: [QueuedFileOperation] = []
-    @Published var fileConflictDialogRequest: FileConflictDialogRequest?
+    @Published var fileConflictDialogRequest: FileConflictDialogRequest? {
+        didSet {
+            // If the dialog is dismissed without resolving the box (e.g. via the
+            // sheet binding being set to nil outside of `resolveFileConflict`),
+            // unblock the waiting file operation by resolving the box with a
+            // default answer.
+            if fileConflictDialogRequest == nil, oldValue != nil {
+                activeConflictAnswerBox?.resolve(FileConflictAnswer(resolution: .skip, applyToAll: false))
+                activeConflictAnswerBox = nil
+            }
+        }
+    }
     @Published var directoryComparisonDialogRequest: DirectoryComparisonDialogRequest?
     @Published var globalSearchDialogRequest: GlobalSearchDialogRequest?
     @Published var shortcutHelpRequest: ShortcutHelpRequest?
@@ -1701,6 +1712,25 @@ final class DualFinderViewModel: ObservableObject {
         Task.detached(priority: .userInitiated) { [weak self] in
             let service = FileOperationService(logger: nil)
             var applyAllResolution: FileOperationConflictResolution?
+
+            func resolveConflict(_ conflict: FileOperationConflict) -> FileOperationConflictResolution {
+                if applyAllResolution == .largerWins {
+                    return FileOperationService.largerWinsResolution(for: conflict)
+                }
+                if let applyAllResolution {
+                    return applyAllResolution
+                }
+                let answer = self?.resolveConflictSynchronously(conflict)
+                    ?? FileConflictAnswer(resolution: .keepBoth, applyToAll: false)
+                if answer.applyToAll {
+                    applyAllResolution = answer.resolution
+                }
+                if answer.resolution == .largerWins {
+                    return FileOperationService.largerWinsResolution(for: conflict)
+                }
+                return answer.resolution
+            }
+
             do {
                 switch kind {
                 case .copy:
@@ -1714,17 +1744,7 @@ final class DualFinderViewModel: ObservableObject {
                                 self?.recordFileOperationProgress(progress, for: id)
                             }
                         },
-                        conflictResolver: { conflict in
-                            if let applyAllResolution {
-                                return applyAllResolution
-                            }
-                            let answer = self?.resolveConflictSynchronously(conflict)
-                                ?? FileConflictAnswer(resolution: .keepBoth, applyToAll: false)
-                            if answer.applyToAll {
-                                applyAllResolution = answer.resolution
-                            }
-                            return answer.resolution
-                        }
+                        conflictResolver: resolveConflict
                     )
                 case .move:
                     guard let destination else { return }
@@ -1737,17 +1757,7 @@ final class DualFinderViewModel: ObservableObject {
                                 self?.recordFileOperationProgress(progress, for: id)
                             }
                         },
-                        conflictResolver: { conflict in
-                            if let applyAllResolution {
-                                return applyAllResolution
-                            }
-                            let answer = self?.resolveConflictSynchronously(conflict)
-                                ?? FileConflictAnswer(resolution: .keepBoth, applyToAll: false)
-                            if answer.applyToAll {
-                                applyAllResolution = answer.resolution
-                            }
-                            return answer.resolution
-                        }
+                        conflictResolver: resolveConflict
                     )
                 case .trash:
                     try service.trash(

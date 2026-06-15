@@ -69,6 +69,7 @@ struct ContentView: View {
         }
         .sheet(item: $model.fileConflictDialogRequest) { request in
             FileConflictDialog(model: model, request: request)
+                .interactiveDismissDisabled(true)
         }
         .sheet(item: $model.directoryComparisonDialogRequest) { _ in
             DirectoryComparisonDialog(model: model)
@@ -669,18 +670,18 @@ private struct FileConflictDialog: View {
                 Text("File Already Exists")
                     .font(.headline)
             }
-            VStack(alignment: .leading, spacing: 6) {
-                Text(request.destination.lastPathComponent)
-                    .font(.body)
-                    .fontWeight(.semibold)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Text(request.destination.deletingLastPathComponent().path)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .truncationMode(.middle)
+            HStack(alignment: .top, spacing: 16) {
+                ConflictFileInfoColumn(url: request.source, role: "Source")
+                Rectangle()
+                    .fill(Color.secondary.opacity(0.25))
+                    .frame(width: 1)
+                ConflictFileInfoColumn(url: request.destination, role: "Destination")
             }
+            Text(request.destination.deletingLastPathComponent().path)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .truncationMode(.middle)
             Toggle("Apply to all conflicts", isOn: $applyToAll)
             HStack {
                 Button("Skip") {
@@ -690,13 +691,75 @@ private struct FileConflictDialog: View {
                 Button("Keep Both") {
                     model.resolveFileConflict(.keepBoth, applyToAll: applyToAll)
                 }
+                Button("Larger Wins") {
+                    model.resolveFileConflict(.largerWins, applyToAll: applyToAll)
+                }
                 Button("Overwrite", role: .destructive) {
                     model.resolveFileConflict(.overwrite, applyToAll: applyToAll)
                 }
             }
         }
         .padding(18)
-        .frame(width: 420)
+        .frame(width: 520)
+    }
+}
+
+private struct ConflictFileInfoColumn: View {
+    let url: URL
+    let role: String
+
+    private var fileInfo: ConflictFileInfo {
+        ConflictFileInfo.fetch(for: url)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(role.uppercased())
+                .font(.caption2)
+                .fontWeight(.semibold)
+                .foregroundStyle(.secondary)
+            Text(url.lastPathComponent)
+                .font(.body)
+                .fontWeight(.semibold)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            HStack(spacing: 10) {
+                Label(fileInfo.sizeText, systemImage: "scalemass")
+                    .labelStyle(.titleAndIcon)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Label(fileInfo.modifiedText, systemImage: "clock")
+                .labelStyle(.titleAndIcon)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+struct ConflictFileInfo {
+    let size: Int64?
+    let modifiedAt: Date?
+
+    static let empty = ConflictFileInfo(size: nil, modifiedAt: nil)
+
+    static func fetch(for url: URL) -> ConflictFileInfo {
+        let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+        return ConflictFileInfo(
+            size: values?.fileSize.map(Int64.init),
+            modifiedAt: values?.contentModificationDate
+        )
+    }
+
+    var sizeText: String {
+        guard let size else { return "—" }
+        return ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
+    }
+
+    var modifiedText: String {
+        guard let modifiedAt else { return "—" }
+        return modifiedAt.formatted(date: .abbreviated, time: .shortened)
     }
 }
 

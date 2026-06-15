@@ -89,6 +89,16 @@ struct FileSystemServiceTests {
         #expect(service.parent(of: URL(fileURLWithPath: "/tmp/example")) == URL(fileURLWithPath: "/tmp"))
     }
 
+    @Test("returns available capacity for a directory volume")
+    func returnsAvailableCapacityForDirectoryVolume() throws {
+        let root = try TemporaryDirectory()
+
+        let availableCapacity = try FileSystemService().availableCapacity(at: root.url)
+        let capacity = try #require(availableCapacity)
+
+        #expect(capacity >= 0)
+    }
+
     @Test("uses valid cached folder sizes and invalidates changed modification dates")
     func usesFolderSizeCache() throws {
         let root = try TemporaryDirectory()

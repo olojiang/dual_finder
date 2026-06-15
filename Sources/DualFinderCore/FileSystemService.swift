@@ -47,6 +47,17 @@ public struct FileSystemService {
         return parent.path == item.path ? nil : parent
     }
 
+    public func availableCapacity(at url: URL) throws -> Int64? {
+        let values = try url.resourceValues(forKeys: [
+            .volumeAvailableCapacityForImportantUsageKey,
+            .volumeAvailableCapacityKey
+        ])
+        if let capacity = values.volumeAvailableCapacityForImportantUsage {
+            return capacity
+        }
+        return values.volumeAvailableCapacity.map(Int64.init)
+    }
+
     public func calculateFolderSize(at folder: URL, cache: FolderSizeCache = FolderSizeCache()) throws -> FolderSizeResolution {
         let modifiedAt = try folder.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
         if let cachedSize = cache.size(for: folder, modifiedAt: modifiedAt) {

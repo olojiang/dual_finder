@@ -313,9 +313,19 @@ public struct FileOperationService {
         options: FileOperationOptions,
         conflictResolver: ((FileOperationConflict) -> FileOperationConflictResolution)?
     ) throws -> URL? {
+        let conflict = FileOperationConflict(source: source, destination: requestedDestination)
+        let resolution = conflictResolver?(conflict) ?? options.defaultConflictResolution
+        if resolution == .largerWins {
+            let concrete = Self.largerWinsResolution(for: conflict)
+            return try resolvedDestination(
+                for: source,
+                requestedDestination: requestedDestination,
+                options: options,
+                conflictResolver: { _ in concrete }
+            )
+        }
+
         guard source.standardizedFileURL != requestedDestination.standardizedFileURL else {
-            let resolution = conflictResolver?(FileOperationConflict(source: source, destination: requestedDestination))
-                ?? options.defaultConflictResolution
             switch resolution {
             case .overwrite:
                 throw FileOperationError.invalidDestination
@@ -323,6 +333,8 @@ public struct FileOperationService {
                 return nil
             case .keepBoth:
                 return uniqueDestination(for: requestedDestination.lastPathComponent, in: requestedDestination.deletingLastPathComponent())
+            case .largerWins:
+                preconditionFailure("largerWins should be resolved to a concrete resolution before this switch")
             }
         }
 
@@ -332,8 +344,6 @@ public struct FileOperationService {
             return requestedDestination
         }
 
-        let resolution = conflictResolver?(FileOperationConflict(source: source, destination: requestedDestination))
-            ?? options.defaultConflictResolution
         switch resolution {
         case .overwrite:
             try fileManager.removeItem(at: requestedDestination)
@@ -342,6 +352,8 @@ public struct FileOperationService {
             return nil
         case .keepBoth:
             return uniqueDestination(for: requestedDestination.lastPathComponent, in: requestedDestination.deletingLastPathComponent())
+        case .largerWins:
+            preconditionFailure("largerWins should be resolved to a concrete resolution before this switch")
         }
     }
 
@@ -536,5 +548,19 @@ public struct FileOperationService {
     private struct CopiedRoot {
         let source: URL
         let destination: URL
+    }
+
+    public static func largerWinsResolution(for conflict: FileOperationConflict) -> FileOperationConflictResolution {
+        guard let sourceSize = fileSize(at: conflict.source),
+              let destinationSize = fileSize(at: conflict.destination)
+        else {
+            return .skip
+        }
+        return sourceSize >= destinationSize ? .overwrite : .skip
+    }
+
+    private static func fileSize(at url: URL) -> Int64? {
+        let values = try? url.resourceValues(forKeys: [.fileSizeKey])
+        return values?.fileSize.map(Int64.init)
     }
 }
