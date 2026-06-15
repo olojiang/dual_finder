@@ -73,4 +73,63 @@ struct MoveWithConflictResolutionPatternTests {
         #expect(state.didThrow == nil, "Move should not throw")
         #expect(state.applyAll == .skip, "applyAll should be set after first conflict")
     }
+
+    @Test("largerWins apply-all overwrites when source is larger and skips otherwise")
+    func largerWinsApplyAllOverwritesWhenSourceLarger() throws {
+        let root = try TemporaryDirectory()
+        let source = root.url.appendingPathComponent("src", isDirectory: true)
+        let destination = root.url.appendingPathComponent("dst", isDirectory: true)
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+
+        var largerSources: [URL] = []
+        var smallerSources: [URL] = []
+        for index in 0..<6 {
+            let payloadSize = (index + 1) * 1024
+            let existingSize = (index % 2 == 0) ? 64 : payloadSize * 2
+
+            let url = source.appendingPathComponent("file-\(index).txt")
+            try Data(repeating: UInt8(index), count: payloadSize).write(to: url)
+            try Data(repeating: UInt8(index + 100), count: existingSize)
+                .write(to: destination.appendingPathComponent("file-\(index).txt"))
+
+            if payloadSize >= existingSize {
+                largerSources.append(url)
+            } else {
+                smallerSources.append(url)
+            }
+        }
+
+        let state = MoveState()
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try FileOperationService(logger: CapturingLogger()).move(
+                    largerSources + smallerSources,
+                    to: destination,
+                    conflictResolver: { conflict in
+                        if let cached = state.applyAll {
+                            return cached
+                        }
+                        state.setApplyAll(.largerWins)
+                        return .largerWins
+                    }
+                )
+                state.markFinished(error: nil)
+            } catch {
+                state.markFinished(error: error)
+            }
+        }
+
+        #expect(state.waitForFinish(timeout: 10), "Move should finish within timeout")
+        #expect(state.finished, "Move should complete normally")
+        #expect(state.didThrow == nil, "Move should not throw")
+        #expect(state.applyAll == .largerWins, "applyAll should capture largerWins after first conflict")
+
+        for url in largerSources {
+            #expect(!FileManager.default.fileExists(atPath: url.path), "\(url.lastPathComponent) should be moved")
+        }
+        for url in smallerSources {
+            #expect(FileManager.default.fileExists(atPath: url.path), "\(url.lastPathComponent) should be kept")
+        }
+    }
 }

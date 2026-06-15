@@ -707,10 +707,7 @@ private struct FileConflictDialog: View {
 private struct ConflictFileInfoColumn: View {
     let url: URL
     let role: String
-
-    private var fileInfo: ConflictFileInfo {
-        ConflictFileInfo.fetch(for: url)
-    }
+    @State private var fileInfo: ConflictFileInfo?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -723,26 +720,25 @@ private struct ConflictFileInfoColumn: View {
                 .fontWeight(.semibold)
                 .lineLimit(1)
                 .truncationMode(.middle)
-            HStack(spacing: 10) {
-                Label(fileInfo.sizeText, systemImage: "scalemass")
-                    .labelStyle(.titleAndIcon)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Label(fileInfo.modifiedText, systemImage: "clock")
+            Label(fileInfo?.sizeText ?? "—", systemImage: "scalemass")
+                .labelStyle(.titleAndIcon)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Label(fileInfo?.modifiedText ?? "—", systemImage: "clock")
                 .labelStyle(.titleAndIcon)
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .task(id: url) {
+            fileInfo = ConflictFileInfo.fetch(for: url)
+        }
     }
 }
 
-struct ConflictFileInfo {
+private struct ConflictFileInfo {
     let size: Int64?
     let modifiedAt: Date?
-
-    static let empty = ConflictFileInfo(size: nil, modifiedAt: nil)
 
     static func fetch(for url: URL) -> ConflictFileInfo {
         let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])

@@ -314,16 +314,11 @@ public struct FileOperationService {
         conflictResolver: ((FileOperationConflict) -> FileOperationConflictResolution)?
     ) throws -> URL? {
         let conflict = FileOperationConflict(source: source, destination: requestedDestination)
-        let resolution = conflictResolver?(conflict) ?? options.defaultConflictResolution
-        if resolution == .largerWins {
-            let concrete = Self.largerWinsResolution(for: conflict)
-            return try resolvedDestination(
-                for: source,
-                requestedDestination: requestedDestination,
-                options: options,
-                conflictResolver: { _ in concrete }
-            )
-        }
+        let resolution = Self.resolvedStrategy(
+            for: conflict,
+            options: options,
+            conflictResolver: conflictResolver
+        )
 
         guard source.standardizedFileURL != requestedDestination.standardizedFileURL else {
             switch resolution {
@@ -334,7 +329,7 @@ public struct FileOperationService {
             case .keepBoth:
                 return uniqueDestination(for: requestedDestination.lastPathComponent, in: requestedDestination.deletingLastPathComponent())
             case .largerWins:
-                preconditionFailure("largerWins should be resolved to a concrete resolution before this switch")
+                preconditionFailure("largerWins should be resolved to a concrete strategy before this switch")
             }
         }
 
@@ -353,8 +348,17 @@ public struct FileOperationService {
         case .keepBoth:
             return uniqueDestination(for: requestedDestination.lastPathComponent, in: requestedDestination.deletingLastPathComponent())
         case .largerWins:
-            preconditionFailure("largerWins should be resolved to a concrete resolution before this switch")
+            preconditionFailure("largerWins should be resolved to a concrete strategy before this switch")
         }
+    }
+
+    private static func resolvedStrategy(
+        for conflict: FileOperationConflict,
+        options: FileOperationOptions,
+        conflictResolver: ((FileOperationConflict) -> FileOperationConflictResolution)?
+    ) -> FileOperationConflictResolution {
+        let resolution = conflictResolver?(conflict) ?? options.defaultConflictResolution
+        return resolution == .largerWins ? largerWinsResolution(for: conflict) : resolution
     }
 
     private func validateDestination(_ destination: URL, forCopying source: URL) throws {

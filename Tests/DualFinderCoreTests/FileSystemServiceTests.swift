@@ -99,6 +99,15 @@ struct FileSystemServiceTests {
         #expect(capacity >= 0)
     }
 
+    @Test("throws when available capacity is requested for a missing path")
+    func throwsWhenAvailableCapacityMissingPath() {
+        let missing = URL(fileURLWithPath: "/tmp/dual-finder-missing-\(UUID().uuidString)")
+
+        #expect(throws: (any Error).self) {
+            _ = try FileSystemService().availableCapacity(at: missing)
+        }
+    }
+
     @Test("uses valid cached folder sizes and invalidates changed modification dates")
     func usesFolderSizeCache() throws {
         let root = try TemporaryDirectory()

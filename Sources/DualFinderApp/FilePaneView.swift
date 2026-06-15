@@ -35,6 +35,7 @@ struct FilePaneView: View {
     @FocusState private var isFileListFocused: Bool
     @FocusState private var isPathFieldFocused: Bool
     @FocusState private var isFileSearchFocused: Bool
+    @State private var freeSpaceCapacity: Int64?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -75,6 +76,14 @@ struct FilePaneView: View {
             }
             dismissFileSearch(restoreFocus: false)
         }
+        .task(id: model.pane(for: side).selectedURL) {
+            refreshFreeSpace()
+        }
+    }
+
+    private func refreshFreeSpace() {
+        let url = model.pane(for: side).selectedURL
+        freeSpaceCapacity = (try? FileSystemService().availableCapacity(at: url)) ?? nil
     }
 
     private var paneHeader: some View {
@@ -627,18 +636,23 @@ struct FilePaneView: View {
 
     private var footerStats: some View {
         let summary = FilePaneSummary(items: visibleItems)
-        let freeSpace = FreeSpaceSummary(url: model.pane(for: side).selectedURL)
+        let freeSpaceText = formattedFreeSpace
 
         return HStack(spacing: 12) {
             summaryMetric("Files", value: "\(summary.fileCount)")
             summaryMetric("Size", value: summary.formattedFileSize)
             summaryMetric("Folders", value: "\(summary.folderCount)")
-            summaryMetric("Free space", value: freeSpace.formattedCapacity)
+            summaryMetric("Free space", value: freeSpaceText)
         }
         .font(.caption2)
         .foregroundStyle(.secondary)
         .monospacedDigit()
-        .accessibilityLabel("Files \(summary.fileCount), total size \(summary.formattedFileSize), folders \(summary.folderCount), free space \(freeSpace.formattedCapacity)")
+        .accessibilityLabel("Files \(summary.fileCount), total size \(summary.formattedFileSize), folders \(summary.folderCount), free space \(freeSpaceText)")
+    }
+
+    private var formattedFreeSpace: String {
+        guard let freeSpaceCapacity else { return "--" }
+        return ByteCountFormatter.string(fromByteCount: freeSpaceCapacity, countStyle: .file)
     }
 
     private func summaryMetric(_ title: String, value: String) -> some View {
@@ -1019,19 +1033,6 @@ private struct FilePaneSummary {
 
     var formattedFileSize: String {
         ByteCountFormatter.string(fromByteCount: fileTotalSize, countStyle: .file)
-    }
-}
-
-private struct FreeSpaceSummary {
-    let capacity: Int64?
-
-    init(url: URL, fileSystem: FileSystemService = FileSystemService()) {
-        capacity = try? fileSystem.availableCapacity(at: url)
-    }
-
-    var formattedCapacity: String {
-        guard let capacity else { return "--" }
-        return ByteCountFormatter.string(fromByteCount: capacity, countStyle: .file)
     }
 }
 

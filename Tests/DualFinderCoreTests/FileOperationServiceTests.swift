@@ -292,6 +292,43 @@ struct FileOperationServiceTests {
         #expect(FileOperationService.largerWinsResolution(for: conflict) == .skip)
     }
 
+    @Test("largerWinsResolution skips when either side is a directory")
+    func largerWinsResolutionSkipsWhenEitherSideIsDirectory() throws {
+        let root = try TemporaryDirectory()
+        let sourceDir = root.url.appendingPathComponent("source-dir", isDirectory: true)
+        let destinationDir = root.url.appendingPathComponent("destination-dir", isDirectory: true)
+        try FileManager.default.createDirectory(at: sourceDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destinationDir, withIntermediateDirectories: true)
+        try Data(repeating: 1, count: 64).write(to: sourceDir.appendingPathComponent("file.txt"))
+        try Data(repeating: 2, count: 32).write(to: destinationDir.appendingPathComponent("file.txt"))
+
+        let bothDirectories = FileOperationConflict(source: sourceDir, destination: destinationDir)
+        let sourceFile = FileOperationConflict(
+            source: sourceDir.appendingPathComponent("file.txt"),
+            destination: destinationDir
+        )
+        let destinationFile = FileOperationConflict(
+            source: sourceDir,
+            destination: destinationDir.appendingPathComponent("file.txt")
+        )
+
+        #expect(FileOperationService.largerWinsResolution(for: bothDirectories) == .skip)
+        #expect(FileOperationService.largerWinsResolution(for: sourceFile) == .skip)
+        #expect(FileOperationService.largerWinsResolution(for: destinationFile) == .skip)
+    }
+
+    @Test("largerWinsResolution returns overwrite for two equal-sized files")
+    func largerWinsResolutionOverwritesForEqualSizes() throws {
+        let root = try TemporaryDirectory()
+        let source = root.url.appendingPathComponent("source.txt")
+        let destination = root.url.appendingPathComponent("destination.txt")
+        try Data(repeating: 9, count: 128).write(to: source)
+        try Data(repeating: 8, count: 128).write(to: destination)
+
+        let conflict = FileOperationConflict(source: source, destination: destination)
+        #expect(FileOperationService.largerWinsResolution(for: conflict) == .overwrite)
+    }
+
     @Test("reports copy progress")
     func reportsCopyProgress() throws {
         let root = try TemporaryDirectory()
