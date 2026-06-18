@@ -81,6 +81,41 @@ struct FileSystemServiceTests {
         #expect(includingHidden.map(\.name).contains(".hidden.txt"))
     }
 
+    @Test("lists recursive file contents without folders")
+    func listsRecursiveFileContentsWithoutFolders() throws {
+        let root = try TemporaryDirectory()
+        let nested = root.url.appendingPathComponent("Nested")
+        let deeper = nested.appendingPathComponent("Deeper")
+        try FileManager.default.createDirectory(at: deeper, withIntermediateDirectories: true)
+        try "root".write(to: root.url.appendingPathComponent("root.txt"), atomically: true, encoding: .utf8)
+        try "nested".write(to: nested.appendingPathComponent("nested.txt"), atomically: true, encoding: .utf8)
+        try "deep".write(to: deeper.appendingPathComponent("deep.txt"), atomically: true, encoding: .utf8)
+
+        let items = try FileSystemService().recursiveFileContents(
+            of: root.url,
+            sortRule: FileSortRule(field: .name, direction: .ascending)
+        )
+
+        #expect(items.map(\.name) == ["deep.txt", "nested.txt", "root.txt"])
+        #expect(items.allSatisfy { !$0.isDirectoryLike })
+        #expect(items.map(\.url).contains(deeper.appendingPathComponent("deep.txt").standardizedFileURL))
+    }
+
+    @Test("recursive file contents respects hidden file setting")
+    func recursiveFileContentsRespectsHiddenSetting() throws {
+        let root = try TemporaryDirectory()
+        let nested = root.url.appendingPathComponent("Nested")
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        try "visible".write(to: nested.appendingPathComponent("visible.txt"), atomically: true, encoding: .utf8)
+        try "hidden".write(to: nested.appendingPathComponent(".hidden.txt"), atomically: true, encoding: .utf8)
+
+        let visibleOnly = try FileSystemService().recursiveFileContents(of: root.url)
+        let includingHidden = try FileSystemService().recursiveFileContents(of: root.url, includeHidden: true)
+
+        #expect(visibleOnly.map(\.name) == ["visible.txt"])
+        #expect(includingHidden.map(\.name).contains(".hidden.txt"))
+    }
+
     @Test("returns nil parent for filesystem root")
     func returnsNilParentForFilesystemRoot() {
         let service = FileSystemService()

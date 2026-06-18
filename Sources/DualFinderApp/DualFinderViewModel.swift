@@ -61,6 +61,8 @@ final class DualFinderViewModel: ObservableObject {
     @Published var rightPane: PaneState
     @Published private(set) var leftItems: [FileItem] = []
     @Published private(set) var rightItems: [FileItem] = []
+    @Published private(set) var leftFlatViewRootURL: URL?
+    @Published private(set) var rightFlatViewRootURL: URL?
     @Published var statusMessage: String = ""
     @Published var diskAccessPrompt: DiskAccessPrompt?
     @Published var showWindowHotkeyPrompt: ShowWindowHotkeyPrompt?
@@ -114,6 +116,8 @@ final class DualFinderViewModel: ObservableObject {
     private var isProcessingFileOperations = false
     private var activeConflictAnswerBox: FileConflictAnswerBox?
     private var similarFileReviewActiveSides: Set<PaneSide> = []
+    private var leftFlatViewReturnSelection: Set<URL> = []
+    private var rightFlatViewReturnSelection: Set<URL> = []
     private var globalSearchCancellation: FileOperationCancellation?
     private var archiveCancellation: FileOperationCancellation?
     private var isArchiveOperationRunning = false
@@ -165,7 +169,15 @@ final class DualFinderViewModel: ObservableObject {
     }
 
     func sortRule(for side: PaneSide) -> FileSortRule {
-        sortRuleStore.rule(for: pane(for: side).selectedURL)
+        sortRuleStore.rule(for: flatViewRoot(for: side) ?? pane(for: side).selectedURL)
+    }
+
+    func flatViewRoot(for side: PaneSide) -> URL? {
+        side == .left ? leftFlatViewRootURL : rightFlatViewRootURL
+    }
+
+    func isFlatViewActive(on side: PaneSide) -> Bool {
+        flatViewRoot(for: side) != nil
     }
 
     func columnWidths(for side: PaneSide) -> FileListColumnWidths {
@@ -524,6 +536,19 @@ final class DualFinderViewModel: ObservableObject {
         ])
     }
 
+    func toggleFlatView(on side: PaneSide) {
+        guard !isInlineRenaming else { return }
+        activatePane(side)
+
+        if isFlatViewActive(on: side) {
+            exitFlatView(on: side)
+            return
+        }
+
+        guard let root = flatViewRootCandidate(on: side) else { return }
+        enterFlatView(root: root, on: side)
+    }
+
     func requestFolderBookmarkDialog(on side: PaneSide) {
         guard !isInlineRenaming else { return }
         activatePane(side)
@@ -855,6 +880,11 @@ final class DualFinderViewModel: ObservableObject {
     }
 
     func refresh(_ side: PaneSide) {
+        if let flatRoot = flatViewRoot(for: side) {
+            refreshFlatView(root: flatRoot, on: side)
+            return
+        }
+
         let currentURL = pane(for: side).selectedURL
         do {
             let rule = sortRuleStore.rule(for: currentURL)
@@ -885,7 +915,7 @@ final class DualFinderViewModel: ObservableObject {
     }
 
     func selectSortField(_ field: FileSortField, for side: PaneSide) {
-        let folder = pane(for: side).selectedURL
+        let folder = flatViewRoot(for: side) ?? pane(for: side).selectedURL
         let nextRule = sortRuleStore.rule(for: folder).selecting(field)
         sortRuleStore.setRule(nextRule, for: folder)
         logger.info("sorting", "sort.changed", metadata: [
@@ -902,6 +932,7 @@ final class DualFinderViewModel: ObservableObject {
             openInFinder(url)
             return
         }
+        clearFlatViewState(on: side)
         mutatePane(side) { $0.navigateSelectedTab(to: url, selecting: selection) }
         folderBookmarkStore.recordRecentFolder(url)
         persistPaneSession()
@@ -919,6 +950,7 @@ final class DualFinderViewModel: ObservableObject {
             return
         }
 
+        clearFlatViewState(on: side)
         folderBookmarkStore.recordRecentFolder(url)
         persistPaneSession()
         logger.info("navigation", "history.back", metadata: [
@@ -935,6 +967,7 @@ final class DualFinderViewModel: ObservableObject {
             return
         }
 
+        clearFlatViewState(on: side)
         folderBookmarkStore.recordRecentFolder(url)
         persistPaneSession()
         logger.info("navigation", "history.forward", metadata: [
@@ -2066,12 +2099,120 @@ final class DualFinderViewModel: ObservableObject {
         return values?.fileSize.map(Int64.init)
     }
 
+    private func flatViewRootCandidate(on side: PaneSide) -> URL? {
+        let selection = pane(for: side).selectedItemURLs
+        if selection.isEmpty {
+            return pane(for: side).selectedURL.standardizedFileURL
+        }
+
+        guard selection.count == 1,
+              let selected = items(for: side).first(where: { selection.contains($0.url) }) else {
+            statusMessage = "Flat view needs no selection or one selected folder"
+            logger.debug("flat-view", "toggle.ignored.invalid-selection", metadata: [
+                "side": side.rawValue,
+                "count": "\(selection.count)"
+            ])
+            return nil
+        }
+
+        if selected.kind == .folder {
+            return selected.url.standardizedFileURL
+        }
+
+        return selected.url.deletingLastPathComponent().standardizedFileURL
+    }
+
+    private func enterFlatView(root: URL, on side: PaneSide) {
+        setFlatViewRoot(root, for: side)
+        setFlatViewReturnSelection(pane(for: side).selectedItemURLs, for: side)
+        clearSelection(side)
+        refreshFlatView(root: root, on: side)
+        logger.info("flat-view", "entered", metadata: [
+            "side": side.rawValue,
+            "root": root.path
+        ])
+    }
+
+    private func exitFlatView(on side: PaneSide) {
+        let root = flatViewRoot(for: side)
+        let returnSelection = flatViewReturnSelection(for: side)
+        clearFlatViewState(on: side)
+        refresh(side)
+        let validReturnSelection = returnSelection.intersection(Set(items(for: side).map(\.url)))
+        setSelection(validReturnSelection, for: side)
+        statusMessage = "Flat view off"
+        logger.info("flat-view", "exited", metadata: [
+            "side": side.rawValue,
+            "root": root?.path ?? ""
+        ])
+    }
+
+    private func refreshFlatView(root: URL, on side: PaneSide) {
+        do {
+            let rule = sortRuleStore.rule(for: root)
+            let nextItems = try fileSystem.recursiveFileContents(
+                of: root,
+                includeHidden: showHiddenFiles,
+                sortRule: rule,
+                folderSizeCache: folderSizeCache
+            )
+            setItems(nextItems, for: side)
+            statusMessage = "Flat: \(root.path) - \(nextItems.count) file(s)"
+            logger.info("flat-view", "refreshed", metadata: [
+                "side": side.rawValue,
+                "root": root.path,
+                "count": "\(nextItems.count)",
+                "showHidden": "\(showHiddenFiles)",
+                "sort": "\(rule.field.rawValue).\(rule.direction.rawValue)"
+            ])
+        } catch {
+            clearFlatViewState(on: side)
+            statusMessage = "Failed to read \(root.path): \(error.localizedDescription)"
+            logger.error("flat-view", "refresh.failed", metadata: [
+                "side": side.rawValue,
+                "root": root.path,
+                "error": error.localizedDescription
+            ])
+            handlePossiblePermissionFailure(error, path: root.path)
+            refresh(side)
+        }
+    }
+
     private func setItems(_ items: [FileItem], for side: PaneSide) {
         if side == .left {
             leftItems = items
         } else {
             rightItems = items
         }
+    }
+
+    private func setFlatViewRoot(_ root: URL?, for side: PaneSide) {
+        if side == .left {
+            leftFlatViewRootURL = root
+        } else {
+            rightFlatViewRootURL = root
+        }
+    }
+
+    private func clearFlatViewRoot(on side: PaneSide) {
+        setFlatViewRoot(nil, for: side)
+    }
+
+    private func flatViewReturnSelection(for side: PaneSide) -> Set<URL> {
+        side == .left ? leftFlatViewReturnSelection : rightFlatViewReturnSelection
+    }
+
+    private func setFlatViewReturnSelection(_ selection: Set<URL>, for side: PaneSide) {
+        if side == .left {
+            leftFlatViewReturnSelection = selection
+        } else {
+            rightFlatViewReturnSelection = selection
+        }
+    }
+
+    private func clearFlatViewState(on side: PaneSide) {
+        clearFlatViewRoot(on: side)
+        setFlatViewReturnSelection([], for: side)
     }
 
     @discardableResult

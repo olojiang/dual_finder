@@ -316,6 +316,7 @@ struct FilePaneView: View {
                         ForEach(visibleItems) { item in
                             FileRow(
                                 item: item,
+                                displayName: displayName(for: item),
                                 columnWidths: model.columnWidths(for: side),
                                 isRenaming: renamingURL == item.url,
                                 isVisuallyDeleted: visuallyDeletedSimilarFileURLs.contains(item.url),
@@ -362,8 +363,25 @@ struct FilePaneView: View {
                         ])
                     }
                     .onKeyPress(.escape, phases: .down) { _ in
-                        guard isFileSearchPresented, renamingURL == nil else { return .ignored }
-                        dismissFileSearch()
+                        guard renamingURL == nil else { return .ignored }
+                        if isFileSearchPresented {
+                            dismissFileSearch()
+                            return .handled
+                        }
+                        if model.isFlatViewActive(on: side) {
+                            model.toggleFlatView(on: side)
+                            return .handled
+                        }
+                        return .ignored
+                    }
+                    .onKeyPress(KeyEquivalent("b"), phases: .down) { keyPress in
+                        guard isControlOnly(keyPress.modifiers),
+                              renamingURL == nil,
+                              !isFileSearchPresented else {
+                            return .ignored
+                        }
+
+                        model.toggleFlatView(on: side)
                         return .handled
                     }
                     .onKeyPress(KeyEquivalent("e"), phases: .down) { keyPress in
@@ -622,7 +640,20 @@ struct FilePaneView: View {
 
         return allItems.filter { item in
             FileNameSearch.matches(item.name, query: query)
+                || FileNameSearch.matches(displayName(for: item), query: query)
         }
+    }
+
+    private func displayName(for item: FileItem) -> String {
+        guard let root = model.flatViewRoot(for: side) else { return item.name }
+
+        let rootPath = root.standardizedFileURL.path
+        let itemPath = item.url.standardizedFileURL.path
+        let prefix = rootPath == "/" ? "/" : rootPath + "/"
+        guard itemPath.hasPrefix(prefix) else { return item.name }
+
+        let relativePath = String(itemPath.dropFirst(prefix.count))
+        return relativePath.isEmpty ? item.name : relativePath
     }
 
     private var similarReviewItems: [FileItem] {
@@ -1694,6 +1725,7 @@ private final class DroppedURLAccumulator: @unchecked Sendable {
 
 private struct FileRow: View {
     let item: FileItem
+    let displayName: String
     let columnWidths: FileListColumnWidths
     let isRenaming: Bool
     let isVisuallyDeleted: Bool
@@ -1752,7 +1784,7 @@ private struct FileRow: View {
                 cancelRename: cancelRename
             )
         } else {
-            Text(item.name)
+            Text(displayName)
                 .lineLimit(1)
                 .truncationMode(.middle)
         }

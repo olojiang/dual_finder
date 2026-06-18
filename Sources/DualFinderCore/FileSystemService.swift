@@ -40,6 +40,36 @@ public struct FileSystemService {
             .sorted { FileSystemService.sortItems($0, $1, rule: sortRule) }
     }
 
+    public func recursiveFileContents(
+        of directory: URL,
+        includeHidden: Bool = false,
+        sortRule: FileSortRule = FileSortRule(),
+        folderSizeCache: FolderSizeCache? = nil
+    ) throws -> [FileItem] {
+        let options: FileManager.DirectoryEnumerationOptions = includeHidden ? [] : [.skipsHiddenFiles]
+        guard let enumerator = fileManager.enumerator(
+            at: directory,
+            includingPropertiesForKeys: Array(Self.itemResourceKeys),
+            options: options
+        ) else {
+            return []
+        }
+
+        var items: [FileItem] = []
+        for case let url as URL in enumerator {
+            let values = try url.resourceValues(forKeys: Self.itemResourceKeys)
+            if values.isDirectory == true {
+                if values.isPackage == true {
+                    enumerator.skipDescendants()
+                }
+                continue
+            }
+            items.append(try item(for: url, resourceValues: values, folderSizeCache: folderSizeCache))
+        }
+
+        return items.sorted { FileSystemService.sortItems($0, $1, rule: sortRule) }
+    }
+
     public func parent(of url: URL) -> URL? {
         let item = url.standardizedFileURL
         guard item.path != "/" else { return nil }
@@ -70,8 +100,19 @@ public struct FileSystemService {
     }
 
     private func item(for url: URL, folderSizeCache: FolderSizeCache?) throws -> FileItem {
+        try item(
+            for: url,
+            resourceValues: url.resourceValues(forKeys: Self.itemResourceKeys),
+            folderSizeCache: folderSizeCache
+        )
+    }
+
+    private func item(
+        for url: URL,
+        resourceValues values: URLResourceValues,
+        folderSizeCache: FolderSizeCache?
+    ) throws -> FileItem {
         let itemURL = url.standardizedFileURL
-        let values = try url.resourceValues(forKeys: Self.itemResourceKeys)
         let kind: FileItemKind
         if values.isAliasFile == true {
             kind = .alias

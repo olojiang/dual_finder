@@ -54,6 +54,7 @@ struct ShortcutMatrixTests {
 
         #expect(binding.displayText == "⌘⌥⇧←")
         #expect(AppShortcutBinding(key: "space", keyCode: 49, modifiers: [.control]).displayText == "⌃Space")
+        #expect(AppShortcutAction.flatView.defaultBinding.displayText == "⌃B")
     }
 
     private func makeDefaults() -> (UserDefaults, String) {

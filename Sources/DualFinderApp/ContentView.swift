@@ -28,6 +28,8 @@ struct ContentView: View {
             model.requestPathEditing(on: model.activePaneSide)
         } showFileSearch: {
             model.requestFileSearch(on: model.activePaneSide)
+        } toggleFlatView: {
+            model.toggleFlatView(on: model.activePaneSide)
         } showFolderBookmarks: {
             model.requestFolderBookmarkDialog(on: model.activePaneSide)
         } showBatchRename: {
@@ -1172,6 +1174,7 @@ private enum ShortcutHelpCatalog {
             ]),
             ShortcutHelpGroup(title: "Search and Tools", entries: [
                 entry(.fileSearch),
+                entry(.flatView, note: "No selection, one folder, or one file"),
                 ShortcutHelpEntry(title: "Focus Filter Input", shortcut: "⌃E", note: "When folder filter is open"),
                 ShortcutHelpEntry(title: "Recursive Search", shortcut: "Menu", note: nil),
                 ShortcutHelpEntry(title: "Compare Directories", shortcut: "Menu", note: nil),
@@ -1217,6 +1220,7 @@ private struct AppShortcutHandler: NSViewRepresentable {
     let showShortcutHelp: () -> Void
     let goToFolder: () -> Void
     let showFileSearch: () -> Void
+    let toggleFlatView: () -> Void
     let showFolderBookmarks: () -> Void
     let showBatchRename: () -> Void
     let closeActiveTab: () -> Bool
@@ -1238,6 +1242,7 @@ private struct AppShortcutHandler: NSViewRepresentable {
             showShortcutHelp: showShortcutHelp,
             goToFolder: goToFolder,
             showFileSearch: showFileSearch,
+            toggleFlatView: toggleFlatView,
             showFolderBookmarks: showFolderBookmarks,
             showBatchRename: showBatchRename,
             closeActiveTab: closeActiveTab,
@@ -1266,6 +1271,7 @@ private struct AppShortcutHandler: NSViewRepresentable {
         context.coordinator.showShortcutHelp = showShortcutHelp
         context.coordinator.goToFolder = goToFolder
         context.coordinator.showFileSearch = showFileSearch
+        context.coordinator.toggleFlatView = toggleFlatView
         context.coordinator.showFolderBookmarks = showFolderBookmarks
         context.coordinator.showBatchRename = showBatchRename
         context.coordinator.closeActiveTab = closeActiveTab
@@ -1292,6 +1298,7 @@ private struct AppShortcutHandler: NSViewRepresentable {
         var showShortcutHelp: () -> Void
         var goToFolder: () -> Void
         var showFileSearch: () -> Void
+        var toggleFlatView: () -> Void
         var showFolderBookmarks: () -> Void
         var showBatchRename: () -> Void
         var closeActiveTab: () -> Bool
@@ -1314,6 +1321,7 @@ private struct AppShortcutHandler: NSViewRepresentable {
             showShortcutHelp: @escaping () -> Void,
             goToFolder: @escaping () -> Void,
             showFileSearch: @escaping () -> Void,
+            toggleFlatView: @escaping () -> Void,
             showFolderBookmarks: @escaping () -> Void,
             showBatchRename: @escaping () -> Void,
             closeActiveTab: @escaping () -> Bool,
@@ -1334,6 +1342,7 @@ private struct AppShortcutHandler: NSViewRepresentable {
             self.showShortcutHelp = showShortcutHelp
             self.goToFolder = goToFolder
             self.showFileSearch = showFileSearch
+            self.toggleFlatView = toggleFlatView
             self.showFolderBookmarks = showFolderBookmarks
             self.showBatchRename = showBatchRename
             self.closeActiveTab = closeActiveTab
@@ -1374,6 +1383,9 @@ private struct AppShortcutHandler: NSViewRepresentable {
                     return nil
                 case .fileSearch:
                     self?.showFileSearch()
+                    return nil
+                case .flatView:
+                    self?.toggleFlatView()
                     return nil
                 case .folderBookmarks:
                     self?.showFolderBookmarks()

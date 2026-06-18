@@ -7,6 +7,7 @@ enum AppShortcutAction: String, CaseIterable, Identifiable {
     case newRightTab
     case goToFolder
     case fileSearch
+    case flatView
     case folderBookmarks
     case batchRename
     case closeActiveTab
@@ -37,6 +38,7 @@ enum AppShortcutAction: String, CaseIterable, Identifiable {
         case .newRightTab: "New Right Tab"
         case .goToFolder: "Go to Folder"
         case .fileSearch: "Filter Current Folder"
+        case .flatView: "Flat View"
         case .folderBookmarks: "Open Locations"
         case .batchRename: "Batch Rename"
         case .closeActiveTab: "Close Active Tab"
@@ -63,7 +65,7 @@ enum AppShortcutAction: String, CaseIterable, Identifiable {
 
     var group: String {
         switch self {
-        case .goToFolder, .fileSearch, .folderBookmarks, .batchRename, .showShortcutHelp:
+        case .goToFolder, .fileSearch, .flatView, .folderBookmarks, .batchRename, .showShortcutHelp:
             "Commands"
         case .newActiveTab, .newRightTab, .closeActiveTab:
             "Tabs"
@@ -101,6 +103,8 @@ enum AppShortcutAction: String, CaseIterable, Identifiable {
             AppShortcutBinding(key: "g", keyCode: nil, modifiers: [.command, .shift])
         case .fileSearch:
             AppShortcutBinding(key: "s", keyCode: 1, modifiers: [.control])
+        case .flatView:
+            AppShortcutBinding(key: "b", keyCode: 11, modifiers: [.control])
         case .folderBookmarks:
             AppShortcutBinding(key: "d", keyCode: nil, modifiers: [.control])
         case .batchRename:

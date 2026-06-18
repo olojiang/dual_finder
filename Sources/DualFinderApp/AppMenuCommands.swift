@@ -245,6 +245,12 @@ struct AppMenuCommands: Commands {
         .keyboardShortcut("s", modifiers: [.control])
         .disabled(model.isInlineRenaming)
 
+        Button("Flat View") {
+            model.toggleFlatView(on: model.activePaneSide)
+        }
+        .keyboardShortcut("b", modifiers: [.control])
+        .disabled(model.isInlineRenaming)
+
         Button("Recursive Search…") {
             model.requestGlobalSearchDialog()
         }
