@@ -313,6 +313,13 @@ struct AppMenuCommands: Commands {
             model.addSelectedDirectoriesToFavorites(on: model.activePaneSide)
         }
         .disabled(!model.canAddFavoriteFromActiveSelection)
+
+        Divider()
+
+        Button("Convert Text Encoding to UTF-8") {
+            model.convertSelectedTextEncodingToUTF8(on: model.activePaneSide)
+        }
+        .disabled(!model.canConvertActiveSelectionToUTF8)
     }
 
     @ViewBuilder

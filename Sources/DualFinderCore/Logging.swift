@@ -7,7 +7,7 @@ public enum LogLevel: String, Sendable {
     case error = "ERROR"
 }
 
-public protocol AppLogging: AnyObject {
+public protocol AppLogging: AnyObject, Sendable {
     func log(_ level: LogLevel, _ category: String, _ message: String, metadata: [String: String])
 }
 

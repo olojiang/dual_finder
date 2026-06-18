@@ -21,6 +21,12 @@ struct FileSearchRequest: Equatable {
     let side: PaneSide
 }
 
+struct SimilarFileDeletionMarkRequest: Equatable {
+    let id = UUID()
+    let side: PaneSide
+    let urls: Set<URL>
+}
+
 struct FolderBookmarkDialogRequest: Identifiable, Equatable {
     let id = UUID()
 }
@@ -62,6 +68,7 @@ final class DualFinderViewModel: ObservableObject {
     @Published var pathEditRequest: PathEditRequest?
     @Published var paneFocusRequest: PaneFocusRequest?
     @Published var fileSearchRequest: FileSearchRequest?
+    @Published var similarFileDeletionMarkRequest: SimilarFileDeletionMarkRequest?
     @Published var folderBookmarkDialogRequest: FolderBookmarkDialogRequest?
     @Published var batchRenameDialogRequest: BatchRenameDialogRequest?
     @Published var inlineRenameRequest: InlineRenameRequest?
@@ -106,9 +113,11 @@ final class DualFinderViewModel: ObservableObject {
     private var pendingOperationRequests: [QueuedFileOperationRequest] = []
     private var isProcessingFileOperations = false
     private var activeConflictAnswerBox: FileConflictAnswerBox?
+    private var similarFileReviewActiveSides: Set<PaneSide> = []
     private var globalSearchCancellation: FileOperationCancellation?
     private var archiveCancellation: FileOperationCancellation?
     private var isArchiveOperationRunning = false
+    @Published private var isTextEncodingConversionRunning = false
 
     init(
         initialURL: URL = FileManager.default.homeDirectoryForCurrentUser,
@@ -369,6 +378,13 @@ final class DualFinderViewModel: ObservableObject {
         return ArchiveService.hasExtractableArchives(urls)
     }
 
+    var canConvertActiveSelectionToUTF8: Bool {
+        hasActiveSelection
+            && !isInlineRenaming
+            && !isArchiveOperationRunning
+            && !isTextEncodingConversionRunning
+    }
+
     func selectAllItems(on side: PaneSide) {
         activatePane(side)
         let urls = Set(items(for: side).map(\.url))
@@ -562,6 +578,22 @@ final class DualFinderViewModel: ObservableObject {
 
     func logDragDropEvent(_ message: String, metadata: [String: String] = [:]) {
         logger.debug("drag-drop", message, metadata: metadata)
+    }
+
+    func logSimilarFileReviewEvent(_ message: String, metadata: [String: String] = [:]) {
+        logger.debug("similar-file-review", message, metadata: metadata)
+    }
+
+    func setSimilarFileReviewActive(_ isActive: Bool, on side: PaneSide) {
+        if isActive {
+            similarFileReviewActiveSides.insert(side)
+        } else {
+            similarFileReviewActiveSides.remove(side)
+        }
+        logger.debug("similar-file-review", "active-state.changed", metadata: [
+            "side": side.rawValue,
+            "active": "\(isActive)"
+        ])
     }
 
     func isFolderFavorite(_ url: URL) -> Bool {
@@ -1449,9 +1481,19 @@ final class DualFinderViewModel: ObservableObject {
         performSelectionOperation(from: sourceSide, operation: .move)
     }
 
-    func trashSelection(from sourceSide: PaneSide) {
+    func trashSelection(
+        from sourceSide: PaneSide,
+        refreshPolicy: FileOperationRefreshPolicy = .refreshWhenFinished
+    ) {
         let sources = orderedSelection(pane(for: sourceSide).selectedItemURLs, on: sourceSide)
         guard !sources.isEmpty else { return }
+        logger.info("file-operation", "trash.selection.requested", metadata: [
+            "side": sourceSide.rawValue,
+            "count": "\(sources.count)",
+            "refreshPolicy": refreshPolicy.logValue,
+            "similarReviewActive": "\(similarFileReviewActiveSides.contains(sourceSide))",
+            "sources": sources.map(\.path).joined(separator: "|")
+        ])
         let previewReplacementURL = quickLookPreviewService.isPreviewVisible
             ? FileSelectionResolver.replacementAfterRemoving(sources, from: items(for: sourceSide).map(\.url))
             : nil
@@ -1464,11 +1506,24 @@ final class DualFinderViewModel: ObservableObject {
                 quickLookPreviewService.closePreview()
             }
         }
-        enqueueFileOperation(.trash, sources: sources, destination: nil)
+        enqueueFileOperation(.trash, sources: sources, destination: nil, refreshPolicy: refreshPolicy)
     }
 
     func trashActiveSelection() {
-        trashSelection(from: activePaneSide)
+        let side = activePaneSide
+        let isSimilarReviewActive = similarFileReviewActiveSides.contains(side)
+        let selectedURLs = pane(for: side).selectedItemURLs
+        if isSimilarReviewActive, !selectedURLs.isEmpty {
+            similarFileDeletionMarkRequest = SimilarFileDeletionMarkRequest(side: side, urls: selectedURLs)
+            logger.debug("similar-file-review", "visual-delete.requested.from-active-trash", metadata: [
+                "side": side.rawValue,
+                "count": "\(selectedURLs.count)"
+            ])
+        }
+        trashSelection(
+            from: side,
+            refreshPolicy: FileOperationRefreshPolicy.trashPolicy(isSimilarFileReviewActive: isSimilarReviewActive)
+        )
     }
 
     func emptyTrash() {
@@ -1493,6 +1548,62 @@ final class DualFinderViewModel: ObservableObject {
         guard !archives.isEmpty else { return }
         let label = mode == .currentDirectory ? "Extracting here" : "Extracting to subfolder"
         runArchiveOperation(label: label, sources: archives, mode: mode)
+    }
+
+    func convertSelectedTextEncodingToUTF8(on side: PaneSide) {
+        guard !isInlineRenaming, !isTextEncodingConversionRunning else { return }
+        let sources = orderedSelection(pane(for: side).selectedItemURLs, on: side)
+        guard !sources.isEmpty else { return }
+
+        activatePane(side)
+        isTextEncodingConversionRunning = true
+        statusMessage = "Analyzing text encoding for \(sources.count) item(s)..."
+        logger.info("text-encoding", "selection.convert.requested", metadata: [
+            "side": side.rawValue,
+            "count": "\(sources.count)",
+            "sources": sources.map(\.path).joined(separator: "|")
+        ])
+
+        let conversionLogger = logger
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let result = try TextEncodingConversionService(logger: conversionLogger).convertFilesToUTF8(sources) { completedCount, totalCount, fileResult in
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, self.isTextEncodingConversionRunning else { return }
+                        self.statusMessage = self.textEncodingConversionProgress(
+                            completedCount: completedCount,
+                            totalCount: totalCount,
+                            result: fileResult
+                        )
+                    }
+                }
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.isTextEncodingConversionRunning = false
+                    self.refresh(side)
+                    let finalSelection = Set(result.results
+                        .filter { $0.status != .skipped }
+                        .map(\.finalURL))
+                    if !finalSelection.isEmpty {
+                        self.setSelection(finalSelection, for: side)
+                    }
+                    self.statusMessage = self.textEncodingConversionSummary(result)
+                    self.logger.info("text-encoding", "selection.convert.completed", metadata: [
+                        "side": side.rawValue,
+                        "converted": "\(result.convertedCount)",
+                        "utf8": "\(result.alreadyUTF8Count)",
+                        "unknownRenamed": "\(result.renamedUnknownCount)",
+                        "skipped": "\(result.skippedCount)"
+                    ])
+                }
+            } catch {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.isTextEncodingConversionRunning = false
+                    self.reportOperationFailure("text-encoding.convert.failed", error: error)
+                }
+            }
+        }
     }
 
     func extractionSubfolderLabel(for url: URL) -> String {
@@ -1668,7 +1779,12 @@ final class DualFinderViewModel: ObservableObject {
         enqueueFileOperation(operation, sources: sources, destination: destination)
     }
 
-    private func enqueueFileOperation(_ kind: QueuedFileOperationKind, sources: [URL], destination: URL?) {
+    private func enqueueFileOperation(
+        _ kind: QueuedFileOperationKind,
+        sources: [URL],
+        destination: URL?,
+        refreshPolicy: FileOperationRefreshPolicy = .refreshWhenFinished
+    ) {
         let id = UUID()
         let cancellation = FileOperationCancellation()
         let request = QueuedFileOperationRequest(
@@ -1676,7 +1792,8 @@ final class DualFinderViewModel: ObservableObject {
             kind: kind,
             sources: sources,
             destination: destination,
-            cancellation: cancellation
+            cancellation: cancellation,
+            refreshPolicy: refreshPolicy
         )
         let operation = QueuedFileOperation(
             id: id,
@@ -1708,6 +1825,10 @@ final class DualFinderViewModel: ObservableObject {
         let sources = request.sources
         let destination = request.destination
         let cancellation = request.cancellation
+        let refreshPolicy = request.refreshPolicy
+        let conflictPreviews = destination.map {
+            Self.fileConflictPreviews(for: sources, destinationDirectory: $0)
+        } ?? []
 
         Task.detached(priority: .userInitiated) { [weak self] in
             let service = FileOperationService(logger: nil)
@@ -1720,7 +1841,7 @@ final class DualFinderViewModel: ObservableObject {
                 if let applyAllResolution {
                     return applyAllResolution
                 }
-                let answer = self?.resolveConflictSynchronously(conflict)
+                let answer = self?.resolveConflictSynchronously(conflict, previews: conflictPreviews)
                     ?? FileConflictAnswer(resolution: .keepBoth, applyToAll: false)
                 if answer.applyToAll {
                     applyAllResolution = answer.resolution
@@ -1772,15 +1893,30 @@ final class DualFinderViewModel: ObservableObject {
                 }
 
                 Task { @MainActor [weak self] in
-                    self?.finishFileOperation(id, status: .completed, message: "\(kind.displayName) completed")
+                    self?.finishFileOperation(
+                        id,
+                        status: .completed,
+                        message: "\(kind.displayName) completed",
+                        refreshPolicy: refreshPolicy
+                    )
                 }
             } catch FileOperationError.cancelled {
                 Task { @MainActor [weak self] in
-                    self?.finishFileOperation(id, status: .cancelled, message: "Cancelled")
+                    self?.finishFileOperation(
+                        id,
+                        status: .cancelled,
+                        message: "Cancelled",
+                        refreshPolicy: refreshPolicy
+                    )
                 }
             } catch {
                 Task { @MainActor [weak self] in
-                    self?.finishFileOperation(id, status: .failed, message: error.localizedDescription)
+                    self?.finishFileOperation(
+                        id,
+                        status: .failed,
+                        message: error.localizedDescription,
+                        refreshPolicy: refreshPolicy
+                    )
                     self?.reportOperationFailure("\(kind.rawValue).failed", error: error)
                 }
             }
@@ -1796,7 +1932,12 @@ final class DualFinderViewModel: ObservableObject {
         }
     }
 
-    private func finishFileOperation(_ id: UUID, status: QueuedFileOperationStatus, message: String) {
+    private func finishFileOperation(
+        _ id: UUID,
+        status: QueuedFileOperationStatus,
+        message: String,
+        refreshPolicy: FileOperationRefreshPolicy
+    ) {
         updateQueuedOperation(id) {
             $0.status = status
             $0.message = message
@@ -1804,7 +1945,17 @@ final class DualFinderViewModel: ObservableObject {
         }
         pendingOperationRequests.removeAll { $0.id == id }
         isProcessingFileOperations = false
-        refreshAll()
+        let shouldRefresh = refreshPolicy.shouldRefresh(status: status)
+        logger.info("file-operation", "operation.finished", metadata: [
+            "id": id.uuidString,
+            "status": status.rawValue,
+            "refreshPolicy": refreshPolicy.logValue,
+            "willRefresh": "\(shouldRefresh)",
+            "message": message
+        ])
+        if shouldRefresh {
+            refreshAll()
+        }
         statusMessage = message
         processNextFileOperationIfNeeded()
     }
@@ -1858,16 +2009,61 @@ final class DualFinderViewModel: ObservableObject {
         mutate(&fileOperationQueue[index])
     }
 
-    private nonisolated func resolveConflictSynchronously(_ conflict: FileOperationConflict) -> FileConflictAnswer {
+    private nonisolated func resolveConflictSynchronously(
+        _ conflict: FileOperationConflict,
+        previews: [FileConflictPreview]
+    ) -> FileConflictAnswer {
         let box = FileConflictAnswerBox()
         Task { @MainActor [weak self] in
             self?.activeConflictAnswerBox = box
             self?.fileConflictDialogRequest = FileConflictDialogRequest(
                 source: conflict.source,
-                destination: conflict.destination
+                destination: conflict.destination,
+                conflicts: Self.conflictPreviews(including: conflict, in: previews)
             )
         }
         return box.wait()
+    }
+
+    nonisolated static func fileConflictPreviews(
+        for sources: [URL],
+        destinationDirectory: URL,
+        fileManager: FileManager = .default
+    ) -> [FileConflictPreview] {
+        sources.compactMap { source in
+            let destination = destinationDirectory.appendingPathComponent(source.lastPathComponent)
+            guard fileManager.fileExists(atPath: destination.path) else { return nil }
+            return FileConflictPreview(
+                source: source,
+                destination: destination,
+                sourceSize: regularFileSize(at: source),
+                destinationSize: regularFileSize(at: destination),
+                largerWinsResolution: FileOperationService.largerWinsResolution(
+                    for: FileOperationConflict(source: source, destination: destination)
+                )
+            )
+        }
+    }
+
+    private nonisolated static func conflictPreviews(
+        including conflict: FileOperationConflict,
+        in previews: [FileConflictPreview]
+    ) -> [FileConflictPreview] {
+        let current = FileConflictPreview(
+            source: conflict.source,
+            destination: conflict.destination,
+            sourceSize: regularFileSize(at: conflict.source),
+            destinationSize: regularFileSize(at: conflict.destination),
+            largerWinsResolution: FileOperationService.largerWinsResolution(for: conflict)
+        )
+        guard !previews.contains(where: { $0.id == current.id }) else { return previews }
+        return [current] + previews
+    }
+
+    private nonisolated static func regularFileSize(at url: URL) -> Int64? {
+        let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+        guard values?.isRegularFile == true else { return nil }
+        return values?.fileSize.map(Int64.init)
     }
 
     private func setItems(_ items: [FileItem], for side: PaneSide) {
@@ -1962,6 +2158,35 @@ final class DualFinderViewModel: ObservableObject {
         }
 
         return directories
+    }
+
+    private func textEncodingConversionSummary(_ result: TextEncodingBatchConversionResult) -> String {
+        let parts = [
+            result.convertedCount > 0 ? "\(result.convertedCount) converted to UTF-8" : nil,
+            result.alreadyUTF8Count > 0 ? "\(result.alreadyUTF8Count) already UTF-8" : nil,
+            result.renamedUnknownCount > 0 ? "\(result.renamedUnknownCount) renamed _unknown_encode" : nil,
+            result.skippedCount > 0 ? "\(result.skippedCount) skipped" : nil
+        ].compactMap { $0 }
+
+        return parts.isEmpty ? "No text encoding changes" : "Encoding check complete: \(parts.joined(separator: ", "))"
+    }
+
+    private func textEncodingConversionProgress(
+        completedCount: Int,
+        totalCount: Int,
+        result: TextEncodingConversionResult
+    ) -> String {
+        let action = switch result.status {
+        case .alreadyUTF8:
+            "already UTF-8"
+        case .converted:
+            "converted to UTF-8"
+        case .renamedUnknown:
+            "renamed _unknown_encode"
+        case .skipped:
+            "skipped"
+        }
+        return "Encoding \(completedCount)/\(totalCount): \(result.finalURL.lastPathComponent) \(action)"
     }
 
     private func terminalDirectory(for url: URL) -> URL {

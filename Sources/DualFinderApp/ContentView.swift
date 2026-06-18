@@ -682,6 +682,7 @@ private struct FileConflictDialog: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
                 .truncationMode(.middle)
+            ConflictPreviewList(request: request)
             Toggle("Apply to all conflicts", isOn: $applyToAll)
             HStack {
                 Button("Skip") {
@@ -700,7 +701,117 @@ private struct FileConflictDialog: View {
             }
         }
         .padding(18)
-        .frame(width: 520)
+        .frame(width: 620)
+    }
+}
+
+private struct ConflictPreviewList: View {
+    let request: FileConflictDialogRequest
+
+    private var conflicts: [FileConflictPreview] {
+        if request.conflicts.isEmpty {
+            return [
+                FileConflictPreview(
+                    source: request.source,
+                    destination: request.destination,
+                    sourceSize: ConflictFileInfo.fetch(for: request.source).size,
+                    destinationSize: ConflictFileInfo.fetch(for: request.destination).size,
+                    largerWinsResolution: FileOperationService.largerWinsResolution(
+                        for: FileOperationConflict(source: request.source, destination: request.destination)
+                    )
+                )
+            ]
+        }
+        return request.conflicts
+    }
+
+    private var overwriteCount: Int {
+        conflicts.filter { $0.largerWinsResolution == .overwrite }.count
+    }
+
+    private var skipCount: Int {
+        conflicts.count - overwriteCount
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("\(conflicts.count) conflict(s)")
+                    .font(.caption)
+                    .fontWeight(.semibold)
+                Spacer()
+                Text("Larger Wins: \(overwriteCount) overwrite, \(skipCount) skip")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(conflicts) { conflict in
+                        ConflictPreviewRow(conflict: conflict, isCurrent: isCurrent(conflict))
+                        if conflict.id != conflicts.last?.id {
+                            Divider()
+                        }
+                    }
+                }
+            }
+            .frame(maxHeight: 190)
+            .overlay {
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(Color.secondary.opacity(0.2))
+            }
+        }
+    }
+
+    private func isCurrent(_ conflict: FileConflictPreview) -> Bool {
+        conflict.source == request.source && conflict.destination == request.destination
+    }
+}
+
+private struct ConflictPreviewRow: View {
+    let conflict: FileConflictPreview
+    let isCurrent: Bool
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: isCurrent ? "arrowtriangle.right.fill" : "doc")
+                .font(.caption)
+                .foregroundStyle(isCurrent ? Color.accentColor : Color.secondary)
+                .frame(width: 16)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(conflict.source.lastPathComponent)
+                    .font(.caption)
+                    .fontWeight(isCurrent ? .semibold : .regular)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text("Source \(sizeText(conflict.sourceSize)) | Destination \(sizeText(conflict.destinationSize))")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            Text(actionText)
+                .font(.caption2)
+                .fontWeight(.semibold)
+                .foregroundStyle(actionColor)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(actionColor.opacity(0.12), in: Capsule())
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+    }
+
+    private var actionText: String {
+        conflict.largerWinsResolution == .overwrite ? "Overwrite" : "Skip"
+    }
+
+    private var actionColor: Color {
+        conflict.largerWinsResolution == .overwrite ? .orange : .secondary
+    }
+
+    private func sizeText(_ size: Int64?) -> String {
+        guard let size else { return "—" }
+        return ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
     }
 }
 
@@ -741,9 +852,9 @@ private struct ConflictFileInfo {
     let modifiedAt: Date?
 
     static func fetch(for url: URL) -> ConflictFileInfo {
-        let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+        let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey])
         return ConflictFileInfo(
-            size: values?.fileSize.map(Int64.init),
+            size: values?.isRegularFile == true ? values?.fileSize.map(Int64.init) : nil,
             modifiedAt: values?.contentModificationDate
         )
     }

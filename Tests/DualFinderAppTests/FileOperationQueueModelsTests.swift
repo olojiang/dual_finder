@@ -34,6 +34,17 @@ struct FileOperationQueueModelsTests {
         #expect(QueuedFileOperationKind.trash.displayName == "Trash")
     }
 
+    @Test("refresh policy can defer only successful directory refreshes")
+    func refreshPolicyCanDeferOnlySuccessfulDirectoryRefreshes() {
+        #expect(FileOperationRefreshPolicy.refreshWhenFinished.shouldRefresh(status: .completed))
+        #expect(FileOperationRefreshPolicy.refreshWhenFinished.shouldRefresh(status: .failed))
+        #expect(!FileOperationRefreshPolicy.deferSuccessfulRefresh.shouldRefresh(status: .completed))
+        #expect(FileOperationRefreshPolicy.deferSuccessfulRefresh.shouldRefresh(status: .failed))
+        #expect(FileOperationRefreshPolicy.deferSuccessfulRefresh.shouldRefresh(status: .cancelled))
+        #expect(FileOperationRefreshPolicy.trashPolicy(isSimilarFileReviewActive: true) == .deferSuccessfulRefresh)
+        #expect(FileOperationRefreshPolicy.trashPolicy(isSimilarFileReviewActive: false) == .refreshWhenFinished)
+    }
+
     @Test("conflict answer box returns resolved answer")
     func conflictAnswerBoxReturnsResolvedAnswer() {
         let box = FileConflictAnswerBox()
@@ -46,5 +57,47 @@ struct FileOperationQueueModelsTests {
 
         #expect(answer.resolution == .overwrite)
         #expect(answer.applyToAll)
+    }
+
+    @Test("conflict previews show per-file largerWins outcome")
+    func conflictPreviewsShowPerFileLargerWinsOutcome() throws {
+        let root = try AppTemporaryDirectory()
+        let destination = root.url.appendingPathComponent("destination", isDirectory: true)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+
+        let largerSource = root.url.appendingPathComponent("larger.txt")
+        let smallerSource = root.url.appendingPathComponent("smaller.txt")
+        let missingDestinationSource = root.url.appendingPathComponent("new.txt")
+        try Data(repeating: 1, count: 128).write(to: largerSource)
+        try Data(repeating: 2, count: 32).write(to: destination.appendingPathComponent("larger.txt"))
+        try Data(repeating: 3, count: 16).write(to: smallerSource)
+        try Data(repeating: 4, count: 64).write(to: destination.appendingPathComponent("smaller.txt"))
+        try Data(repeating: 5, count: 8).write(to: missingDestinationSource)
+
+        let previews = DualFinderViewModel.fileConflictPreviews(
+            for: [largerSource, smallerSource, missingDestinationSource],
+            destinationDirectory: destination
+        )
+
+        #expect(previews.count == 2)
+        #expect(previews[0].source == largerSource)
+        #expect(previews[0].largerWinsResolution == .overwrite)
+        #expect(previews[1].source == smallerSource)
+        #expect(previews[1].largerWinsResolution == .skip)
+    }
+}
+
+private final class AppTemporaryDirectory {
+    let url: URL
+
+    init() throws {
+        url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DualFinderAppTests")
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+    }
+
+    deinit {
+        try? FileManager.default.removeItem(at: url)
     }
 }

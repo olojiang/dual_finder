@@ -16,7 +16,7 @@ final class TemporaryDirectory {
     }
 }
 
-final class CapturingLogger: AppLogging {
+final class CapturingLogger: AppLogging, @unchecked Sendable {
     private(set) var messages: [String] = []
 
     func log(_ level: LogLevel, _ category: String, _ message: String, metadata: [String: String]) {

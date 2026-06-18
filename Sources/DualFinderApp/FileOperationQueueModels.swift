@@ -23,6 +23,33 @@ enum QueuedFileOperationStatus: String, Sendable {
     case cancelled
 }
 
+enum FileOperationRefreshPolicy: Sendable {
+    case refreshWhenFinished
+    case deferSuccessfulRefresh
+
+    static func trashPolicy(isSimilarFileReviewActive: Bool) -> FileOperationRefreshPolicy {
+        isSimilarFileReviewActive ? .deferSuccessfulRefresh : .refreshWhenFinished
+    }
+
+    var logValue: String {
+        switch self {
+        case .refreshWhenFinished:
+            return "refreshWhenFinished"
+        case .deferSuccessfulRefresh:
+            return "deferSuccessfulRefresh"
+        }
+    }
+
+    func shouldRefresh(status: QueuedFileOperationStatus) -> Bool {
+        switch self {
+        case .refreshWhenFinished:
+            return true
+        case .deferSuccessfulRefresh:
+            return status != .completed
+        }
+    }
+}
+
 struct QueuedFileOperation: Identifiable, Equatable {
     let id: UUID
     let kind: QueuedFileOperationKind
@@ -47,6 +74,19 @@ struct FileConflictDialogRequest: Identifiable, Equatable {
     let id = UUID()
     let source: URL
     let destination: URL
+    let conflicts: [FileConflictPreview]
+}
+
+struct FileConflictPreview: Identifiable, Equatable, Sendable {
+    let source: URL
+    let destination: URL
+    let sourceSize: Int64?
+    let destinationSize: Int64?
+    let largerWinsResolution: FileOperationConflictResolution
+
+    var id: String {
+        "\(source.path)\u{1F}\(destination.path)"
+    }
 }
 
 struct DirectoryComparisonDialogRequest: Identifiable, Equatable {
@@ -63,6 +103,7 @@ struct QueuedFileOperationRequest {
     let sources: [URL]
     let destination: URL?
     let cancellation: FileOperationCancellation
+    let refreshPolicy: FileOperationRefreshPolicy
 }
 
 struct FileConflictAnswer: Sendable {

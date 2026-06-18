@@ -14,6 +14,20 @@ private enum FileListMetrics {
     }
 }
 
+private let similarFileGroupColors: [Color] = [
+    .teal,
+    .indigo,
+    .orange,
+    .green,
+    .pink,
+    .cyan
+]
+
+private struct SimilarFileGroupMarker {
+    let color: Color
+    let isCurrent: Bool
+}
+
 struct FilePaneView: View {
     let side: PaneSide
     @ObservedObject var model: DualFinderViewModel
@@ -32,6 +46,11 @@ struct FilePaneView: View {
     @State private var terminalResizeStartHeight: CGFloat?
     @State private var terminalResizeAccumulatedDelta: CGFloat = 0
     @State private var terminalResizePreviewHeight: CGFloat?
+    @State private var isSimilarFileNavigatorEnabled = false
+    @State private var similarFileGroupIndex = 0
+    @State private var similarFileGroups: [SimilarFileNameGroup] = []
+    @State private var handledSimilarFileGroupIDs: Set<String> = []
+    @State private var visuallyDeletedSimilarFileURLs: Set<URL> = []
     @FocusState private var isFileListFocused: Bool
     @FocusState private var isPathFieldFocused: Bool
     @FocusState private var isFileSearchFocused: Bool
@@ -60,6 +79,10 @@ struct FilePaneView: View {
             model.inlineRenameRequest = nil
             beginRenaming(request.url)
         }
+        .onChange(of: model.similarFileDeletionMarkRequest) { _, request in
+            guard let request, request.side == side else { return }
+            markSimilarFilesVisuallyDeleted(request.urls, source: "active-trash-shortcut")
+        }
         .onChange(of: model.paneFocusRequest) { _, request in
             guard let request, request.side == side else { return }
             model.logPaneFocusEvent("file-list.focus-request.observed", metadata: [
@@ -74,6 +97,7 @@ struct FilePaneView: View {
             if !isEditingPath {
                 pathText = url.path
             }
+            resetSimilarFileNavigator()
             dismissFileSearch(restoreFocus: false)
         }
         .task(id: model.pane(for: side).selectedURL) {
@@ -294,12 +318,14 @@ struct FilePaneView: View {
                                 item: item,
                                 columnWidths: model.columnWidths(for: side),
                                 isRenaming: renamingURL == item.url,
+                                isVisuallyDeleted: visuallyDeletedSimilarFileURLs.contains(item.url),
                                 renameText: $renameText,
                                 commitRename: commitRename,
                                 cancelRename: cancelRename
                             )
                                 .id(item.url)
                                 .tag(item.url)
+                                .listRowBackground(similarFileRowBackground(for: item))
                                 .contentShape(Rectangle())
                                 .overlay {
                                     if renamingURL != item.url {
@@ -389,7 +415,7 @@ struct FilePaneView: View {
                         if keyPress.modifiers.contains(.shift) {
                             model.emptyTrash()
                         } else {
-                            model.trashSelection(from: side)
+                            trashSelectionFromPane()
                         }
                         return .handled
                     }
@@ -423,10 +449,15 @@ struct FilePaneView: View {
                         archiveContextMenuItems(for: selection)
                         favoriteContextMenuItems(for: selection)
                         Divider()
+                        Button("Convert Text Encoding to UTF-8") {
+                            model.convertSelectedTextEncodingToUTF8(on: side)
+                        }
                         Button("Batch Rename...") { model.requestBatchRenameDialog(on: side) }
                         Button("Copy to Other Pane") { model.copySelection(from: side) }
                         Button("Move to Other Pane") { model.moveSelection(from: side) }
-                        Button("Move to Trash", role: .destructive) { model.trashSelection(from: side) }
+                        Button("Move to Trash", role: .destructive) {
+                            trashSelectionFromPane(selectionHint: selection)
+                        }
                     } primaryAction: { selection in
                         model.activateFirstItem(in: selection, on: side)
                     }
@@ -448,7 +479,7 @@ struct FilePaneView: View {
                                 }
                             }
                             IconButton(systemName: "trash", help: "Move selection to Trash") {
-                                model.trashSelection(from: side)
+                                trashSelectionFromPane()
                             }
                             IconButton(systemName: "arrow.clockwise", help: "Refresh pane") {
                                 model.refresh(side)
@@ -456,6 +487,7 @@ struct FilePaneView: View {
                             IconButton(systemName: "ruler", help: "Calculate selected folder size (Ctrl-Space)") {
                                 model.calculateSelectedFolderSizes(on: side)
                             }
+                            similarFileNavigatorControls(scrollProxy: scrollProxy)
                             Spacer()
                             footerStats
                         }
@@ -466,8 +498,10 @@ struct FilePaneView: View {
                         revealPendingItemIfReady(with: scrollProxy)
                     }
                     .onChange(of: model.items(for: side)) { _, _ in
+                        reconcileVisuallyDeletedSimilarFiles()
                         revealPendingItemIfReady(with: scrollProxy)
                         synchronizeFileSearchSelection()
+                        synchronizeSimilarFileNavigator(with: scrollProxy)
                     }
                     .onChange(of: fileSearchQuery) { _, _ in
                         synchronizeFileSearchSelection()
@@ -576,6 +610,10 @@ struct FilePaneView: View {
     }
 
     private var visibleItems: [FileItem] {
+        if isSimilarFileNavigatorEnabled {
+            return similarReviewItems
+        }
+
         let allItems = model.items(for: side)
         guard isFileSearchPresented else { return allItems }
 
@@ -584,6 +622,91 @@ struct FilePaneView: View {
 
         return allItems.filter { item in
             FileNameSearch.matches(item.name, query: query)
+        }
+    }
+
+    private var similarReviewItems: [FileItem] {
+        SimilarFileReviewState(
+            groups: similarFileGroups,
+            visuallyDeletedURLs: visuallyDeletedSimilarFileURLs
+        ).visibleItems
+    }
+
+    @ViewBuilder
+    private func similarFileRowBackground(for item: FileItem) -> some View {
+        if isSimilarFileNavigatorEnabled,
+           let marker = similarFileGroupMarker(for: item.url) {
+            marker.color.opacity(marker.isCurrent ? 0.28 : 0.14)
+        } else {
+            Color.clear
+        }
+    }
+
+    private func similarFileGroupMarker(for url: URL) -> SimilarFileGroupMarker? {
+        guard isSimilarFileNavigatorEnabled else { return nil }
+
+        for index in similarFileGroups.indices where similarFileGroups[index].items.contains(where: { $0.url == url }) {
+            return SimilarFileGroupMarker(
+                color: similarFileGroupColors[index % similarFileGroupColors.count],
+                isCurrent: index == similarFileGroupIndex
+            )
+        }
+        return nil
+    }
+
+    private func similarFileNavigatorControls(scrollProxy: ScrollViewProxy) -> some View {
+        let groups = similarFileGroups
+        let hasGroups = !groups.isEmpty
+        let currentPosition = hasGroups ? min(similarFileGroupIndex, groups.count - 1) + 1 : 0
+        let unhandledCount = groups.filter { !handledSimilarFileGroupIDs.contains($0.id) }.count
+
+        return HStack(spacing: 4) {
+            IconButton(
+                systemName: isSimilarFileNavigatorEnabled ? "doc.on.doc.fill" : "doc.on.doc",
+                help: "Find similar file names"
+            ) {
+                toggleSimilarFileNavigator(with: scrollProxy)
+            }
+
+            if isSimilarFileNavigatorEnabled {
+                IconButton(systemName: "chevron.up", help: "Previous similar group") {
+                    moveSimilarFileGroup(by: -1, with: scrollProxy)
+                }
+                .disabled(groups.count < 2)
+
+                IconButton(systemName: "chevron.down", help: "Next similar group") {
+                    moveSimilarFileGroup(by: 1, with: scrollProxy)
+                }
+                .disabled(groups.count < 2)
+
+                Text("\(currentPosition)/\(groups.count) · \(unhandledCount) left")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .frame(minWidth: 72, alignment: .leading)
+
+                Button("Older") {
+                    selectOlderSimilarFiles(with: scrollProxy)
+                }
+                .buttonStyle(.borderless)
+                .font(.caption2)
+                .disabled(!hasGroups)
+                .help("Select older files in this similar-name group")
+
+                Button("Smaller") {
+                    selectSmallerSimilarFiles(with: scrollProxy)
+                }
+                .buttonStyle(.borderless)
+                .font(.caption2)
+                .disabled(!hasGroups)
+                .help("Select smaller files in this similar-name group")
+
+                IconButton(systemName: "checkmark.circle", help: "Mark current similar group handled") {
+                    markCurrentSimilarFileGroupHandled(with: scrollProxy)
+                }
+                .disabled(!hasGroups)
+            }
         }
     }
 
@@ -802,6 +925,185 @@ struct FilePaneView: View {
         }
     }
 
+    private func toggleSimilarFileNavigator(with scrollProxy: ScrollViewProxy) {
+        if isSimilarFileNavigatorEnabled {
+            isSimilarFileNavigatorEnabled = false
+            model.setSimilarFileReviewActive(false, on: side)
+            model.statusMessage = "Similar-name review off"
+            return
+        }
+
+        refreshSimilarFileGroups()
+        guard !similarFileGroups.isEmpty else {
+            model.statusMessage = "No similar file-name groups in this folder"
+            return
+        }
+
+        isSimilarFileNavigatorEnabled = true
+        model.setSimilarFileReviewActive(true, on: side)
+        dismissFileSearch(restoreFocus: false)
+        model.replaceSelection([], on: side, source: "similar-file-navigator")
+        similarFileGroupIndex = min(similarFileGroupIndex, similarFileGroups.count - 1)
+        selectSimilarFileGroup(similarFileGroups[similarFileGroupIndex], with: scrollProxy)
+    }
+
+    private func moveSimilarFileGroup(by delta: Int, with scrollProxy: ScrollViewProxy) {
+        let groups = similarFileGroups
+        guard !groups.isEmpty else {
+            synchronizeSimilarFileNavigator(with: scrollProxy)
+            return
+        }
+
+        let nextIndex = (similarFileGroupIndex + delta + groups.count) % groups.count
+        similarFileGroupIndex = nextIndex
+        selectSimilarFileGroup(groups[nextIndex], with: scrollProxy)
+    }
+
+    private func markCurrentSimilarFileGroupHandled(with scrollProxy: ScrollViewProxy) {
+        let groups = similarFileGroups
+        guard let group = currentSimilarFileGroup(in: groups) else { return }
+        handledSimilarFileGroupIDs.insert(group.id)
+
+        let searchOrder = Array((similarFileGroupIndex + 1)..<groups.count) + Array(0...similarFileGroupIndex)
+        if let nextUnhandledIndex = searchOrder.first(where: { !handledSimilarFileGroupIDs.contains(groups[$0].id) }) {
+            similarFileGroupIndex = nextUnhandledIndex
+            selectSimilarFileGroup(groups[nextUnhandledIndex], with: scrollProxy)
+        } else {
+            model.statusMessage = "All similar-name groups in this folder are marked handled"
+        }
+    }
+
+    private func selectOlderSimilarFiles(with scrollProxy: ScrollViewProxy) {
+        let groups = similarFileGroups
+        guard let group = currentSimilarFileGroup(in: groups) else { return }
+        let newest = group.items.max { left, right in
+            switch (left.modifiedAt, right.modifiedAt) {
+            case let (left?, right?):
+                return left < right
+            case (nil, _?):
+                return true
+            case (_?, nil), (nil, nil):
+                return false
+            }
+        }
+        selectSimilarFileSubset(
+            group.items.filter { $0.url != newest?.url },
+            statusPrefix: "Selected older similar-name files",
+            with: scrollProxy
+        )
+    }
+
+    private func selectSmallerSimilarFiles(with scrollProxy: ScrollViewProxy) {
+        let groups = similarFileGroups
+        guard let group = currentSimilarFileGroup(in: groups) else { return }
+        let largest = group.items.max { left, right in
+            switch (left.size, right.size) {
+            case let (left?, right?):
+                return left < right
+            case (nil, _?):
+                return true
+            case (_?, nil), (nil, nil):
+                return false
+            }
+        }
+        selectSimilarFileSubset(
+            group.items.filter { $0.url != largest?.url },
+            statusPrefix: "Selected smaller similar-name files",
+            with: scrollProxy
+        )
+    }
+
+    private func synchronizeSimilarFileNavigator(with scrollProxy: ScrollViewProxy) {
+        guard isSimilarFileNavigatorEnabled else {
+            similarFileGroups = []
+            similarFileGroupIndex = 0
+            return
+        }
+
+        refreshSimilarFileGroups()
+        let groups = similarFileGroups
+        handledSimilarFileGroupIDs.formIntersection(Set(groups.map(\.id)))
+
+        guard !groups.isEmpty else {
+            isSimilarFileNavigatorEnabled = false
+            model.setSimilarFileReviewActive(false, on: side)
+            similarFileGroupIndex = 0
+            model.statusMessage = "No remaining similar file-name groups in this folder"
+            return
+        }
+
+        similarFileGroupIndex = min(similarFileGroupIndex, groups.count - 1)
+        selectSimilarFileGroup(groups[similarFileGroupIndex], with: scrollProxy)
+    }
+
+    private func resetSimilarFileNavigator() {
+        isSimilarFileNavigatorEnabled = false
+        model.setSimilarFileReviewActive(false, on: side)
+        similarFileGroupIndex = 0
+        similarFileGroups = []
+        handledSimilarFileGroupIDs.removeAll()
+        visuallyDeletedSimilarFileURLs.removeAll()
+    }
+
+    private func refreshSimilarFileGroups() {
+        model.logSimilarFileReviewEvent("groups.refresh.started", metadata: [
+            "side": side.rawValue,
+            "itemCount": "\(model.items(for: side).count)"
+        ])
+        similarFileGroups = SimilarFileNameDetector.groups(in: model.items(for: side))
+        model.logSimilarFileReviewEvent("groups.refresh.finished", metadata: [
+            "side": side.rawValue,
+            "groupCount": "\(similarFileGroups.count)",
+            "visibleCount": "\(similarFileGroups.flatMap(\.items).count)"
+        ])
+    }
+
+    private func reconcileVisuallyDeletedSimilarFiles() {
+        var state = SimilarFileReviewState(
+            groups: similarFileGroups,
+            visuallyDeletedURLs: visuallyDeletedSimilarFileURLs
+        )
+        state.reconcileDeletedMarkers(with: model.items(for: side))
+        visuallyDeletedSimilarFileURLs = state.visuallyDeletedURLs
+    }
+
+    private func currentSimilarFileGroup(in groups: [SimilarFileNameGroup]) -> SimilarFileNameGroup? {
+        guard !groups.isEmpty else { return nil }
+        return groups[min(similarFileGroupIndex, groups.count - 1)]
+    }
+
+    private func selectSimilarFileGroup(_ group: SimilarFileNameGroup, with scrollProxy: ScrollViewProxy) {
+        if let firstURL = group.items.first?.url {
+            pendingRevealURL = firstURL
+            DispatchQueue.main.async {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    scrollProxy.scrollTo(firstURL, anchor: .top)
+                }
+            }
+        }
+        model.statusMessage = "Similar-name group \(similarFileGroupIndex + 1)/\(similarFileGroups.count): \(group.items.count) item(s)"
+        restoreFileListFocus()
+    }
+
+    private func selectSimilarFileSubset(
+        _ items: [FileItem],
+        statusPrefix: String,
+        with scrollProxy: ScrollViewProxy
+    ) {
+        let urls = Set(items.map(\.url))
+        model.replaceSelection(urls, on: side, source: "similar-file-navigator")
+        if let firstURL = items.first?.url {
+            pendingRevealURL = firstURL
+            DispatchQueue.main.async {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    scrollProxy.scrollTo(firstURL, anchor: .center)
+                }
+            }
+        }
+        model.statusMessage = "\(statusPrefix): \(items.count) item(s)"
+        restoreFileListFocus()
+    }
+
     private func dismissPathEditingForFileSearch() {
         guard isEditingPath else { return }
         isEditingPath = false
@@ -951,31 +1253,66 @@ struct FilePaneView: View {
         isFileListFocused = true
         model.activatePane(side)
 
-        if modifierFlags.contains(.command) {
-            model.toggleItemSelection(url, on: side)
-            return
-        }
-
-        if modifierFlags.contains(.shift) {
-            model.extendSelection(to: url, on: side)
-            return
-        }
-
-        let currentSelection = model.pane(for: side).selectedItemURLs
-        if currentSelection.contains(url) {
-            return
-        }
-
-        model.selectItem(url, on: side)
+        applyRowSelection(
+            FileRowSelectionReducer.selectionAfterMouseDown(
+                target: url,
+                currentSelection: model.pane(for: side).selectedItemURLs,
+                orderedURLs: visibleItems.map(\.url),
+                modifierFlags: modifierFlags
+            ),
+            source: "file-row.mouse-down"
+        )
     }
 
     private func selectItemFromRowMouseUp(_ url: URL, modifierFlags: NSEvent.ModifierFlags) {
         guard renamingURL == nil else { return }
-        guard !modifierFlags.contains(.command), !modifierFlags.contains(.shift) else { return }
 
-        let selection = model.pane(for: side).selectedItemURLs
-        guard selection.contains(url), selection.count > 1 else { return }
-        model.selectItem(url, on: side)
+        applyRowSelection(
+            FileRowSelectionReducer.selectionAfterMouseUp(
+                target: url,
+                currentSelection: model.pane(for: side).selectedItemURLs,
+                orderedURLs: visibleItems.map(\.url),
+                modifierFlags: modifierFlags
+            ),
+            source: "file-row.mouse-up"
+        )
+    }
+
+    private func applyRowSelection(_ selection: Set<URL>?, source: String) {
+        guard let selection else { return }
+        model.replaceSelection(selection, on: side, source: source)
+    }
+
+    private func trashSelectionFromPane(selectionHint: Set<URL>? = nil) {
+        let selection = selectionHint ?? model.pane(for: side).selectedItemURLs
+        if let selectionHint, selectionHint != model.pane(for: side).selectedItemURLs {
+            model.replaceSelection(selectionHint, on: side, source: "file-row.trash")
+        }
+        markSimilarFilesVisuallyDeleted(selection, source: "pane-trash")
+        model.trashSelection(
+            from: side,
+            refreshPolicy: FileOperationRefreshPolicy.trashPolicy(isSimilarFileReviewActive: isSimilarFileNavigatorEnabled)
+        )
+    }
+
+    private func markSimilarFilesVisuallyDeleted(_ selection: Set<URL>, source: String) {
+        guard isSimilarFileNavigatorEnabled, !selection.isEmpty else { return }
+        var state = SimilarFileReviewState(
+            groups: similarFileGroups,
+            visuallyDeletedURLs: visuallyDeletedSimilarFileURLs
+        )
+        state.markVisuallyDeleted(selection)
+        visuallyDeletedSimilarFileURLs = state.visuallyDeletedURLs
+        let replacementSelection = state.replacementSelection(afterDeleting: selection)
+        model.replaceSelection(replacementSelection, on: side, source: "similar-file-review.visual-delete-replacement")
+        model.logSimilarFileReviewEvent("visual-delete.marked", metadata: [
+            "side": side.rawValue,
+            "source": source,
+            "count": "\(selection.count)",
+            "totalMarked": "\(visuallyDeletedSimilarFileURLs.count)",
+            "replacementCount": "\(replacementSelection.count)",
+            "replacement": replacementSelection.map(\.path).joined(separator: "|")
+        ])
     }
 
     private func dragURLs(startingWith url: URL) -> [URL] {
@@ -1096,6 +1433,10 @@ private struct RowMouseHandler: NSViewRepresentable {
 
         override func mouseDragged(with event: NSEvent) {
             guard !didStartDrag else { return }
+            guard mouseDownEvent?.modifierFlags.contains(.command) != true,
+                  mouseDownEvent?.modifierFlags.contains(.shift) != true else {
+                return
+            }
             let delta = hypot(
                 event.locationInWindow.x - mouseDownLocation.x,
                 event.locationInWindow.y - mouseDownLocation.y
@@ -1109,6 +1450,7 @@ private struct RowMouseHandler: NSViewRepresentable {
 
         override func mouseUp(with event: NSEvent) {
             guard event.clickCount < 2, !didStartDrag else { return }
+            mouseDownEvent = nil
             mouseUpAction?(event.modifierFlags)
         }
 
@@ -1354,10 +1696,10 @@ private struct FileRow: View {
     let item: FileItem
     let columnWidths: FileListColumnWidths
     let isRenaming: Bool
+    let isVisuallyDeleted: Bool
     @Binding var renameText: String
     let commitRename: () -> Void
     let cancelRename: () -> Void
-    @FocusState private var isRenameFocused: Bool
 
     var body: some View {
         HStack(spacing: FileListMetrics.iconColumnSpacing) {
@@ -1388,25 +1730,27 @@ private struct FileRow: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 2)
+        .opacity(isVisuallyDeleted ? 0.55 : 1)
+        .overlay(alignment: .center) {
+            if isVisuallyDeleted {
+                Rectangle()
+                    .fill(Color.red)
+                    .frame(height: 2)
+                    .padding(.horizontal, 2)
+                    .allowsHitTesting(false)
+            }
+        }
     }
 
     @ViewBuilder
     private var nameView: some View {
         if isRenaming {
-            TextField("Name", text: $renameText)
-                .textFieldStyle(.plain)
-                .focused($isRenameFocused)
-                .onSubmit(commitRename)
-                .onKeyPress(.escape, phases: .down) { _ in
-                    cancelRename()
-                    return .handled
-                }
-                .onAppear {
-                    isRenameFocused = true
-                    DispatchQueue.main.async {
-                        NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: nil)
-                    }
-                }
+            InlineRenameTextField(
+                text: $renameText,
+                item: item,
+                commitRename: commitRename,
+                cancelRename: cancelRename
+            )
         } else {
             Text(item.name)
                 .lineLimit(1)
@@ -1415,13 +1759,148 @@ private struct FileRow: View {
     }
 
     private var sizeText: String {
-        guard let size = item.size else { return "--" }
-        return ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
+        FileSizeText.format(item.size)
     }
 
     private var dateText: String {
         guard let modifiedAt = item.modifiedAt else { return "--" }
         return modifiedAt.formatted(date: .numeric, time: .shortened)
+    }
+}
+
+private struct InlineRenameTextField: NSViewRepresentable {
+    @Binding var text: String
+    let item: FileItem
+    let commitRename: () -> Void
+    let cancelRename: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text, commitRename: commitRename, cancelRename: cancelRename)
+    }
+
+    func makeNSView(context: Context) -> RenameNSTextField {
+        let textField = RenameNSTextField()
+        textField.isBordered = false
+        textField.isBezeled = false
+        textField.drawsBackground = false
+        textField.focusRingType = .none
+        textField.usesSingleLineMode = true
+        textField.cell?.isScrollable = true
+        textField.delegate = context.coordinator
+        textField.onCommit = { [weak textField, weak coordinator = context.coordinator] in
+            if let textField {
+                coordinator?.text.wrappedValue = textField.stringValue
+            }
+            coordinator?.commitRename()
+        }
+        textField.onCancel = { [weak coordinator = context.coordinator] in
+            coordinator?.cancelRename()
+        }
+        return textField
+    }
+
+    func updateNSView(_ textField: RenameNSTextField, context: Context) {
+        context.coordinator.text = $text
+        context.coordinator.commitRename = commitRename
+        context.coordinator.cancelRename = cancelRename
+        if textField.stringValue != text {
+            textField.stringValue = text
+        }
+        textField.requestInitialSelection(initialSelectionRange)
+    }
+
+    private var initialSelectionRange: NSRange {
+        let name = text as NSString
+        guard !item.isDirectoryLike else {
+            return NSRange(location: 0, length: name.length)
+        }
+
+        let baseName = name.deletingPathExtension as NSString
+        guard !name.pathExtension.isEmpty, baseName.length > 0 else {
+            return NSRange(location: 0, length: name.length)
+        }
+        return NSRange(location: 0, length: baseName.length)
+    }
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var text: Binding<String>
+        var commitRename: () -> Void
+        var cancelRename: () -> Void
+
+        init(text: Binding<String>, commitRename: @escaping () -> Void, cancelRename: @escaping () -> Void) {
+            self.text = text
+            self.commitRename = commitRename
+            self.cancelRename = cancelRename
+        }
+
+        func controlTextDidChange(_ notification: Notification) {
+            guard let textField = notification.object as? NSTextField else { return }
+            text.wrappedValue = textField.stringValue
+        }
+
+        func control(
+            _ control: NSControl,
+            textView: NSTextView,
+            doCommandBy commandSelector: Selector
+        ) -> Bool {
+            switch commandSelector {
+            case #selector(NSResponder.insertNewline(_:)):
+                text.wrappedValue = textView.string
+                commitRename()
+                return true
+            case #selector(NSResponder.cancelOperation(_:)):
+                cancelRename()
+                return true
+            default:
+                return false
+            }
+        }
+    }
+}
+
+private final class RenameNSTextField: NSTextField {
+    var onCommit: (() -> Void)?
+    var onCancel: (() -> Void)?
+    private var pendingInitialSelection: NSRange?
+    private var didApplyInitialSelection = false
+
+    func requestInitialSelection(_ range: NSRange) {
+        guard !didApplyInitialSelection else { return }
+        pendingInitialSelection = range
+        applyPendingInitialSelection()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        applyPendingInitialSelection()
+    }
+
+    override func keyDown(with event: NSEvent) {
+        switch event.keyCode {
+        case 36, 76:
+            onCommit?()
+        case 53:
+            onCancel?()
+        default:
+            super.keyDown(with: event)
+        }
+    }
+
+    private func applyPendingInitialSelection() {
+        guard let window, let range = pendingInitialSelection, !didApplyInitialSelection else {
+            return
+        }
+
+        didApplyInitialSelection = true
+        pendingInitialSelection = nil
+        DispatchQueue.main.async { [weak self, weak window] in
+            guard let self, let window else { return }
+            window.makeFirstResponder(self)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let editor = self.currentEditor() else { return }
+                editor.selectedRange = range
+            }
+        }
     }
 }
 

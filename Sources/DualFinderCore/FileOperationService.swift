@@ -564,7 +564,8 @@ public struct FileOperationService {
     }
 
     private static func fileSize(at url: URL) -> Int64? {
-        let values = try? url.resourceValues(forKeys: [.fileSizeKey])
+        let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+        guard values?.isRegularFile == true else { return nil }
         return values?.fileSize.map(Int64.init)
     }
 }
