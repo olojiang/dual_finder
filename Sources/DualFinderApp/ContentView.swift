@@ -69,6 +69,12 @@ struct ContentView: View {
         .sheet(item: $model.batchRenameDialogRequest) { request in
             BatchRenameDialog(model: model, side: request.side)
         }
+        .sheet(item: $model.mergeFilesDialogRequest) { request in
+            MergeFilesDialog(model: model, request: request)
+        }
+        .sheet(item: $model.splitFileDialogRequest) { request in
+            SplitFileDialog(model: model, request: request)
+        }
         .sheet(item: $model.fileConflictDialogRequest) { request in
             FileConflictDialog(model: model, request: request)
                 .interactiveDismissDisabled(true)
@@ -81,6 +87,10 @@ struct ContentView: View {
         }
         .sheet(item: $model.shortcutHelpRequest) { _ in
             ShortcutHelpDialog()
+        }
+        .sheet(item: $model.emptyTrashConfirmationRequest) { request in
+            EmptyTrashConfirmationDialog(model: model, request: request)
+                .interactiveDismissDisabled(true)
         }
         .alert(item: $model.diskAccessPrompt) { prompt in
             Alert(
@@ -252,6 +262,7 @@ struct ContentView: View {
     private var isGlobalShortcutSuspended: Bool {
         model.folderBookmarkDialogRequest != nil
             || model.batchRenameDialogRequest != nil
+            || model.mergeFilesDialogRequest != nil
             || model.fileConflictDialogRequest != nil
             || model.directoryComparisonDialogRequest != nil
             || model.globalSearchDialogRequest != nil
@@ -503,6 +514,13 @@ private struct OperationQueueBar: View {
                                     .lineLimit(1)
                                     .truncationMode(.middle)
                             }
+                            if !operation.progressDetailText.isEmpty {
+                                Text(operation.progressDetailText)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
                             ProgressView(value: operation.fractionCompleted ?? 0)
                                 .progressViewStyle(.linear)
                         }
@@ -523,6 +541,7 @@ private struct OperationQueueBar: View {
         switch kind {
         case .copy: "doc.on.doc"
         case .move: "arrow.right.doc.on.clipboard"
+        case .sync: "arrow.triangle.2.circlepath"
         case .trash: "trash"
         }
     }
@@ -1482,6 +1501,91 @@ private struct AppShortcutHandler: NSViewRepresentable {
             if flags.contains(.shift) { names.append("shift") }
             return names.joined(separator: "+")
         }
+    }
+}
+
+private struct EmptyTrashConfirmationDialog: View {
+    @ObservedObject var model: DualFinderViewModel
+    let request: EmptyTrashConfirmationRequest
+    @FocusState private var focusedAction: EmptyTrashConfirmationAction?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) {
+                Image(systemName: "trash")
+                    .font(.title2)
+                    .foregroundStyle(.red)
+                Text("Empty Trash?")
+                    .font(.headline)
+                Spacer()
+            }
+
+            Text("This will permanently delete items from Trash.")
+                .foregroundStyle(.secondary)
+
+            VStack(alignment: .leading, spacing: 8) {
+                LabeledContent("Top-level items") {
+                    Text("\(request.summary.topLevelItemCount)")
+                }
+                LabeledContent("Contained files/folders") {
+                    Text("\(request.summary.containedItemCount)")
+                }
+                LabeledContent("Total size") {
+                    Text(request.formattedTotalSize)
+                }
+            }
+            .monospacedDigit()
+
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) {
+                    model.cancelEmptyTrash()
+                }
+                .keyboardShortcut(.cancelAction)
+                .focused($focusedAction, equals: .cancel)
+                Button("Empty Trash", role: .destructive) {
+                    model.confirmEmptyTrash()
+                }
+                .focused($focusedAction, equals: .confirm)
+            }
+        }
+        .padding(20)
+        .frame(width: 420)
+        .onAppear {
+            focusedAction = .cancel
+        }
+        .onKeyPress(.leftArrow, phases: .down) { _ in
+            focusedAction = .cancel
+            return .handled
+        }
+        .onKeyPress(.rightArrow, phases: .down) { _ in
+            focusedAction = .confirm
+            return .handled
+        }
+        .onKeyPress(.tab, phases: .down) { keyPress in
+            focusedAction = keyPress.modifiers.contains(.shift)
+                ? .cancel
+                : (focusedAction == .cancel ? .confirm : .cancel)
+            return .handled
+        }
+        .onKeyPress(.return, phases: .down) { _ in
+            switch focusedAction {
+            case .confirm:
+                model.confirmEmptyTrash()
+            case .cancel, .none:
+                model.cancelEmptyTrash()
+            }
+            return .handled
+        }
+        .onKeyPress(.escape, phases: .down) { _ in
+            model.cancelEmptyTrash()
+            return .handled
+        }
+    }
+
+    private enum EmptyTrashConfirmationAction: Hashable {
+        case cancel
+        case confirm
     }
 }
 

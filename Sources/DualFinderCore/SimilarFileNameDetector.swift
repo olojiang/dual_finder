@@ -15,16 +15,30 @@ public enum SimilarFileNameDetector {
         let candidates = items.enumerated().compactMap { index, item -> Candidate? in
             guard !item.isDirectoryLike else { return nil }
             let stem = canonicalStem(for: item.name)
-            guard stem.count >= 4 else { return nil }
-            return Candidate(index: index, item: item, stem: stem, fileExtension: fileExtension(for: item.name))
+            let stemLength = stem.count
+            guard stemLength >= 2 else { return nil }
+            return Candidate(
+                index: index,
+                item: item,
+                stem: stem,
+                stemLength: stemLength,
+                fileExtension: fileExtension(for: item.name)
+            )
         }
         guard candidates.count >= 2 else { return [] }
 
         var disjointSet = DisjointSet(count: candidates.count)
-        for leftIndex in candidates.indices {
-            for rightIndex in candidates.index(after: leftIndex)..<candidates.count {
-                if areSimilar(candidates[leftIndex], candidates[rightIndex]) {
-                    disjointSet.union(leftIndex, rightIndex)
+        let buckets = Dictionary(grouping: candidates.indices) { index in
+            comparisonBucket(for: candidates[index])
+        }
+
+        for bucketIndexes in buckets.values where bucketIndexes.count >= 2 {
+            for leftOffset in bucketIndexes.indices {
+                let leftIndex = bucketIndexes[leftOffset]
+                for rightIndex in bucketIndexes[bucketIndexes.index(after: leftOffset)..<bucketIndexes.endIndex] {
+                    if areSimilar(candidates[leftIndex], candidates[rightIndex]) {
+                        disjointSet.union(leftIndex, rightIndex)
+                    }
                 }
             }
         }
@@ -50,6 +64,10 @@ public enum SimilarFileNameDetector {
             }
     }
 
+    private static func comparisonBucket(for candidate: Candidate) -> String {
+        "\(candidate.fileExtension)|\(candidate.stem.prefix(2))"
+    }
+
     private static func areSimilar(_ left: Candidate, _ right: Candidate) -> Bool {
         guard left.fileExtension == right.fileExtension else { return false }
         guard left.item.name != right.item.name else { return false }
@@ -58,8 +76,8 @@ public enum SimilarFileNameDetector {
         let rightStem = right.stem
         if leftStem == rightStem { return true }
 
-        let shorterCount = min(leftStem.count, rightStem.count)
-        let longerCount = max(leftStem.count, rightStem.count)
+        let shorterCount = min(left.stemLength, right.stemLength)
+        let longerCount = max(left.stemLength, right.stemLength)
         guard shorterCount >= 4 else { return false }
 
         if leftStem.hasPrefix(rightStem) || rightStem.hasPrefix(leftStem) {
@@ -90,11 +108,13 @@ public enum SimilarFileNameDetector {
         let halfWidth = rawStem.applyingTransform(.fullwidthToHalfwidth, reverse: false) ?? rawStem
         let stripped = halfWidth.applyingTransform(.stripDiacritics, reverse: false) ?? halfWidth
         let lowercased = stripped.lowercased()
-        let authorTrimmed = lowercased.components(separatedBy: "作者").first ?? lowercased
+        let metadataTrimmed = trimKnownMetadata(from: lowercased)
+        let titleScoped = firstBookTitleContent(in: metadataTrimmed)
+        let stemSource = removeBracketedMetadata(from: titleScoped ?? metadataTrimmed)
 
         var tokens: [String] = []
         var current = String.UnicodeScalarView()
-        for scalar in authorTrimmed.unicodeScalars {
+        for scalar in stemSource.unicodeScalars {
             if CharacterSet.letters.contains(scalar) {
                 current.append(scalar)
             } else if !current.isEmpty {
@@ -106,24 +126,136 @@ public enum SimilarFileNameDetector {
             tokens.append(String(current))
         }
 
-        let meaningfulTokens = tokens.filter { token in
-            token.count > 1 && !ignoredTokens.contains(token)
-        }
+        let meaningfulTokens = tokens.compactMap(normalizedToken)
         guard !meaningfulTokens.isEmpty else {
-            return tokens.joined()
+            return ""
         }
 
-        let longestToken = meaningfulTokens.max { left, right in
-            if left.count == right.count {
-                return left > right
-            }
-            return left.count < right.count
-        } ?? meaningfulTokens.joined()
-
-        if containsCJK(longestToken), longestToken.count >= 4 {
-            return longestToken
+        let minimumCJKTokenLength = titleScoped == nil ? 4 : 2
+        let cjkTokens = meaningfulTokens.filter(containsCJK)
+        if let longestCJKToken = longestToken(in: cjkTokens),
+           longestCJKToken.count >= minimumCJKTokenLength {
+            return longestCJKToken
         }
         return meaningfulTokens.joined()
+    }
+
+    private static func firstBookTitleContent(in text: String) -> String? {
+        if let content = pairedTitleContent(in: text, open: "《", close: "》") {
+            return content
+        }
+        if let content = danglingTitleContent(in: text, close: "》", beforeOpen: "《") {
+            return content
+        }
+
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.first == "【",
+           let content = pairedTitleContent(in: trimmed, open: "【", close: "】") {
+            return content
+        }
+        if let content = danglingTitleContent(in: text, close: "】", beforeOpen: "【") {
+            return content
+        }
+
+        return nil
+    }
+
+    private static func pairedTitleContent(in text: String, open: Character, close: Character) -> String? {
+        guard let openIndex = text.firstIndex(of: open),
+              let closeIndex = text[openIndex...].firstIndex(of: close),
+              openIndex < closeIndex else {
+            return nil
+        }
+
+        let contentStart = text.index(after: openIndex)
+        let content = String(text[contentStart..<closeIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return content.isEmpty ? nil : content
+    }
+
+    private static func danglingTitleContent(in text: String, close: Character, beforeOpen open: Character) -> String? {
+        guard let closeIndex = text.firstIndex(of: close),
+              closeIndex > text.startIndex else {
+            return nil
+        }
+        if let openIndex = text.firstIndex(of: open),
+           openIndex < closeIndex {
+            return nil
+        }
+
+        let content = String(text[..<closeIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !content.isEmpty else { return nil }
+        if let firstScalar = content.unicodeScalars.first,
+           CharacterSet.decimalDigits.contains(firstScalar) {
+            return nil
+        }
+        return content
+    }
+
+    private static func trimKnownMetadata(from text: String) -> String {
+        var endIndex = text.endIndex
+        for marker in metadataSeparators {
+            guard let range = text.range(of: marker), range.lowerBound < endIndex else {
+                continue
+            }
+            endIndex = range.lowerBound
+        }
+        return String(text[..<endIndex])
+    }
+
+    private static func removeBracketedMetadata(from text: String) -> String {
+        var result = ""
+        var closingStack: [Character] = []
+
+        for character in text {
+            if let close = metadataBracketPairs[character] {
+                closingStack.append(close)
+                continue
+            }
+            if closingStack.last == character {
+                closingStack.removeLast()
+                continue
+            }
+            if closingStack.isEmpty {
+                result.append(character)
+            }
+        }
+
+        return result
+    }
+
+    private static func normalizedToken(_ token: String) -> String? {
+        var candidate = token
+        var didStrip = true
+        while didStrip {
+            didStrip = false
+            for prefix in ignoredPrefixes where candidate.hasPrefix(prefix) {
+                candidate.removeFirst(prefix.count)
+                didStrip = true
+                break
+            }
+            if didStrip {
+                continue
+            }
+            for suffix in ignoredSuffixes where candidate.hasSuffix(suffix) {
+                candidate.removeLast(suffix.count)
+                didStrip = true
+                break
+            }
+        }
+
+        guard candidate.count > 1, !ignoredTokens.contains(candidate) else {
+            return nil
+        }
+        return candidate
+    }
+
+    private static func longestToken(in tokens: [String]) -> String? {
+        tokens.max { left, right in
+            if left.count == right.count {
+                return left.localizedStandardCompare(right) == .orderedDescending
+            }
+            return left.count < right.count
+        }
     }
 
     private static func fileExtension(for name: String) -> String {
@@ -179,13 +311,74 @@ public enum SimilarFileNameDetector {
         "副本",
         "最终",
         "final",
-        "author"
+        "author",
+        "未知",
+        "佚名",
+        "不详",
+        "已完结",
+        "未完结",
+        "完结",
+        "未完",
+        "完",
+        "章",
+        "卷",
+        "部",
+        "番外",
+        "正文",
+        "全文",
+        "校对"
+    ]
+
+    private static let ignoredPrefixes: [String] = [
+        "经典之"
+    ]
+
+    private static let ignoredSuffixes: [String] = [
+        "校对版全本",
+        "无删全本",
+        "未删全本",
+        "完整版",
+        "完结版",
+        "校对版",
+        "无删版",
+        "未删版",
+        "修改版",
+        "修订版",
+        "精校版",
+        "加强版",
+        "增强版",
+        "改版",
+        "原版",
+        "加料版",
+        "加料",
+        "已完结",
+        "未完结",
+        "完结",
+        "未完",
+        "全本",
+        "完本"
+    ]
+
+    private static let metadataSeparators: [String] = [
+        "作者",
+        " - ",
+        " by "
+    ]
+
+    private static let metadataBracketPairs: [Character: Character] = [
+        "(": ")",
+        "（": "）",
+        "[": "]",
+        "［": "］",
+        "{": "}",
+        "【": "】"
     ]
 
     private struct Candidate {
         let index: Int
         let item: FileItem
         let stem: String
+        let stemLength: Int
         let fileExtension: String
     }
 }

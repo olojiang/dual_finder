@@ -3,6 +3,7 @@ import Foundation
 
 public enum FileListColumn: String, Codable, CaseIterable, Sendable {
     case type
+    case encoding
     case size
     case modified
 }
@@ -10,16 +11,23 @@ public enum FileListColumn: String, Codable, CaseIterable, Sendable {
 public enum FileListColumnBoundary: String, CaseIterable, Sendable {
     case afterName
     case afterType
+    case afterEncoding
     case afterSize
 
     public var resizedColumn: FileListColumn {
+        resizedColumn(showsEncoding: false)
+    }
+
+    public func resizedColumn(showsEncoding: Bool) -> FileListColumn {
         switch self {
         case .afterName:
             return .type
+        case .afterType:
+            return showsEncoding ? .encoding : .size
+        case .afterEncoding:
+            return .size
         case .afterSize:
             return .modified
-        case .afterType:
-            return .size
         }
     }
 
@@ -30,23 +38,42 @@ public enum FileListColumnBoundary: String, CaseIterable, Sendable {
 
 public struct FileListColumnWidths: Codable, Equatable, Sendable {
     public var type: Double
+    public var encoding: Double
     public var size: Double
     public var modified: Double
 
-    public init(type: Double, size: Double, modified: Double) {
+    public init(type: Double, encoding: Double = Self.defaultEncodingWidth, size: Double, modified: Double) {
         self.type = type
+        self.encoding = encoding
         self.size = size
         self.modified = modified
     }
 
-    public static let `default` = FileListColumnWidths(type: 112, size: 86, modified: 126)
+    public static let defaultEncodingWidth: Double = 92
+    public static let `default` = FileListColumnWidths(type: 112, encoding: defaultEncodingWidth, size: 86, modified: 126)
 
-    public static let minimums = FileListColumnWidths(type: 64, size: 56, modified: 88)
-    public static let maximums = FileListColumnWidths(type: 280, size: 160, modified: 240)
+    public static let minimums = FileListColumnWidths(type: 64, encoding: 70, size: 56, modified: 88)
+    public static let maximums = FileListColumnWidths(type: 280, encoding: 150, size: 160, modified: 240)
+
+    private enum CodingKeys: String, CodingKey {
+        case type
+        case encoding
+        case size
+        case modified
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        type = try container.decode(Double.self, forKey: .type)
+        encoding = try container.decodeIfPresent(Double.self, forKey: .encoding) ?? Self.defaultEncodingWidth
+        size = try container.decode(Double.self, forKey: .size)
+        modified = try container.decode(Double.self, forKey: .modified)
+    }
 
     public func clamped() -> FileListColumnWidths {
         FileListColumnWidths(
             type: min(max(type, Self.minimums.type), Self.maximums.type),
+            encoding: min(max(encoding, Self.minimums.encoding), Self.maximums.encoding),
             size: min(max(size, Self.minimums.size), Self.maximums.size),
             modified: min(max(modified, Self.minimums.modified), Self.maximums.modified)
         )
@@ -55,6 +82,7 @@ public struct FileListColumnWidths: Codable, Equatable, Sendable {
     public func width(for column: FileListColumn) -> CGFloat {
         switch column {
         case .type: CGFloat(type)
+        case .encoding: CGFloat(encoding)
         case .size: CGFloat(size)
         case .modified: CGFloat(modified)
         }
@@ -63,6 +91,7 @@ public struct FileListColumnWidths: Codable, Equatable, Sendable {
     public mutating func adjust(_ column: FileListColumn, by delta: Double) {
         switch column {
         case .type: type += delta
+        case .encoding: encoding += delta
         case .size: size += delta
         case .modified: modified += delta
         }
@@ -75,17 +104,20 @@ public struct UILayoutPreferences: Codable, Equatable, Sendable {
     public var rightColumnWidths: FileListColumnWidths
     public var leftPaneFraction: Double
     public var isSidebarCollapsed: Bool
+    public var isEncodingColumnVisible: Bool
 
     public init(
         leftColumnWidths: FileListColumnWidths = .default,
         rightColumnWidths: FileListColumnWidths = .default,
         leftPaneFraction: Double = 0.5,
-        isSidebarCollapsed: Bool = false
+        isSidebarCollapsed: Bool = false,
+        isEncodingColumnVisible: Bool = false
     ) {
         self.leftColumnWidths = leftColumnWidths.clamped()
         self.rightColumnWidths = rightColumnWidths.clamped()
         self.leftPaneFraction = Self.clampedFraction(leftPaneFraction)
         self.isSidebarCollapsed = isSidebarCollapsed
+        self.isEncodingColumnVisible = isEncodingColumnVisible
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -94,6 +126,7 @@ public struct UILayoutPreferences: Codable, Equatable, Sendable {
         case columnWidths
         case leftPaneFraction
         case isSidebarCollapsed
+        case isEncodingColumnVisible
     }
 
     public init(from decoder: Decoder) throws {
@@ -112,6 +145,7 @@ public struct UILayoutPreferences: Codable, Equatable, Sendable {
         self.leftPaneFraction = try container.decodeIfPresent(Double.self, forKey: .leftPaneFraction)
             .map(Self.clampedFraction) ?? 0.5
         self.isSidebarCollapsed = try container.decodeIfPresent(Bool.self, forKey: .isSidebarCollapsed) ?? false
+        self.isEncodingColumnVisible = try container.decodeIfPresent(Bool.self, forKey: .isEncodingColumnVisible) ?? false
         clamp()
     }
 
@@ -121,6 +155,7 @@ public struct UILayoutPreferences: Codable, Equatable, Sendable {
         try container.encode(rightColumnWidths, forKey: .rightColumnWidths)
         try container.encode(leftPaneFraction, forKey: .leftPaneFraction)
         try container.encode(isSidebarCollapsed, forKey: .isSidebarCollapsed)
+        try container.encode(isEncodingColumnVisible, forKey: .isEncodingColumnVisible)
     }
 
     public static let `default` = UILayoutPreferences()

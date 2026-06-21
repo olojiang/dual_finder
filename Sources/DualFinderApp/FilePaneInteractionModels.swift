@@ -126,3 +126,41 @@ enum FileRowSelectionReducer {
         return Set(orderedURLs[bounds])
     }
 }
+
+enum FileKeyboardSelectionNavigator {
+    static func selectionAfterMove(
+        anchorURL: URL?,
+        currentSelection: Set<URL>,
+        orderedURLs: [URL],
+        unavailableURLs: Set<URL> = [],
+        delta: Int
+    ) -> Set<URL>? {
+        guard delta != 0, !orderedURLs.isEmpty else { return nil }
+
+        let anchorIndex = anchorURL.flatMap { orderedURLs.firstIndex(of: $0) }
+            ?? orderedURLs.firstIndex { currentSelection.contains($0) }
+        let startIndex: Int
+        if let anchorIndex {
+            startIndex = anchorIndex + (delta > 0 ? 1 : -1)
+        } else {
+            startIndex = delta > 0 ? 0 : orderedURLs.count - 1
+        }
+
+        guard orderedURLs.indices.contains(startIndex) else { return nil }
+
+        let indexes: AnySequence<Int>
+        if delta > 0 {
+            indexes = AnySequence(startIndex..<orderedURLs.count)
+        } else {
+            indexes = AnySequence(stride(from: startIndex, through: 0, by: -1))
+        }
+
+        guard let nextURL = indexes
+            .map({ orderedURLs[$0] })
+            .first(where: { !unavailableURLs.contains($0) }) else {
+            return nil
+        }
+
+        return [nextURL]
+    }
+}

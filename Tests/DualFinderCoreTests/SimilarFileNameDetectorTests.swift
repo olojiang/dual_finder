@@ -56,6 +56,76 @@ struct SimilarFileNameDetectorTests {
         ])
     }
 
+    @Test("groups book-title variants with longer edition descriptors")
+    func groupsBookTitleVariantsWithLongerEditionDescriptors() {
+        let items = [
+            file("《绝色凶器》(校对版全本) 作者：艳墨.txt"),
+            file("《绝色凶器 JSXQ (修改版)》.txt"),
+            file("《经典之绝色凶器》(无删全本).txt"),
+            file("翠微居《少龙外传》(无删全本) 作者：wtv.txt")
+        ]
+
+        let groups = SimilarFileNameDetector.groups(in: items)
+
+        #expect(groups.count == 1)
+        #expect(Set(groups[0].items.map(\.name)) == [
+            "《绝色凶器》(校对版全本) 作者：艳墨.txt",
+            "《绝色凶器 JSXQ (修改版)》.txt",
+            "《经典之绝色凶器》(无删全本).txt"
+        ])
+    }
+
+    @Test("groups short title variants when the normalized title is exact")
+    func groupsExactShortTitleVariants() {
+        let items = [
+            file("御仙 1-71章 .txt"),
+            file("御仙  作者：清风霜雪.txt"),
+            file("御仙（1-2卷18章（1-45）_2间章）未完 - 清风霜雪.txt"),
+            file("《御仙》第二部完结.txt"),
+            file("御姐修行.txt")
+        ]
+
+        let groups = SimilarFileNameDetector.groups(in: items)
+
+        #expect(groups.count == 1)
+        #expect(Set(groups[0].items.map(\.name)) == [
+            "御仙 1-71章 .txt",
+            "御仙  作者：清风霜雪.txt",
+            "御仙（1-2卷18章（1-45）_2间章）未完 - 清风霜雪.txt",
+            "《御仙》第二部完结.txt"
+        ])
+    }
+
+    @Test("groups names with missing opening title bracket and edition suffixes")
+    func groupsMissingOpeningTitleBracketVariants() {
+        let items = [
+            file("半岛检察官加料版》作者：未知[1-378章] [已完结] - 未知.txt"),
+            file("半岛检察官》作者：未知[1-420章] [未完结] - 未知.txt"),
+            file("半岛检察官.txt"),
+            file("半岛往事.txt")
+        ]
+
+        let groups = SimilarFileNameDetector.groups(in: items)
+
+        #expect(groups.count == 1)
+        #expect(Set(groups[0].items.map(\.name)) == [
+            "半岛检察官加料版》作者：未知[1-378章] [已完结] - 未知.txt",
+            "半岛检察官》作者：未知[1-420章] [未完结] - 未知.txt",
+            "半岛检察官.txt"
+        ])
+    }
+
+    @Test("does not fuzzy group different short titles")
+    func rejectsDifferentShortTitles() {
+        let items = [
+            file("御仙.txt"),
+            file("御姐.txt"),
+            file("御宅.txt")
+        ]
+
+        #expect(SimilarFileNameDetector.groups(in: items).isEmpty)
+    }
+
     @Test("does not group unrelated files that only share a short prefix")
     func rejectsShortSharedPrefixes() {
         let items = [

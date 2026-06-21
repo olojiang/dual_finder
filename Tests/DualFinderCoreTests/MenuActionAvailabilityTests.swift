@@ -45,6 +45,12 @@ final class MenuActionAvailabilityTests: XCTestCase {
         XCTAssertFalse(MenuActionAvailability.canRenameSelection(selectionCount: 1, isInlineRenaming: true))
     }
 
+    func testExtractFilenameFromContentRequiresSelectionAndNotRenaming() {
+        XCTAssertTrue(MenuActionAvailability.canExtractFilenameFromContent(hasSelection: true, isInlineRenaming: false))
+        XCTAssertFalse(MenuActionAvailability.canExtractFilenameFromContent(hasSelection: false, isInlineRenaming: false))
+        XCTAssertFalse(MenuActionAvailability.canExtractFilenameFromContent(hasSelection: true, isInlineRenaming: true))
+    }
+
     func testSelectAllRequiresItems() {
         XCTAssertTrue(MenuActionAvailability.canSelectAll(itemCount: 3, isInlineRenaming: false))
         XCTAssertFalse(MenuActionAvailability.canSelectAll(itemCount: 0, isInlineRenaming: false))

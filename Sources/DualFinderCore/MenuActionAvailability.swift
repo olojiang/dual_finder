@@ -46,6 +46,10 @@ public enum MenuActionAvailability {
         hasSelection && !isInlineRenaming
     }
 
+    public static func canExtractFilenameFromContent(hasSelection: Bool, isInlineRenaming: Bool) -> Bool {
+        hasSelection && !isInlineRenaming
+    }
+
     public static func canTransferToOtherPane(
         hasSelection: Bool,
         isInlineRenaming: Bool,

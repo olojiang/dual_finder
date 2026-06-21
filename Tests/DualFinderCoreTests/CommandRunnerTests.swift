@@ -34,4 +34,42 @@ struct ProcessCommandRunnerTests {
                 == directory.url.standardizedFileURL
         )
     }
+
+    @Test("captures output while process is still running")
+    func capturesOutputWhileProcessIsStillRunning() throws {
+        let stdoutBytes = 1024 * 1024
+        let stderrBytes = 256 * 1024
+
+        let result = try ProcessCommandRunner().run(
+            executable: "/usr/bin/perl",
+            arguments: [
+                "-e",
+                "print 'o' x \(stdoutBytes); print STDERR 'e' x \(stderrBytes);"
+            ],
+            workingDirectory: nil
+        )
+
+        #expect(result.succeeded)
+        #expect(result.stdout.count == stdoutBytes)
+        #expect(result.stderr.count == stderrBytes)
+    }
+
+    @Test("terminates running process when cancelled")
+    func terminatesRunningProcessWhenCancelled() throws {
+        let cancellation = FileOperationCancellation()
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) {
+            cancellation.cancel()
+        }
+
+        let startedAt = Date()
+        #expect(throws: FileOperationError.cancelled) {
+            _ = try ProcessCommandRunner().run(
+                executable: "/bin/sleep",
+                arguments: ["5"],
+                workingDirectory: nil,
+                cancellation: cancellation
+            )
+        }
+        #expect(Date().timeIntervalSince(startedAt) < 2)
+    }
 }

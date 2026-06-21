@@ -165,6 +165,16 @@ struct AppMenuCommands: Commands {
         }
         .keyboardShortcut("m", modifiers: [.control])
         .disabled(!model.canBatchRenameActiveSelection)
+
+        Button("Merge Files...") {
+            model.requestMergeFilesDialog(on: model.activePaneSide)
+        }
+        .disabled(!model.canMergeActiveSelection)
+
+        Button("Split File...") {
+            model.requestSplitFileDialog(on: model.activePaneSide)
+        }
+        .disabled(!model.canSplitActiveSelection)
     }
 
     // MARK: - View
@@ -173,6 +183,25 @@ struct AppMenuCommands: Commands {
     private var viewDisplayCommands: some View {
         Toggle("Show Hidden Files", isOn: $model.showHiddenFiles)
             .disabled(model.isInlineRenaming)
+
+        Button("Use Android Device in Active Pane") {
+            model.switchPaneToAndroid(model.activePaneSide)
+        }
+        .disabled(model.isInlineRenaming)
+
+        Button("Use Local Files in Active Pane") {
+            model.switchPaneToLocal(model.activePaneSide)
+        }
+        .disabled(model.isInlineRenaming || !model.isAndroidPane(model.activePaneSide))
+
+        Toggle(
+            "Show Encoding Column",
+            isOn: Binding(
+                get: { model.isEncodingColumnVisible },
+                set: { model.setEncodingColumnVisible($0) }
+            )
+        )
+        .disabled(model.isInlineRenaming)
 
         Button("Refresh") {
             model.refreshAll()
@@ -289,6 +318,18 @@ struct AppMenuCommands: Commands {
         }
         .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
         .disabled(!model.canMoveFromRightPane)
+
+        Divider()
+
+        Button("Sync Left Selection to Right") {
+            model.syncSelection(from: .left)
+        }
+        .disabled(!model.canCopyFromLeftPane)
+
+        Button("Sync Right Selection to Left") {
+            model.syncSelection(from: .right)
+        }
+        .disabled(!model.canCopyFromRightPane)
     }
 
     @ViewBuilder

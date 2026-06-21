@@ -134,6 +134,13 @@ struct FileSystemServiceTests {
         #expect(capacity >= 0)
     }
 
+    @Test("falls back to regular volume capacity when important usage reports zero")
+    func fallsBackToRegularVolumeCapacityWhenImportantUsageReportsZero() {
+        #expect(FileSystemService.resolvedAvailableCapacity(importantUsage: 0, regular: 123) == 123)
+        #expect(FileSystemService.resolvedAvailableCapacity(importantUsage: 456, regular: 123) == 456)
+        #expect(FileSystemService.resolvedAvailableCapacity(importantUsage: nil, regular: 123) == 123)
+    }
+
     @Test("throws when available capacity is requested for a missing path")
     func throwsWhenAvailableCapacityMissingPath() {
         let missing = URL(fileURLWithPath: "/tmp/dual-finder-missing-\(UUID().uuidString)")
@@ -163,6 +170,42 @@ struct FileSystemServiceTests {
         try setModificationDate(changedDate, for: folder)
         items = try FileSystemService().contents(of: root.url, folderSizeCache: cache)
         #expect(items.first?.size == nil)
+    }
+
+    @Test("only populates cached text encoding when requested")
+    func populatesCachedTextEncodingWhenRequested() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("utf8.txt")
+        let cacheURL = root.url.appendingPathComponent("encoding-cache.json")
+        let cache = TextEncodingConversionCache(storageURL: cacheURL)
+        try "plain text".write(to: file, atomically: true, encoding: .utf8)
+        _ = try TextEncodingConversionService(logger: CapturingLogger(), cache: cache).detectFileEncoding(file)
+
+        let withoutEncoding = try FileSystemService().contents(of: root.url)
+        let withEncoding = try FileSystemService().contents(
+            of: root.url,
+            textEncodingCache: cache,
+            includeTextEncoding: true
+        )
+
+        #expect(withoutEncoding.first(where: { $0.url == file.standardizedFileURL })?.textEncoding == nil)
+        #expect(withEncoding.first(where: { $0.url == file.standardizedFileURL })?.textEncoding == "utf-8")
+    }
+
+    @Test("leaves uncached text encoding empty during directory listing")
+    func leavesUncachedTextEncodingEmptyDuringListing() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("utf8.txt")
+        let cacheURL = root.url.appendingPathComponent("encoding-cache.json")
+        try "plain text".write(to: file, atomically: true, encoding: .utf8)
+
+        let items = try FileSystemService().contents(
+            of: root.url,
+            textEncodingCache: TextEncodingConversionCache(storageURL: cacheURL),
+            includeTextEncoding: true
+        )
+
+        #expect(items.first(where: { $0.url == file.standardizedFileURL })?.textEncoding == nil)
     }
 
     @Test("computes folder sizes while ignoring symbolic links")

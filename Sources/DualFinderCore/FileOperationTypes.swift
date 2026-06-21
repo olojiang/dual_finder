@@ -31,19 +31,34 @@ public struct FileOperationProgress: Sendable, Equatable {
     public let completedItems: Int
     public let totalItems: Int
     public let currentItem: URL?
+    public let currentItemBytes: Int64?
+    public let copiedItems: Int
+    public let copiedBytes: Int64
+    public let skippedItems: Int
+    public let skippedBytes: Int64
 
     public init(
         completedBytes: Int64,
         totalBytes: Int64,
         completedItems: Int,
         totalItems: Int,
-        currentItem: URL?
+        currentItem: URL?,
+        currentItemBytes: Int64? = nil,
+        copiedItems: Int = 0,
+        copiedBytes: Int64 = 0,
+        skippedItems: Int = 0,
+        skippedBytes: Int64 = 0
     ) {
         self.completedBytes = completedBytes
         self.totalBytes = totalBytes
         self.completedItems = completedItems
         self.totalItems = totalItems
         self.currentItem = currentItem
+        self.currentItemBytes = currentItemBytes
+        self.copiedItems = copiedItems
+        self.copiedBytes = copiedBytes
+        self.skippedItems = skippedItems
+        self.skippedBytes = skippedBytes
     }
 
     public var fractionCompleted: Double? {

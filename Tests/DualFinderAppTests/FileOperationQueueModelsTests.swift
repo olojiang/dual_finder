@@ -22,7 +22,8 @@ struct FileOperationQueueModelsTests {
                 totalBytes: 10,
                 completedItems: 1,
                 totalItems: 2,
-                currentItem: nil
+                currentItem: nil,
+                currentItemBytes: 3
             ),
             message: "Copying",
             finishedAt: nil
@@ -30,8 +31,41 @@ struct FileOperationQueueModelsTests {
 
         #expect(operation.title == "Copy 2 item(s)")
         #expect(operation.fractionCompleted == 0.5)
+        #expect(operation.progressDetailText.contains("1/2 item(s)"))
+        #expect(operation.progressDetailText.contains("current"))
         #expect(QueuedFileOperationKind.move.displayName == "Move")
+        #expect(QueuedFileOperationKind.sync.displayName == "Sync")
         #expect(QueuedFileOperationKind.trash.displayName == "Trash")
+    }
+
+    @Test("progress detail includes copied and skipped counts with sizes")
+    func progressDetailIncludesCopiedAndSkippedCountsWithSizes() {
+        let operation = QueuedFileOperation(
+            id: UUID(),
+            kind: .sync,
+            sources: [URL(fileURLWithPath: "/tmp/books")],
+            destination: URL(fileURLWithPath: "/tmp/out", isDirectory: true),
+            createdAt: Date(timeIntervalSince1970: 10),
+            status: .running,
+            progress: FileOperationProgress(
+                completedBytes: 3_072,
+                totalBytes: 4_096,
+                completedItems: 3,
+                totalItems: 4,
+                currentItem: URL(fileURLWithPath: "/tmp/books/current.txt"),
+                currentItemBytes: 1_024,
+                copiedItems: 1,
+                copiedBytes: 2_048,
+                skippedItems: 2,
+                skippedBytes: 1_024
+            ),
+            message: "current.txt",
+            finishedAt: nil
+        )
+
+        #expect(operation.progressDetailText.contains("3/4 item(s)"))
+        #expect(operation.progressDetailText.contains("copied 1"))
+        #expect(operation.progressDetailText.contains("skipped 2"))
     }
 
     @Test("refresh policy can defer only successful directory refreshes")

@@ -28,7 +28,9 @@ public struct FileSystemService {
         of directory: URL,
         includeHidden: Bool = false,
         sortRule: FileSortRule = FileSortRule(),
-        folderSizeCache: FolderSizeCache? = nil
+        folderSizeCache: FolderSizeCache? = nil,
+        textEncodingCache: TextEncodingConversionCache? = nil,
+        includeTextEncoding: Bool = false
     ) throws -> [FileItem] {
         let options: FileManager.DirectoryEnumerationOptions = includeHidden ? [] : [.skipsHiddenFiles]
         let urls = try fileManager.contentsOfDirectory(
@@ -36,7 +38,14 @@ public struct FileSystemService {
             includingPropertiesForKeys: Array(Self.itemResourceKeys),
             options: options
         )
-        return try urls.map { try item(for: $0, folderSizeCache: folderSizeCache) }
+        return try urls.map {
+            try item(
+                for: $0,
+                folderSizeCache: folderSizeCache,
+                textEncodingCache: textEncodingCache,
+                includeTextEncoding: includeTextEncoding
+            )
+        }
             .sorted { FileSystemService.sortItems($0, $1, rule: sortRule) }
     }
 
@@ -44,7 +53,9 @@ public struct FileSystemService {
         of directory: URL,
         includeHidden: Bool = false,
         sortRule: FileSortRule = FileSortRule(),
-        folderSizeCache: FolderSizeCache? = nil
+        folderSizeCache: FolderSizeCache? = nil,
+        textEncodingCache: TextEncodingConversionCache? = nil,
+        includeTextEncoding: Bool = false
     ) throws -> [FileItem] {
         let options: FileManager.DirectoryEnumerationOptions = includeHidden ? [] : [.skipsHiddenFiles]
         guard let enumerator = fileManager.enumerator(
@@ -64,7 +75,13 @@ public struct FileSystemService {
                 }
                 continue
             }
-            items.append(try item(for: url, resourceValues: values, folderSizeCache: folderSizeCache))
+            items.append(try item(
+                for: url,
+                resourceValues: values,
+                folderSizeCache: folderSizeCache,
+                textEncodingCache: textEncodingCache,
+                includeTextEncoding: includeTextEncoding
+            ))
         }
 
         return items.sorted { FileSystemService.sortItems($0, $1, rule: sortRule) }
@@ -82,10 +99,17 @@ public struct FileSystemService {
             .volumeAvailableCapacityForImportantUsageKey,
             .volumeAvailableCapacityKey
         ])
-        if let capacity = values.volumeAvailableCapacityForImportantUsage {
-            return capacity
+        return Self.resolvedAvailableCapacity(
+            importantUsage: values.volumeAvailableCapacityForImportantUsage,
+            regular: values.volumeAvailableCapacity.map(Int64.init)
+        )
+    }
+
+    public static func resolvedAvailableCapacity(importantUsage: Int64?, regular: Int64?) -> Int64? {
+        if let importantUsage, importantUsage > 0 {
+            return importantUsage
         }
-        return values.volumeAvailableCapacity.map(Int64.init)
+        return regular ?? importantUsage
     }
 
     public func calculateFolderSize(at folder: URL, cache: FolderSizeCache = FolderSizeCache()) throws -> FolderSizeResolution {
@@ -99,18 +123,27 @@ public struct FileSystemService {
         return .computed(size)
     }
 
-    private func item(for url: URL, folderSizeCache: FolderSizeCache?) throws -> FileItem {
+    private func item(
+        for url: URL,
+        folderSizeCache: FolderSizeCache?,
+        textEncodingCache: TextEncodingConversionCache?,
+        includeTextEncoding: Bool
+    ) throws -> FileItem {
         try item(
             for: url,
             resourceValues: url.resourceValues(forKeys: Self.itemResourceKeys),
-            folderSizeCache: folderSizeCache
+            folderSizeCache: folderSizeCache,
+            textEncodingCache: textEncodingCache,
+            includeTextEncoding: includeTextEncoding
         )
     }
 
     private func item(
         for url: URL,
         resourceValues values: URLResourceValues,
-        folderSizeCache: FolderSizeCache?
+        folderSizeCache: FolderSizeCache?,
+        textEncodingCache: TextEncodingConversionCache?,
+        includeTextEncoding: Bool
     ) throws -> FileItem {
         let itemURL = url.standardizedFileURL
         let kind: FileItemKind
@@ -125,6 +158,9 @@ public struct FileSystemService {
         }
         let size = values.fileSize.map(Int64.init)
             ?? folderSizeCache?.size(for: url, modifiedAt: values.contentModificationDate)
+        let textEncoding = includeTextEncoding && kind == .file
+            ? textEncodingCache?.cachedEncoding(for: itemURL, size: size, modifiedAt: values.contentModificationDate)
+            : nil
         return FileItem(
             url: itemURL,
             name: values.localizedName ?? itemURL.lastPathComponent,
@@ -133,7 +169,8 @@ public struct FileSystemService {
             size: size,
             modifiedAt: values.contentModificationDate,
             createdAt: values.creationDate,
-            isHidden: values.isHidden ?? false
+            isHidden: values.isHidden ?? false,
+            textEncoding: textEncoding
         )
     }
 

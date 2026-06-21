@@ -3,8 +3,11 @@ import Foundation
 public enum FileOperationError: LocalizedError, Equatable {
     case trashUnsupported
     case emptyName
+    case invalidName
     case cancelled
     case invalidDestination
+    case emptySources
+    case sourceIsDirectory(URL)
 
     public var errorDescription: String? {
         switch self {
@@ -12,11 +15,33 @@ public enum FileOperationError: LocalizedError, Equatable {
             "Moving files to Trash is only supported on macOS."
         case .emptyName:
             "Name cannot be empty."
+        case .invalidName:
+            "Name contains characters that cannot be used in a file name."
         case .cancelled:
             "Operation cancelled."
         case .invalidDestination:
             "Destination cannot be the source item or one of its children."
+        case .emptySources:
+            "Select at least two files to merge."
+        case let .sourceIsDirectory(url):
+            "Cannot merge folder: \(url.lastPathComponent)"
         }
+    }
+}
+
+public struct TrashContentsSummary: Equatable, Sendable {
+    public let topLevelItemCount: Int
+    public let containedItemCount: Int
+    public let totalByteCount: Int64
+
+    public init(topLevelItemCount: Int, containedItemCount: Int, totalByteCount: Int64) {
+        self.topLevelItemCount = topLevelItemCount
+        self.containedItemCount = containedItemCount
+        self.totalByteCount = totalByteCount
+    }
+
+    public var isEmpty: Bool {
+        topLevelItemCount == 0
     }
 }
 
@@ -64,6 +89,25 @@ public struct FileOperationService {
         conflictResolver: ((FileOperationConflict) -> FileOperationConflictResolution)? = nil
     ) throws {
         logger?.info("file-operation", "move.started", metadata: operationMetadata(sources, destinationDirectory))
+        do {
+            try moveSourcesByRename(
+                sources,
+                to: destinationDirectory,
+                options: options,
+                cancellation: cancellation,
+                progress: progress,
+                conflictResolver: conflictResolver
+            )
+            logger?.info("file-operation", "move.completed", metadata: operationMetadata(sources, destinationDirectory))
+            return
+        } catch let error as MoveRenameFallbackError {
+            logger?.warning("file-operation", "move.rename-fallback", metadata: [
+                "error": error.underlying.localizedDescription
+            ])
+        } catch {
+            throw error
+        }
+
         let context = try OperationContext(
             sources: sources,
             destinationDirectory: destinationDirectory,
@@ -175,6 +219,58 @@ public struct FileOperationService {
         return operations.map(\.destinationURL)
     }
 
+    public func mergeFiles(
+        _ sources: [URL],
+        named name: String,
+        in directory: URL,
+        trashSourcesAfterMerge: Bool = false
+    ) throws -> URL {
+        guard sources.count >= 2 else {
+            throw FileOperationError.emptySources
+        }
+        guard !FileNameUtilities.isBlank(name) else {
+            throw FileOperationError.emptyName
+        }
+        guard !FileNameUtilities.containsInvalidPathComponentCharacters(name) else {
+            throw FileOperationError.invalidName
+        }
+
+        for source in sources {
+            let values = try source.resourceValues(forKeys: [.isDirectoryKey])
+            if values.isDirectory == true {
+                throw FileOperationError.sourceIsDirectory(source)
+            }
+        }
+
+        let destination = uniqueDestination(for: name, in: directory)
+        logger?.info("file-operation", "merge.started", metadata: operationMetadata(sources, directory))
+        do {
+            try Data().write(to: destination, options: .withoutOverwriting)
+            let output = try FileHandle(forWritingTo: destination)
+            defer { try? output.close() }
+
+            for (index, source) in sources.enumerated() {
+                let endsWithLineBreak = try appendFile(source, to: output)
+                if index < sources.index(before: sources.endIndex), !endsWithLineBreak {
+                    try output.write(contentsOf: Data([0x0A]))
+                }
+            }
+            logger?.info("file-operation", "merge.completed", metadata: [
+                "path": destination.path,
+                "count": "\(sources.count)"
+            ])
+            if trashSourcesAfterMerge {
+                try trash(sources)
+            }
+            return destination.standardizedFileURL
+        } catch {
+            if fileManager.fileExists(atPath: destination.path) {
+                try? fileManager.removeItem(at: destination)
+            }
+            throw error
+        }
+    }
+
     public func trash(
         _ sources: [URL],
         cancellation: FileOperationCancellation? = nil,
@@ -202,6 +298,58 @@ public struct FileOperationService {
             logger?.warning("file-operation", "trash.item.completed", metadata: ["source": source.path])
         }
         logger?.info("file-operation", "trash.completed", metadata: ["count": "\(sources.count)"])
+    }
+
+    private func moveSourcesByRename(
+        _ sources: [URL],
+        to destinationDirectory: URL,
+        options: FileOperationOptions,
+        cancellation: FileOperationCancellation?,
+        progress: ((FileOperationProgress) -> Void)?,
+        conflictResolver: ((FileOperationConflict) -> FileOperationConflictResolution)?
+    ) throws {
+        var completedItems = 0
+        progress?(FileOperationProgress(
+            completedBytes: 0,
+            totalBytes: 0,
+            completedItems: 0,
+            totalItems: sources.count,
+            currentItem: sources.first
+        ))
+
+        for source in sources {
+            if cancellation?.isCancelled == true {
+                throw FileOperationError.cancelled
+            }
+            let destination = try resolvedDestination(
+                for: source,
+                requestedDestination: destinationDirectory.appendingPathComponent(source.lastPathComponent),
+                options: options,
+                conflictResolver: conflictResolver
+            )
+            guard let destination else { continue }
+
+            do {
+                try fileManager.moveItem(at: source, to: destination)
+            } catch {
+                if completedItems == 0 {
+                    throw MoveRenameFallbackError(underlying: error)
+                }
+                throw error
+            }
+            completedItems += 1
+            progress?(FileOperationProgress(
+                completedBytes: 0,
+                totalBytes: 0,
+                completedItems: completedItems,
+                totalItems: sources.count,
+                currentItem: source
+            ))
+            logger?.info("file-operation", "move.item.renamed", metadata: [
+                "source": source.path,
+                "destination": destination.path
+            ])
+        }
     }
 
     @discardableResult
@@ -314,13 +462,13 @@ public struct FileOperationService {
         conflictResolver: ((FileOperationConflict) -> FileOperationConflictResolution)?
     ) throws -> URL? {
         let conflict = FileOperationConflict(source: source, destination: requestedDestination)
-        let resolution = Self.resolvedStrategy(
-            for: conflict,
-            options: options,
-            conflictResolver: conflictResolver
-        )
 
         guard source.standardizedFileURL != requestedDestination.standardizedFileURL else {
+            let resolution = Self.resolvedStrategy(
+                for: conflict,
+                options: options,
+                conflictResolver: conflictResolver
+            )
             switch resolution {
             case .overwrite:
                 throw FileOperationError.invalidDestination
@@ -338,6 +486,12 @@ public struct FileOperationService {
         guard fileManager.fileExists(atPath: requestedDestination.path) else {
             return requestedDestination
         }
+
+        let resolution = Self.resolvedStrategy(
+            for: conflict,
+            options: options,
+            conflictResolver: conflictResolver
+        )
 
         switch resolution {
         case .overwrite:
@@ -371,8 +525,35 @@ public struct FileOperationService {
         throw FileOperationError.invalidDestination
     }
 
+    public func trashContentsSummary(at trashDirectory: URL = .trashDirectory) throws -> TrashContentsSummary {
+        let resourceKeys: [URLResourceKey] = [
+            .isDirectoryKey,
+            .isRegularFileKey,
+            .isSymbolicLinkKey,
+            .fileSizeKey
+        ]
+        let trashedItems = try userVisibleTrashItems(
+            at: trashDirectory,
+            includingPropertiesForKeys: resourceKeys
+        )
+
+        var containedItemCount = 0
+        var totalByteCount: Int64 = 0
+        for item in trashedItems {
+            let summary = trashItemSummary(at: item, resourceKeys: resourceKeys)
+            containedItemCount += summary.itemCount
+            totalByteCount += summary.byteCount
+        }
+
+        return TrashContentsSummary(
+            topLevelItemCount: trashedItems.count,
+            containedItemCount: containedItemCount,
+            totalByteCount: totalByteCount
+        )
+    }
+
     public func emptyTrash(at trashDirectory: URL = .trashDirectory) throws -> Int {
-        let trashedItems = try fileManager.contentsOfDirectory(
+        let trashedItems = try userVisibleTrashItems(
             at: trashDirectory,
             includingPropertiesForKeys: nil
         )
@@ -392,6 +573,57 @@ public struct FileOperationService {
             "count": "\(trashedItems.count)"
         ])
         return trashedItems.count
+    }
+
+    private func userVisibleTrashItems(
+        at trashDirectory: URL,
+        includingPropertiesForKeys keys: [URLResourceKey]?
+    ) throws -> [URL] {
+        try fileManager.contentsOfDirectory(
+            at: trashDirectory,
+            includingPropertiesForKeys: keys
+        )
+        .filter { !Self.isTrashMetadataItem($0) }
+    }
+
+    private static func isTrashMetadataItem(_ url: URL) -> Bool {
+        switch url.lastPathComponent {
+        case ".DS_Store", ".localized":
+            true
+        default:
+            false
+        }
+    }
+
+    private func trashItemSummary(at url: URL, resourceKeys: [URLResourceKey]) -> (itemCount: Int, byteCount: Int64) {
+        var itemCount = 1
+        var byteCount = removableFileSize(at: url)
+        let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        guard values?.isDirectory == true, values?.isSymbolicLink != true else {
+            return (itemCount, byteCount)
+        }
+
+        guard let enumerator = fileManager.enumerator(
+            at: url,
+            includingPropertiesForKeys: resourceKeys,
+            errorHandler: { _, _ in true }
+        ) else {
+            return (itemCount, byteCount)
+        }
+
+        for case let child as URL in enumerator {
+            itemCount += 1
+            byteCount += removableFileSize(at: child)
+        }
+        return (itemCount, byteCount)
+    }
+
+    private func removableFileSize(at url: URL) -> Int64 {
+        guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]),
+              values.isRegularFile == true || values.isSymbolicLink == true else {
+            return 0
+        }
+        return Int64(values.fileSize ?? 0)
     }
 
     private func uniqueDestination(for name: String, in directory: URL) -> URL {
@@ -443,6 +675,26 @@ public struct FileOperationService {
             destination = directory.appendingPathComponent(".dualfinder-rename-\(UUID().uuidString).tmp")
         } while fileManager.fileExists(atPath: destination.path)
         return destination
+    }
+
+    private func appendFile(_ source: URL, to output: FileHandle) throws -> Bool {
+        let input = try FileHandle(forReadingFrom: source)
+        defer { try? input.close() }
+
+        var lastChunk = Data()
+        while true {
+            guard let chunk = try input.read(upToCount: 64 * 1024), !chunk.isEmpty else {
+                break
+            }
+            lastChunk = chunk
+            try output.write(contentsOf: chunk)
+        }
+        return endsWithLineBreak(lastChunk)
+    }
+
+    private func endsWithLineBreak(_ data: Data) -> Bool {
+        guard let last = data.last else { return true }
+        return last == 0x0A || last == 0x0D
     }
 
     private func rollback(_ staged: [(temporary: URL, destination: URL, original: URL)]) {
@@ -552,6 +804,10 @@ public struct FileOperationService {
     private struct CopiedRoot {
         let source: URL
         let destination: URL
+    }
+
+    private struct MoveRenameFallbackError: Error {
+        let underlying: Error
     }
 
     public static func largerWinsResolution(for conflict: FileOperationConflict) -> FileOperationConflictResolution {

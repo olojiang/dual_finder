@@ -42,6 +42,8 @@ struct FilePaneView: View {
     @State private var pathText = ""
     @State private var isFileSearchPresented = false
     @State private var fileSearchQuery = ""
+    @State private var fileSearchAppliedQuery = ""
+    @State private var fileSearchDebounceWorkItem: DispatchWorkItem?
     @State private var isDropTargeted = false
     @State private var terminalResizeStartHeight: CGFloat?
     @State private var terminalResizeAccumulatedDelta: CGFloat = 0
@@ -49,8 +51,12 @@ struct FilePaneView: View {
     @State private var isSimilarFileNavigatorEnabled = false
     @State private var similarFileGroupIndex = 0
     @State private var similarFileGroups: [SimilarFileNameGroup] = []
+    @State private var similarReviewVisibleItems: [FileItem] = []
+    @State private var similarFileGroupMarkersByURL: [URL: SimilarFileGroupMarker] = [:]
+    @State private var similarFileGroupIndexByURL: [URL: Int] = [:]
     @State private var handledSimilarFileGroupIDs: Set<String> = []
     @State private var visuallyDeletedSimilarFileURLs: Set<URL> = []
+    @State private var fileListKeyboardAnchorURL: URL?
     @FocusState private var isFileListFocused: Bool
     @FocusState private var isPathFieldFocused: Bool
     @FocusState private var isFileSearchFocused: Bool
@@ -95,7 +101,9 @@ struct FilePaneView: View {
         }
         .onChange(of: model.pane(for: side).selectedURL) { _, url in
             if !isEditingPath {
-                pathText = url.path
+                pathText = model.isAndroidPane(side)
+                    ? (AndroidFileURL.parse(url)?.path ?? "/sdcard")
+                    : url.path
             }
             resetSimilarFileNavigator()
             dismissFileSearch(restoreFocus: false)
@@ -106,6 +114,10 @@ struct FilePaneView: View {
     }
 
     private func refreshFreeSpace() {
+        guard !model.isAndroidPane(side) else {
+            freeSpaceCapacity = nil
+            return
+        }
         let url = model.pane(for: side).selectedURL
         freeSpaceCapacity = (try? FileSystemService().availableCapacity(at: url)) ?? nil
     }
@@ -131,7 +143,18 @@ struct FilePaneView: View {
             IconButton(systemName: "folder.badge.plus", help: "Choose folder") {
                 model.chooseFolder(for: side)
             }
+            androidViewMenu
             pathControl
+            Button {
+                model.setEncodingColumnVisible(!model.isEncodingColumnVisible)
+            } label: {
+                Image(systemName: "textformat")
+                    .frame(width: 22, height: 22)
+                    .foregroundStyle(model.isEncodingColumnVisible ? Color.accentColor : Color.primary)
+            }
+            .buttonStyle(.borderless)
+            .help(model.isEncodingColumnVisible ? "Hide encoding column" : "Show encoding column")
+            .accessibilityLabel(model.isEncodingColumnVisible ? "Hide encoding column" : "Show encoding column")
             IconButton(systemName: "plus.square.on.square", help: "New tab") {
                 model.addTab(on: side)
             }
@@ -144,9 +167,75 @@ struct FilePaneView: View {
             ) {
                 terminalModel.toggle(currentDirectory: terminalDirectory)
             }
+            .disabled(model.isAndroidPane(side))
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
+    }
+
+    private var androidViewMenu: some View {
+        Menu {
+            Button("Local Files") {
+                model.switchPaneToLocal(side)
+            }
+            .disabled(!model.isAndroidPane(side))
+
+            Divider()
+
+            Button("Use First Connected Android Device") {
+                model.switchPaneToAndroid(side)
+            }
+
+            Button("Refresh Android Devices") {
+                model.refreshAndroidDevices()
+            }
+
+            if !model.androidDevices.isEmpty {
+                Divider()
+            }
+
+            ForEach(model.androidDevices) { device in
+                Button(androidDeviceTitle(device)) {
+                    model.switchPaneToAndroid(side, deviceSerial: device.serial)
+                }
+                .disabled(device.state != .device)
+            }
+        } label: {
+            Image(systemName: model.isAndroidPane(side) ? "iphone.gen3.radiowaves.left.and.right" : "iphone.gen3")
+                .frame(width: 22, height: 22)
+                .foregroundStyle(model.isAndroidPane(side) ? Color.accentColor : Color.primary)
+        }
+        .simultaneousGesture(TapGesture().onEnded {
+            model.refreshAndroidStateForViewButton(on: side)
+        })
+        .menuStyle(.borderlessButton)
+        .help(model.isAndroidPane(side) ? "Android view" : "Switch to Android view")
+        .accessibilityLabel(model.isAndroidPane(side) ? "Android view" : "Switch to Android view")
+    }
+
+    private func androidDeviceTitle(_ device: AndroidDevice) -> String {
+        let label = device.model?.replacingOccurrences(of: "_", with: " ") ?? device.serial
+        if device.state == .device {
+            return label == device.serial ? label : "\(label) (\(device.serial))"
+        }
+        return "\(label) - \(androidStateTitle(device.state))"
+    }
+
+    private func androidStateTitle(_ state: AndroidDeviceState) -> String {
+        switch state {
+        case .device:
+            return "connected"
+        case .unauthorized:
+            return "unauthorized"
+        case .offline:
+            return "offline"
+        case .recovery:
+            return "recovery"
+        case .sideload:
+            return "sideload"
+        case .unknown(let value):
+            return value
+        }
     }
 
     @ViewBuilder
@@ -166,7 +255,7 @@ struct FilePaneView: View {
                     isPathFieldFocused = true
                 }
         } else {
-            Text(model.pane(for: side).selectedURL.path)
+            Text(model.displayPath(for: side))
                 .font(.system(.caption, design: .monospaced))
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -187,7 +276,7 @@ struct FilePaneView: View {
                     } label: {
                         HStack(spacing: 4) {
                             Image(systemName: "folder")
-                            Text(tab.url.lastPathComponent.isEmpty ? tab.url.path : tab.url.lastPathComponent)
+                            Text(tabTitle(for: tab.url))
                                 .lineLimit(1)
                         }
                         .font(.caption)
@@ -197,7 +286,7 @@ struct FilePaneView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 6))
                     }
                     .buttonStyle(.plain)
-                    .help(tab.url.path)
+                    .help(tabHelp(for: tab.url))
                     .contextMenu {
                         pathAndTerminalContextMenuItems(for: Set([tab.url]), selectTabID: tab.id)
                         favoriteContextMenuItems(for: Set([tab.url]))
@@ -209,6 +298,21 @@ struct FilePaneView: View {
         }
     }
 
+    private func tabTitle(for url: URL) -> String {
+        if let android = AndroidFileURL.parse(url) {
+            let name = android.path == "/" ? "/" : (android.path as NSString).lastPathComponent
+            return name.isEmpty ? android.deviceSerial : name
+        }
+        return url.lastPathComponent.isEmpty ? url.path : url.lastPathComponent
+    }
+
+    private func tabHelp(for url: URL) -> String {
+        if let android = AndroidFileURL.parse(url) {
+            return "\(android.deviceSerial):\(android.path)"
+        }
+        return url.path
+    }
+
     @ViewBuilder
     private func finderStyleContextMenuItems(for selection: Set<URL>) -> some View {
         let ordered = model.orderedContextMenuURLs(selection, on: side)
@@ -216,6 +320,18 @@ struct FilePaneView: View {
         if model.canCreateFolderWithSelection(selection) {
             Button(newFolderWithSelectionTitle(selection.count)) {
                 beginNewFolderWithSelection(ordered)
+            }
+        }
+
+        if model.canMergeFiles(in: selection, on: side) {
+            Button("Merge Files...") {
+                model.requestMergeFilesDialog(on: side, urls: ordered)
+            }
+        }
+
+        if model.canSplitFile(in: selection, on: side) {
+            Button("Split File...") {
+                model.requestSplitFileDialog(on: side, urls: ordered)
             }
         }
 
@@ -254,11 +370,13 @@ struct FilePaneView: View {
             }
             model.copyAbsolutePaths(urls, on: side)
         }
-        Button("Open in Ghostty or Terminal") {
-            if let selectTabID {
-                model.selectTab(selectTabID, on: side)
+        if !model.isAndroidPane(side) {
+            Button("Open in Ghostty or Terminal") {
+                if let selectTabID {
+                    model.selectTab(selectTabID, on: side)
+                }
+                model.openInTerminal(urls, on: side)
             }
-            model.openInTerminal(urls, on: side)
         }
     }
 
@@ -310,7 +428,7 @@ struct FilePaneView: View {
     private var fileList: some View {
         VStack(spacing: 0) {
             sortHeader
-            ZStack(alignment: .top) {
+            ZStack(alignment: .topTrailing) {
                 ScrollViewReader { scrollProxy in
                     List(selection: model.bindingForSelection(side: side)) {
                         ForEach(visibleItems) { item in
@@ -318,8 +436,9 @@ struct FilePaneView: View {
                                 item: item,
                                 displayName: displayName(for: item),
                                 columnWidths: model.columnWidths(for: side),
+                                showsEncoding: model.isEncodingColumnVisible,
                                 isRenaming: renamingURL == item.url,
-                                isVisuallyDeleted: visuallyDeletedSimilarFileURLs.contains(item.url),
+                                isVisuallyDeleted: isSimilarFileVisuallyDeleted(item.url),
                                 renameText: $renameText,
                                 commitRename: commitRename,
                                 cancelRename: cancelRename
@@ -355,6 +474,7 @@ struct FilePaneView: View {
                                 }
                         }
                     }
+                    .id(isSimilarFileNavigatorEnabled ? "similar-review" : "normal-file-list")
                     .focused($isFileListFocused)
                     .onChange(of: isFileListFocused) { _, isFocused in
                         model.logPaneFocusEvent("file-list.focus-state.changed", metadata: [
@@ -460,20 +580,48 @@ struct FilePaneView: View {
                             return .ignored
                         }
                     }
-                    .contextMenu(forSelectionType: URL.self) { selection in
-                        finderStyleContextMenuItems(for: selection)
-                        Divider()
-                        pathAndTerminalContextMenuItems(for: selection)
-                        archiveContextMenuItems(for: selection)
-                        favoriteContextMenuItems(for: selection)
-                        Divider()
-                        Button("Convert Text Encoding to UTF-8") {
-                            model.convertSelectedTextEncodingToUTF8(on: side)
+                    .onKeyPress(keys: [.upArrow, .downArrow], phases: .down) { keyPress in
+                        guard keyPress.modifiers.isEmpty,
+                              renamingURL == nil,
+                              !isFileSearchPresented,
+                              isSimilarFileNavigatorEnabled else {
+                            return .ignored
                         }
-                        Button("Batch Rename...") { model.requestBatchRenameDialog(on: side) }
+
+                        moveSimilarFileSelection(keyPress.key == .upArrow ? -1 : 1)
+                        return .handled
+                    }
+                    .background {
+                        LocalKeyDownMonitor(
+                            isEnabled: isSimilarFileNavigatorEnabled && isFileListFocused,
+                            handle: handleSimilarFileKeyDown
+                        )
+                        .frame(width: 0, height: 0)
+                    }
+                    .contextMenu(forSelectionType: URL.self) { selection in
+                        if model.isAndroidPane(side) {
+                            Button("Copy Path") {
+                                model.copyAbsolutePaths(selection, on: side)
+                            }
+                        } else {
+                            finderStyleContextMenuItems(for: selection)
+                            Divider()
+                            pathAndTerminalContextMenuItems(for: selection)
+                            archiveContextMenuItems(for: selection)
+                            favoriteContextMenuItems(for: selection)
+                            Divider()
+                            Button("Convert Text Encoding to UTF-8") {
+                                model.convertSelectedTextEncodingToUTF8(on: side)
+                            }
+                            Button("Extract Filename from Content") {
+                                model.extractFilenamesFromContent(on: side)
+                            }
+                            Button("Batch Rename...") { model.requestBatchRenameDialog(on: side) }
+                        }
                         Button("Copy to Other Pane") { model.copySelection(from: side) }
                         Button("Move to Other Pane") { model.moveSelection(from: side) }
-                        Button("Move to Trash", role: .destructive) {
+                        Button("Sync to Other Pane") { model.syncSelection(from: side) }
+                        Button(model.isAndroidPane(side) ? "Delete" : "Move to Trash", role: .destructive) {
                             trashSelectionFromPane(selectionHint: selection)
                         }
                     } primaryAction: { selection in
@@ -505,6 +653,7 @@ struct FilePaneView: View {
                             IconButton(systemName: "ruler", help: "Calculate selected folder size (Ctrl-Space)") {
                                 model.calculateSelectedFolderSizes(on: side)
                             }
+                            .disabled(model.isAndroidPane(side))
                             similarFileNavigatorControls(scrollProxy: scrollProxy)
                             Spacer()
                             footerStats
@@ -522,7 +671,7 @@ struct FilePaneView: View {
                         synchronizeSimilarFileNavigator(with: scrollProxy)
                     }
                     .onChange(of: fileSearchQuery) { _, _ in
-                        synchronizeFileSearchSelection()
+                        scheduleFileSearchSynchronization()
                     }
                     .onChange(of: isFileSearchPresented) { _, _ in
                         synchronizeFileSearchSelection()
@@ -542,8 +691,8 @@ struct FilePaneView: View {
 
                 if isFileSearchPresented {
                     fileSearchOverlay
-                        .padding(.top, 8)
-                        .padding(.horizontal, 24)
+                        .padding(.top, 6)
+                        .padding(.trailing, 88)
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }
             }
@@ -619,6 +768,9 @@ struct FilePaneView: View {
     }
 
     private var terminalDirectory: URL {
+        guard !model.isAndroidPane(side) else {
+            return FileManager.default.homeDirectoryForCurrentUser
+        }
         let url = model.pane(for: side).selectedURL
         var isDirectory: ObjCBool = false
         if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue {
@@ -629,13 +781,13 @@ struct FilePaneView: View {
 
     private var visibleItems: [FileItem] {
         if isSimilarFileNavigatorEnabled {
-            return similarReviewItems
+            return similarReviewVisibleItems
         }
 
         let allItems = model.items(for: side)
         guard isFileSearchPresented else { return allItems }
 
-        let query = fileSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        let query = fileSearchAppliedQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return allItems }
 
         return allItems.filter { item in
@@ -657,10 +809,7 @@ struct FilePaneView: View {
     }
 
     private var similarReviewItems: [FileItem] {
-        SimilarFileReviewState(
-            groups: similarFileGroups,
-            visuallyDeletedURLs: visuallyDeletedSimilarFileURLs
-        ).visibleItems
+        similarReviewVisibleItems
     }
 
     @ViewBuilder
@@ -675,14 +824,11 @@ struct FilePaneView: View {
 
     private func similarFileGroupMarker(for url: URL) -> SimilarFileGroupMarker? {
         guard isSimilarFileNavigatorEnabled else { return nil }
+        return similarFileGroupMarkersByURL[url]
+    }
 
-        for index in similarFileGroups.indices where similarFileGroups[index].items.contains(where: { $0.url == url }) {
-            return SimilarFileGroupMarker(
-                color: similarFileGroupColors[index % similarFileGroupColors.count],
-                isCurrent: index == similarFileGroupIndex
-            )
-        }
-        return nil
+    private func isSimilarFileVisuallyDeleted(_ url: URL) -> Bool {
+        isSimilarFileNavigatorEnabled && visuallyDeletedSimilarFileURLs.contains(url)
     }
 
     private func similarFileNavigatorControls(scrollProxy: ScrollViewProxy) -> some View {
@@ -823,6 +969,7 @@ struct FilePaneView: View {
             Color.clear.frame(width: FileListMetrics.iconColumnWidth)
             FileListColumnLayout(
                 columnWidths: model.columnWidths(for: side),
+                showsEncoding: model.isEncodingColumnVisible,
                 showsResizeHandles: true,
                 onResizeColumn: { column, delta in
                     model.adjustFileListColumn(column, for: side, by: delta)
@@ -837,6 +984,11 @@ struct FilePaneView: View {
                     SortHeaderButton(title: "Type", field: .type, rule: model.sortRule(for: side)) {
                         model.selectSortField(.type, for: side)
                     }
+                },
+                encoding: {
+                    Text("Encoding")
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 },
                 size: {
                     SortHeaderButton(title: "Size", field: .size, rule: model.sortRule(for: side)) {
@@ -857,6 +1009,15 @@ struct FilePaneView: View {
         .padding(.vertical, 2)
         .frame(height: 22)
         .background(.bar)
+        .contextMenu {
+            Toggle(
+                "Show Encoding Column",
+                isOn: Binding(
+                    get: { model.isEncodingColumnVisible },
+                    set: { model.setEncodingColumnVisible($0) }
+                )
+            )
+        }
     }
 
     private func beginRenamingSelectedItem() -> Bool {
@@ -876,6 +1037,7 @@ struct FilePaneView: View {
         model.activatePane(side)
         if !isFileSearchPresented {
             fileSearchQuery = ""
+            fileSearchAppliedQuery = ""
             isFileSearchPresented = true
         }
 
@@ -891,6 +1053,7 @@ struct FilePaneView: View {
 
     private func beginFileSearchListSelection() {
         guard isFileSearchPresented else { return }
+        applyFileSearchQueryNow()
         synchronizeFileSearchSelection(preferFirstMatch: true)
         model.logFileSearchEvent("list-selection.begin", metadata: [
             "side": side.rawValue,
@@ -917,7 +1080,25 @@ struct FilePaneView: View {
         }
     }
 
+    private func scheduleFileSearchSynchronization() {
+        guard isFileSearchPresented else { return }
+        fileSearchDebounceWorkItem?.cancel()
+        let workItem = DispatchWorkItem {
+            fileSearchAppliedQuery = fileSearchQuery
+            synchronizeFileSearchSelection()
+        }
+        fileSearchDebounceWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: workItem)
+    }
+
+    private func applyFileSearchQueryNow() {
+        fileSearchDebounceWorkItem?.cancel()
+        fileSearchDebounceWorkItem = nil
+        fileSearchAppliedQuery = fileSearchQuery
+    }
+
     private func moveFileSearchSelection(_ delta: Int) {
+        applyFileSearchQueryNow()
         guard !visibleItems.isEmpty else { return }
 
         let currentSelection = model.pane(for: side).selectedItemURLs
@@ -945,8 +1126,11 @@ struct FilePaneView: View {
 
     private func dismissFileSearch(restoreFocus: Bool = true) {
         guard isFileSearchPresented else { return }
+        fileSearchDebounceWorkItem?.cancel()
+        fileSearchDebounceWorkItem = nil
         isFileSearchPresented = false
         fileSearchQuery = ""
+        fileSearchAppliedQuery = ""
         isFileSearchFocused = false
         model.logFileSearchEvent("dismissed", metadata: [
             "side": side.rawValue
@@ -961,6 +1145,7 @@ struct FilePaneView: View {
             isSimilarFileNavigatorEnabled = false
             model.setSimilarFileReviewActive(false, on: side)
             model.statusMessage = "Similar-name review off"
+            clearSimilarFileReviewCachesAfterExit()
             return
         }
 
@@ -975,6 +1160,7 @@ struct FilePaneView: View {
         dismissFileSearch(restoreFocus: false)
         model.replaceSelection([], on: side, source: "similar-file-navigator")
         similarFileGroupIndex = min(similarFileGroupIndex, similarFileGroups.count - 1)
+        rebuildSimilarFileReviewCaches()
         selectSimilarFileGroup(similarFileGroups[similarFileGroupIndex], with: scrollProxy)
     }
 
@@ -987,6 +1173,7 @@ struct FilePaneView: View {
 
         let nextIndex = (similarFileGroupIndex + delta + groups.count) % groups.count
         similarFileGroupIndex = nextIndex
+        rebuildSimilarFileReviewCaches()
         selectSimilarFileGroup(groups[nextIndex], with: scrollProxy)
     }
 
@@ -998,6 +1185,7 @@ struct FilePaneView: View {
         let searchOrder = Array((similarFileGroupIndex + 1)..<groups.count) + Array(0...similarFileGroupIndex)
         if let nextUnhandledIndex = searchOrder.first(where: { !handledSimilarFileGroupIDs.contains(groups[$0].id) }) {
             similarFileGroupIndex = nextUnhandledIndex
+            rebuildSimilarFileReviewCaches()
             selectSimilarFileGroup(groups[nextUnhandledIndex], with: scrollProxy)
         } else {
             model.statusMessage = "All similar-name groups in this folder are marked handled"
@@ -1047,6 +1235,9 @@ struct FilePaneView: View {
     private func synchronizeSimilarFileNavigator(with scrollProxy: ScrollViewProxy) {
         guard isSimilarFileNavigatorEnabled else {
             similarFileGroups = []
+            similarReviewVisibleItems = []
+            similarFileGroupMarkersByURL = [:]
+            similarFileGroupIndexByURL = [:]
             similarFileGroupIndex = 0
             return
         }
@@ -1064,6 +1255,7 @@ struct FilePaneView: View {
         }
 
         similarFileGroupIndex = min(similarFileGroupIndex, groups.count - 1)
+        rebuildSimilarFileReviewCaches()
         selectSimilarFileGroup(groups[similarFileGroupIndex], with: scrollProxy)
     }
 
@@ -1072,21 +1264,63 @@ struct FilePaneView: View {
         model.setSimilarFileReviewActive(false, on: side)
         similarFileGroupIndex = 0
         similarFileGroups = []
+        similarReviewVisibleItems = []
+        similarFileGroupMarkersByURL = [:]
+        similarFileGroupIndexByURL = [:]
         handledSimilarFileGroupIDs.removeAll()
         visuallyDeletedSimilarFileURLs.removeAll()
+        fileListKeyboardAnchorURL = nil
+    }
+
+    private func clearSimilarFileReviewCachesAfterExit() {
+        DispatchQueue.main.async {
+            guard !isSimilarFileNavigatorEnabled else { return }
+            similarFileGroups = []
+            similarReviewVisibleItems = []
+            similarFileGroupMarkersByURL = [:]
+            similarFileGroupIndexByURL = [:]
+        }
     }
 
     private func refreshSimilarFileGroups() {
+        let startedAt = Date()
         model.logSimilarFileReviewEvent("groups.refresh.started", metadata: [
             "side": side.rawValue,
             "itemCount": "\(model.items(for: side).count)"
         ])
         similarFileGroups = SimilarFileNameDetector.groups(in: model.items(for: side))
+        rebuildSimilarFileReviewCaches()
+        let durationMs = Int(Date().timeIntervalSince(startedAt) * 1_000)
         model.logSimilarFileReviewEvent("groups.refresh.finished", metadata: [
             "side": side.rawValue,
             "groupCount": "\(similarFileGroups.count)",
-            "visibleCount": "\(similarFileGroups.flatMap(\.items).count)"
+            "visibleCount": "\(similarReviewVisibleItems.count)",
+            "durationMs": "\(durationMs)"
         ])
+    }
+
+    private func rebuildSimilarFileReviewCaches() {
+        similarReviewVisibleItems = similarFileGroups.flatMap(\.items)
+
+        let currentIndex = similarFileGroups.indices.contains(similarFileGroupIndex) ? similarFileGroupIndex : nil
+        var markersByURL: [URL: SimilarFileGroupMarker] = [:]
+        var indexesByURL: [URL: Int] = [:]
+        markersByURL.reserveCapacity(similarReviewVisibleItems.count)
+        indexesByURL.reserveCapacity(similarReviewVisibleItems.count)
+
+        for index in similarFileGroups.indices {
+            let marker = SimilarFileGroupMarker(
+                color: similarFileGroupColors[index % similarFileGroupColors.count],
+                isCurrent: index == currentIndex
+            )
+            for item in similarFileGroups[index].items {
+                markersByURL[item.url] = marker
+                indexesByURL[item.url] = index
+            }
+        }
+
+        similarFileGroupMarkersByURL = markersByURL
+        similarFileGroupIndexByURL = indexesByURL
     }
 
     private func reconcileVisuallyDeletedSimilarFiles() {
@@ -1105,6 +1339,7 @@ struct FilePaneView: View {
 
     private func selectSimilarFileGroup(_ group: SimilarFileNameGroup, with scrollProxy: ScrollViewProxy) {
         if let firstURL = group.items.first?.url {
+            fileListKeyboardAnchorURL = firstURL
             pendingRevealURL = firstURL
             DispatchQueue.main.async {
                 withAnimation(.easeInOut(duration: 0.18)) {
@@ -1124,6 +1359,7 @@ struct FilePaneView: View {
         let urls = Set(items.map(\.url))
         model.replaceSelection(urls, on: side, source: "similar-file-navigator")
         if let firstURL = items.first?.url {
+            fileListKeyboardAnchorURL = firstURL
             pendingRevealURL = firstURL
             DispatchQueue.main.async {
                 withAnimation(.easeInOut(duration: 0.18)) {
@@ -1135,10 +1371,74 @@ struct FilePaneView: View {
         restoreFileListFocus()
     }
 
+    private func moveSimilarFileSelection(_ delta: Int) {
+        let orderedURLs = similarReviewItems.map(\.url)
+        let currentSelection = model.pane(for: side).selectedItemURLs
+        guard let replacementSelection = FileKeyboardSelectionNavigator.selectionAfterMove(
+            anchorURL: fileListKeyboardAnchorURL,
+            currentSelection: currentSelection,
+            orderedURLs: orderedURLs,
+            unavailableURLs: visuallyDeletedSimilarFileURLs,
+            delta: delta
+        ) else {
+            model.logSimilarFileReviewEvent("keyboard-move.ignored", metadata: [
+                "side": side.rawValue,
+                "delta": "\(delta)",
+                "anchorPath": fileListKeyboardAnchorURL?.path ?? "",
+                "selectionCount": "\(currentSelection.count)"
+            ])
+            return
+        }
+
+        guard let nextURL = replacementSelection.first else { return }
+        fileListKeyboardAnchorURL = nextURL
+        updateSimilarFileGroupIndex(containing: nextURL)
+        pendingRevealURL = nextURL
+        model.replaceSelection(replacementSelection, on: side, source: "similar-file-review.keyboard")
+        model.logSimilarFileReviewEvent("keyboard-move.applied", metadata: [
+            "side": side.rawValue,
+            "delta": "\(delta)",
+            "path": nextURL.path
+        ])
+        restoreFileListFocus()
+    }
+
+    private func updateSimilarFileGroupIndex(containing url: URL) {
+        guard let index = similarFileGroupIndexByURL[url] else {
+            return
+        }
+        guard similarFileGroupIndex != index else { return }
+        similarFileGroupIndex = index
+        rebuildSimilarFileReviewCaches()
+    }
+
+    private func handleSimilarFileKeyDown(_ event: NSEvent) -> Bool {
+        guard isSimilarFileNavigatorEnabled,
+              isFileListFocused,
+              renamingURL == nil,
+              !isFileSearchPresented,
+              event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty else {
+            return false
+        }
+
+        switch event.keyCode {
+        case 126:
+            moveSimilarFileSelection(-1)
+            return true
+        case 125:
+            moveSimilarFileSelection(1)
+            return true
+        default:
+            return false
+        }
+    }
+
     private func dismissPathEditingForFileSearch() {
         guard isEditingPath else { return }
         isEditingPath = false
-        pathText = model.pane(for: side).selectedURL.path
+        pathText = model.isAndroidPane(side)
+            ? (AndroidFileURL.parse(model.pane(for: side).selectedURL)?.path ?? "/sdcard")
+            : model.pane(for: side).selectedURL.path
         isPathFieldFocused = false
     }
 
@@ -1262,13 +1562,17 @@ struct FilePaneView: View {
         }
 
         isEditingPath = false
-        pathText = model.pane(for: side).selectedURL.path
+        pathText = model.isAndroidPane(side)
+            ? (AndroidFileURL.parse(model.pane(for: side).selectedURL)?.path ?? "/sdcard")
+            : model.pane(for: side).selectedURL.path
         restoreFileListFocus()
     }
 
     private func cancelPathEditing() {
         isEditingPath = false
-        pathText = model.pane(for: side).selectedURL.path
+        pathText = model.isAndroidPane(side)
+            ? (AndroidFileURL.parse(model.pane(for: side).selectedURL)?.path ?? "/sdcard")
+            : model.pane(for: side).selectedURL.path
         restoreFileListFocus()
     }
 
@@ -1281,6 +1585,10 @@ struct FilePaneView: View {
     private func selectItemFromRowMouseDown(_ url: URL, modifierFlags: NSEvent.ModifierFlags) {
         guard renamingURL == nil else { return }
 
+        fileListKeyboardAnchorURL = url
+        if isSimilarFileNavigatorEnabled {
+            updateSimilarFileGroupIndex(containing: url)
+        }
         isFileListFocused = true
         model.activatePane(side)
 
@@ -1298,6 +1606,10 @@ struct FilePaneView: View {
     private func selectItemFromRowMouseUp(_ url: URL, modifierFlags: NSEvent.ModifierFlags) {
         guard renamingURL == nil else { return }
 
+        fileListKeyboardAnchorURL = url
+        if isSimilarFileNavigatorEnabled {
+            updateSimilarFileGroupIndex(containing: url)
+        }
         applyRowSelection(
             FileRowSelectionReducer.selectionAfterMouseUp(
                 target: url,
@@ -1335,6 +1647,10 @@ struct FilePaneView: View {
         state.markVisuallyDeleted(selection)
         visuallyDeletedSimilarFileURLs = state.visuallyDeletedURLs
         let replacementSelection = state.replacementSelection(afterDeleting: selection)
+        fileListKeyboardAnchorURL = replacementSelection.first
+        if let replacementURL = replacementSelection.first {
+            updateSimilarFileGroupIndex(containing: replacementURL)
+        }
         model.replaceSelection(replacementSelection, on: side, source: "similar-file-review.visual-delete-replacement")
         model.logSimilarFileReviewEvent("visual-delete.marked", metadata: [
             "side": side.rawValue,
@@ -1590,6 +1906,61 @@ private struct RowMouseHandler: NSViewRepresentable {
     }
 }
 
+private struct LocalKeyDownMonitor: NSViewRepresentable {
+    let isEnabled: Bool
+    let handle: (NSEvent) -> Bool
+
+    func makeNSView(context: Context) -> KeyDownMonitorView {
+        let view = KeyDownMonitorView()
+        view.isEnabled = isEnabled
+        view.handle = handle
+        return view
+    }
+
+    func updateNSView(_ nsView: KeyDownMonitorView, context: Context) {
+        nsView.isEnabled = isEnabled
+        nsView.handle = handle
+    }
+
+    static func dismantleNSView(_ nsView: KeyDownMonitorView, coordinator: ()) {
+        nsView.stopMonitoring()
+    }
+
+    final class KeyDownMonitorView: NSView {
+        var isEnabled = false
+        var handle: ((NSEvent) -> Bool)?
+        private var monitor: Any?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if window == nil {
+                stopMonitoring()
+            } else {
+                startMonitoringIfNeeded()
+            }
+        }
+
+        func stopMonitoring() {
+            guard let monitor else { return }
+            NSEvent.removeMonitor(monitor)
+            self.monitor = nil
+        }
+
+        private func startMonitoringIfNeeded() {
+            guard monitor == nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self,
+                      self.isEnabled,
+                      self.window === event.window,
+                      self.handle?(event) == true else {
+                    return event
+                }
+                return nil
+            }
+        }
+    }
+}
+
 private final class FileDragPasteboardWriter: NSObject, NSPasteboardWriting {
     private static let fileURLType = NSPasteboard.PasteboardType("public.file-url")
     private static let urlType = NSPasteboard.PasteboardType("public.url")
@@ -1727,6 +2098,7 @@ private struct FileRow: View {
     let item: FileItem
     let displayName: String
     let columnWidths: FileListColumnWidths
+    let showsEncoding: Bool
     let isRenaming: Bool
     let isVisuallyDeleted: Bool
     @Binding var renameText: String
@@ -1739,9 +2111,17 @@ private struct FileRow: View {
                 .frame(width: FileListMetrics.iconColumnWidth)
             FileListColumnLayout(
                 columnWidths: columnWidths,
+                showsEncoding: showsEncoding,
                 name: { nameView },
                 type: {
                     Text(item.type)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                },
+                encoding: {
+                    Text(encodingText)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -1792,6 +2172,10 @@ private struct FileRow: View {
 
     private var sizeText: String {
         FileSizeText.format(item.size)
+    }
+
+    private var encodingText: String {
+        item.textEncoding ?? "--"
     }
 
     private var dateText: String {

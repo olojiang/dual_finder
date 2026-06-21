@@ -25,6 +25,7 @@ struct UILayoutPreferencesStoreTests {
         #expect(restored.rightColumnWidths == preferences.rightColumnWidths)
         #expect(restored.leftPaneFraction == preferences.leftPaneFraction)
         #expect(restored.isSidebarCollapsed)
+        #expect(!restored.isEncodingColumnVisible)
     }
 
     @Test("migrates legacy shared columnWidths to both panes")
@@ -47,6 +48,30 @@ struct UILayoutPreferencesStoreTests {
         #expect(restored.leftColumnWidths == expected)
         #expect(restored.rightColumnWidths == expected)
         #expect(restored.leftPaneFraction == 0.55)
+        #expect(!restored.isEncodingColumnVisible)
+    }
+
+    @Test("persists encoding column visibility and migrates missing encoding widths")
+    func persistsEncodingColumnPreferences() {
+        let legacyJSON = """
+        {
+          "leftColumnWidths": { "type": 130, "size": 95, "modified": 140 },
+          "rightColumnWidths": { "type": 120, "size": 85, "modified": 130 },
+          "leftPaneFraction": 0.55,
+          "isSidebarCollapsed": false,
+          "isEncodingColumnVisible": true
+        }
+        """
+        let suiteName = "UILayoutPreferencesStoreTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(Data(legacyJSON.utf8), forKey: "uiLayoutPreferences")
+
+        let restored = UILayoutPreferencesStore(defaults: defaults).load()
+
+        #expect(restored.isEncodingColumnVisible)
+        #expect(restored.leftColumnWidths.encoding == FileListColumnWidths.defaultEncodingWidth)
+        #expect(restored.rightColumnWidths.encoding == FileListColumnWidths.defaultEncodingWidth)
     }
 
     @Test("clamps invalid values on load and save")
@@ -86,9 +111,11 @@ struct UILayoutPreferencesStoreTests {
     func adjustsColumnWidths() {
         var widths = FileListColumnWidths.default
         widths.adjust(.type, by: 40)
+        widths.adjust(.encoding, by: 20)
         widths.adjust(.size, by: -20)
 
         #expect(widths.type == 152)
+        #expect(widths.encoding == 112)
         #expect(widths.size == 66)
     }
 
@@ -119,6 +146,8 @@ struct FileListColumnBoundaryTests {
     func resizedColumnMapping() {
         #expect(FileListColumnBoundary.afterName.resizedColumn == .type)
         #expect(FileListColumnBoundary.afterType.resizedColumn == .size)
+        #expect(FileListColumnBoundary.afterType.resizedColumn(showsEncoding: true) == .encoding)
+        #expect(FileListColumnBoundary.afterEncoding.resizedColumn(showsEncoding: true) == .size)
         #expect(FileListColumnBoundary.afterSize.resizedColumn == .modified)
     }
 

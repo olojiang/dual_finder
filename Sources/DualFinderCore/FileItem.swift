@@ -18,6 +18,7 @@ public struct FileItem: Identifiable, Hashable, Sendable {
     public let modifiedAt: Date?
     public let createdAt: Date?
     public let isHidden: Bool
+    public let textEncoding: String?
 
     public init(
         url: URL,
@@ -27,7 +28,8 @@ public struct FileItem: Identifiable, Hashable, Sendable {
         size: Int64?,
         modifiedAt: Date?,
         createdAt: Date? = nil,
-        isHidden: Bool
+        isHidden: Bool,
+        textEncoding: String? = nil
     ) {
         self.id = url
         self.url = url
@@ -38,9 +40,24 @@ public struct FileItem: Identifiable, Hashable, Sendable {
         self.modifiedAt = modifiedAt
         self.createdAt = createdAt
         self.isHidden = isHidden
+        self.textEncoding = textEncoding
     }
 
     public var isDirectoryLike: Bool {
         kind == .folder || kind == .package
+    }
+
+    public func withTextEncoding(_ textEncoding: String?) -> FileItem {
+        FileItem(
+            url: url,
+            name: name,
+            kind: kind,
+            type: type,
+            size: size,
+            modifiedAt: modifiedAt,
+            createdAt: createdAt,
+            isHidden: isHidden,
+            textEncoding: textEncoding
+        )
     }
 }

@@ -36,6 +36,37 @@ struct BatchRenameDialogRequest: Identifiable, Equatable {
     let side: PaneSide
 }
 
+struct MergeFilesDialogRequest: Identifiable, Equatable {
+    let id = UUID()
+    let side: PaneSide
+    let sources: [URL]
+    let suggestedName: String
+}
+
+struct SplitFileDialogRequest: Identifiable, Equatable {
+    let id = UUID()
+    let side: PaneSide
+    let preview: TextFileSplitPreview
+}
+
+struct EmptyTrashConfirmationRequest: Identifiable, Equatable {
+    let id = UUID()
+    let summary: TrashContentsSummary
+
+    var formattedTotalSize: String {
+        ByteCountFormatter.string(fromByteCount: summary.totalByteCount, countStyle: .file)
+    }
+
+    var message: String {
+        """
+        This will permanently delete \(summary.topLevelItemCount) item(s) from Trash.
+
+        Contained files/folders: \(summary.containedItemCount)
+        Total size: \(formattedTotalSize)
+        """
+    }
+}
+
 struct InlineRenameRequest: Equatable {
     let id = UUID()
     let side: PaneSide
@@ -51,8 +82,36 @@ enum FileClipboardOperation: String {
     case move
 }
 
+private enum AndroidPaneTransferError: LocalizedError {
+    case differentDevices
+
+    var errorDescription: String? {
+        switch self {
+        case .differentDevices:
+            "Android-to-Android transfer currently requires the same device."
+        }
+    }
+}
+
 private extension Notification.Name {
     static let pasteboardChanged = Notification.Name("NSPasteboardChangedNotification")
+}
+
+private final class TextEncodingScanCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        lock.unlock()
+    }
 }
 
 @MainActor
@@ -73,6 +132,9 @@ final class DualFinderViewModel: ObservableObject {
     @Published var similarFileDeletionMarkRequest: SimilarFileDeletionMarkRequest?
     @Published var folderBookmarkDialogRequest: FolderBookmarkDialogRequest?
     @Published var batchRenameDialogRequest: BatchRenameDialogRequest?
+    @Published var mergeFilesDialogRequest: MergeFilesDialogRequest?
+    @Published var splitFileDialogRequest: SplitFileDialogRequest?
+    @Published var emptyTrashConfirmationRequest: EmptyTrashConfirmationRequest?
     @Published var inlineRenameRequest: InlineRenameRequest?
     @Published private(set) var pasteboardRevision = 0
     @Published private(set) var fileOperationQueue: [QueuedFileOperation] = []
@@ -94,6 +156,7 @@ final class DualFinderViewModel: ObservableObject {
     @Published private(set) var directoryComparisonResults: [DirectoryComparisonEntry] = []
     @Published private(set) var globalSearchResults: [RecursiveFileSearchResult] = []
     @Published private(set) var isGlobalSearchRunning = false
+    @Published private(set) var androidDevices: [AndroidDevice] = []
     @Published var isInlineRenaming = false
     @Published private(set) var folderBookmarkRevision = 0
     @Published var showHiddenFiles = false {
@@ -107,6 +170,8 @@ final class DualFinderViewModel: ObservableObject {
     private let paneSessionStore: PaneSessionStore
     private let folderBookmarkStore: FolderBookmarkStore
     private let folderSizeCache: FolderSizeCache
+    private let textEncodingCache: TextEncodingConversionCache
+    private let androidFileService: AndroidFileService
     private let uiLayoutPreferencesStore: UILayoutPreferencesStore
     private let permissionGuide: PrivacyPermissionGuide
     private let quickLookPreviewService: QuickLookPreviewService
@@ -118,8 +183,11 @@ final class DualFinderViewModel: ObservableObject {
     private var similarFileReviewActiveSides: Set<PaneSide> = []
     private var leftFlatViewReturnSelection: Set<URL> = []
     private var rightFlatViewReturnSelection: Set<URL> = []
+    private var androidPaneDevices: [PaneSide: String] = [:]
+    private var localPaneReturnURLs: [PaneSide: URL] = [:]
     private var globalSearchCancellation: FileOperationCancellation?
     private var archiveCancellation: FileOperationCancellation?
+    private var textEncodingScanCancellations: [PaneSide: TextEncodingScanCancellation] = [:]
     private var isArchiveOperationRunning = false
     @Published private var isTextEncodingConversionRunning = false
 
@@ -130,7 +198,9 @@ final class DualFinderViewModel: ObservableObject {
         paneSessionStore: PaneSessionStore = PaneSessionStore(),
         folderBookmarkStore: FolderBookmarkStore = FolderBookmarkStore(),
         folderSizeCache: FolderSizeCache = FolderSizeCache(),
+        textEncodingCache: TextEncodingConversionCache = TextEncodingConversionCache(),
         uiLayoutPreferencesStore: UILayoutPreferencesStore = UILayoutPreferencesStore(),
+        androidFileService: AndroidFileService? = nil,
         permissionGuide: PrivacyPermissionGuide = PrivacyPermissionGuide(),
         quickLookPreviewService: QuickLookPreviewService = QuickLookPreviewService(),
         logger: AppLogging
@@ -140,6 +210,8 @@ final class DualFinderViewModel: ObservableObject {
         self.paneSessionStore = paneSessionStore
         self.folderBookmarkStore = folderBookmarkStore
         self.folderSizeCache = folderSizeCache
+        self.textEncodingCache = textEncodingCache
+        self.androidFileService = androidFileService ?? AndroidFileService(logger: logger)
         self.uiLayoutPreferencesStore = uiLayoutPreferencesStore
         self.permissionGuide = permissionGuide
         self.quickLookPreviewService = quickLookPreviewService
@@ -180,8 +252,39 @@ final class DualFinderViewModel: ObservableObject {
         flatViewRoot(for: side) != nil
     }
 
+    func isAndroidPane(_ side: PaneSide) -> Bool {
+        androidPaneDevices[side] != nil
+    }
+
+    func androidDeviceSerial(for side: PaneSide) -> String? {
+        androidPaneDevices[side]
+    }
+
+    func displayPath(for side: PaneSide) -> String {
+        if let android = AndroidFileURL.parse(pane(for: side).selectedURL) {
+            return "\(android.deviceSerial):\(android.path)"
+        }
+        return pane(for: side).selectedURL.path
+    }
+
     func columnWidths(for side: PaneSide) -> FileListColumnWidths {
         uiLayoutPreferences.columnWidths(for: side)
+    }
+
+    var isEncodingColumnVisible: Bool {
+        uiLayoutPreferences.isEncodingColumnVisible
+    }
+
+    func setEncodingColumnVisible(_ isVisible: Bool) {
+        guard uiLayoutPreferences.isEncodingColumnVisible != isVisible else { return }
+        var preferences = uiLayoutPreferences
+        preferences.isEncodingColumnVisible = isVisible
+        persistUILayoutPreferences(preferences)
+        if isVisible {
+            refreshAll()
+        } else {
+            cancelTextEncodingScans()
+        }
     }
 
     func adjustFileListColumn(_ column: FileListColumn, for side: PaneSide, by delta: CGFloat) {
@@ -234,7 +337,8 @@ final class DualFinderViewModel: ObservableObject {
     }
 
     var canCopyActiveSelection: Bool {
-        MenuActionAvailability.canCopyFiles(
+        guard !isAndroidPane(activePaneSide) else { return false }
+        return MenuActionAvailability.canCopyFiles(
             hasSelection: hasActiveSelection,
             isInlineRenaming: isInlineRenaming
         )
@@ -264,7 +368,7 @@ final class DualFinderViewModel: ObservableObject {
     }
 
     var canCopyAbsolutePathActiveSelection: Bool {
-        MenuActionAvailability.canCopyAbsolutePath(
+        return MenuActionAvailability.canCopyAbsolutePath(
             hasSelection: hasActiveSelection,
             isInlineRenaming: isInlineRenaming
         )
@@ -291,6 +395,13 @@ final class DualFinderViewModel: ObservableObject {
         )
     }
 
+    var canExtractFilenameFromContentActiveSelection: Bool {
+        MenuActionAvailability.canExtractFilenameFromContent(
+            hasSelection: hasActiveSelection,
+            isInlineRenaming: isInlineRenaming
+        )
+    }
+
     var canOpenActiveSelection: Bool {
         MenuActionAvailability.canOpenSelection(
             hasSelection: hasActiveSelection,
@@ -299,7 +410,8 @@ final class DualFinderViewModel: ObservableObject {
     }
 
     var canQuickLookActiveSelection: Bool {
-        MenuActionAvailability.canQuickLook(
+        guard !isAndroidPane(activePaneSide) else { return false }
+        return MenuActionAvailability.canQuickLook(
             hasSelection: hasActiveSelection,
             isInlineRenaming: isInlineRenaming
         )
@@ -346,14 +458,16 @@ final class DualFinderViewModel: ObservableObject {
     var canMoveFromRightPane: Bool { canCopyFromRightPane }
 
     var canOpenTerminalActiveSelection: Bool {
-        MenuActionAvailability.canOpenInTerminal(
+        guard !isAndroidPane(activePaneSide) else { return false }
+        return MenuActionAvailability.canOpenInTerminal(
             hasSelection: hasActiveSelection,
             isInlineRenaming: isInlineRenaming
         )
     }
 
     var canShareActiveSelection: Bool {
-        MenuActionAvailability.canShare(
+        guard !isAndroidPane(activePaneSide) else { return false }
+        return MenuActionAvailability.canShare(
             hasSelection: hasActiveSelection,
             isInlineRenaming: isInlineRenaming
         )
@@ -368,6 +482,7 @@ final class DualFinderViewModel: ObservableObject {
     }
 
     var canAddFavoriteFromActiveSelection: Bool {
+        guard !isAndroidPane(activePaneSide) else { return false }
         let side = activePaneSide
         let directories = selectedDirectoryURLs(
             in: pane(for: side).selectedItemURLs,
@@ -379,22 +494,33 @@ final class DualFinderViewModel: ObservableObject {
     }
 
     var canCompressActiveSelection: Bool {
+        guard !isAndroidPane(activePaneSide) else { return false }
         guard !isInlineRenaming, !isArchiveOperationRunning, hasActiveSelection else { return false }
         let urls = orderedSelection(pane(for: activePaneSide).selectedItemURLs, on: activePaneSide)
         return ArchiveService.canCompress(urls)
     }
 
     var canExtractActiveSelection: Bool {
+        guard !isAndroidPane(activePaneSide) else { return false }
         guard !isInlineRenaming, !isArchiveOperationRunning, hasActiveSelection else { return false }
         let urls = orderedSelection(pane(for: activePaneSide).selectedItemURLs, on: activePaneSide)
         return ArchiveService.hasExtractableArchives(urls)
     }
 
     var canConvertActiveSelectionToUTF8: Bool {
-        hasActiveSelection
+        guard !isAndroidPane(activePaneSide) else { return false }
+        return hasActiveSelection
             && !isInlineRenaming
             && !isArchiveOperationRunning
             && !isTextEncodingConversionRunning
+    }
+
+    var canMergeActiveSelection: Bool {
+        canMergeFiles(in: pane(for: activePaneSide).selectedItemURLs, on: activePaneSide)
+    }
+
+    var canSplitActiveSelection: Bool {
+        canSplitFile(in: pane(for: activePaneSide).selectedItemURLs, on: activePaneSide)
     }
 
     func selectAllItems(on side: PaneSide) {
@@ -536,6 +662,76 @@ final class DualFinderViewModel: ObservableObject {
         ])
     }
 
+    func refreshAndroidDevices() {
+        do {
+            androidDevices = try androidFileService.devices()
+            statusMessage = androidDevices.isEmpty
+                ? "No Android devices connected"
+                : "Android devices: \(androidDevices.count)"
+            logger.info("android", "devices.refreshed", metadata: [
+                "count": "\(androidDevices.count)"
+            ])
+        } catch {
+            reportOperationFailure("android.devices.failed", error: error)
+        }
+    }
+
+    func refreshAndroidStateForViewButton(on side: PaneSide) {
+        guard !isInlineRenaming else { return }
+        activatePane(side)
+        refreshAndroidDevices()
+        if isAndroidPane(side) {
+            refresh(side)
+        }
+    }
+
+    func switchPaneToAndroid(_ side: PaneSide, deviceSerial requestedSerial: String? = nil) {
+        guard !isInlineRenaming else { return }
+        activatePane(side)
+
+        let serial: String
+        if let requestedSerial {
+            serial = requestedSerial
+        } else {
+            refreshAndroidDevices()
+            guard let connected = androidDevices.first(where: { $0.state == .device }) else {
+                statusMessage = "No available Android device"
+                return
+            }
+            serial = connected.serial
+        }
+
+        if !isAndroidPane(side) {
+            localPaneReturnURLs[side] = pane(for: side).selectedURL
+        }
+        androidPaneDevices[side] = serial
+        clearFlatViewState(on: side)
+        let url = AndroidFileURL.url(deviceSerial: serial, path: "/sdcard")
+        mutatePane(side) { pane in
+            pane.navigateSelectedTab(to: url)
+            pane.selectedItemURLs.removeAll()
+        }
+        refresh(side)
+        logger.info("android", "pane.enabled", metadata: [
+            "side": side.rawValue,
+            "device": serial
+        ])
+    }
+
+    func switchPaneToLocal(_ side: PaneSide) {
+        guard isAndroidPane(side) else { return }
+        let restoredURL = localPaneReturnURLs[side] ?? FileManager.default.homeDirectoryForCurrentUser
+        androidPaneDevices[side] = nil
+        localPaneReturnURLs[side] = nil
+        mutatePane(side) { pane in
+            pane.navigateSelectedTab(to: restoredURL)
+            pane.selectedItemURLs.removeAll()
+        }
+        persistPaneSession()
+        refresh(side)
+        statusMessage = "Local view: \(restoredURL.path)"
+    }
+
     func toggleFlatView(on side: PaneSide) {
         guard !isInlineRenaming else { return }
         activatePane(side)
@@ -569,6 +765,52 @@ final class DualFinderViewModel: ObservableObject {
             "side": side.rawValue,
             "count": "\(selectedItems.count)"
         ])
+    }
+
+    func requestMergeFilesDialog(on side: PaneSide, urls: [URL] = []) {
+        guard !isInlineRenaming, !isAndroidPane(side) else { return }
+        let sources = urls.isEmpty
+            ? mergeableFileURLs(in: pane(for: side).selectedItemURLs, on: side)
+            : mergeableFileURLs(urls, on: side)
+        guard sources.count >= 2 else {
+            statusMessage = "Select at least two files to merge"
+            return
+        }
+
+        activatePane(side)
+        mergeFilesDialogRequest = MergeFilesDialogRequest(
+            side: side,
+            sources: sources,
+            suggestedName: FileMergeNaming.suggestedName(for: sources)
+        )
+        logger.info("file-operation", "merge.dialog.requested", metadata: [
+            "side": side.rawValue,
+            "count": "\(sources.count)"
+        ])
+    }
+
+    func requestSplitFileDialog(on side: PaneSide, urls: [URL] = []) {
+        guard !isInlineRenaming, !isAndroidPane(side) else { return }
+        let selected = urls.isEmpty ? orderedSelection(pane(for: side).selectedItemURLs, on: side) : urls
+        guard canSplitFile(selected, on: side), let source = selected.first else {
+            statusMessage = "Select one TXT file to split"
+            return
+        }
+
+        do {
+            let preview = try TextFileSplitService().previewSplit(for: source)
+            activatePane(side)
+            splitFileDialogRequest = SplitFileDialogRequest(side: side, preview: preview)
+            statusMessage = "Split preview: \(preview.chapters.count) file(s)"
+            logger.info("file-operation", "split-file.dialog.requested", metadata: [
+                "side": side.rawValue,
+                "source": source.path,
+                "count": "\(preview.chapters.count)",
+                "encoding": preview.detectedEncoding
+            ])
+        } catch {
+            reportOperationFailure("split-file.preview.failed", error: error)
+        }
     }
 
     func requestDirectoryComparison() {
@@ -635,6 +877,11 @@ final class DualFinderViewModel: ObservableObject {
 
     func canCreateFolderWithSelection(_ selection: Set<URL>) -> Bool {
         ContextMenuSelection.canCreateFolderWithSelection(selection)
+    }
+
+    func canMergeFiles(in selection: Set<URL>, on side: PaneSide) -> Bool {
+        guard !isAndroidPane(side), !isInlineRenaming else { return false }
+        return mergeableFileURLs(in: selection, on: side).count >= 2
     }
 
     func shareItems(_ urls: [URL], on side: PaneSide) {
@@ -880,6 +1127,11 @@ final class DualFinderViewModel: ObservableObject {
     }
 
     func refresh(_ side: PaneSide) {
+        if isAndroidPane(side) {
+            refreshAndroidDirectory(on: side)
+            return
+        }
+
         if let flatRoot = flatViewRoot(for: side) {
             refreshFlatView(root: flatRoot, on: side)
             return
@@ -892,9 +1144,12 @@ final class DualFinderViewModel: ObservableObject {
                 of: currentURL,
                 includeHidden: showHiddenFiles,
                 sortRule: rule,
-                folderSizeCache: folderSizeCache
+                folderSizeCache: folderSizeCache,
+                textEncodingCache: textEncodingCache,
+                includeTextEncoding: uiLayoutPreferences.isEncodingColumnVisible
             )
             setItems(nextItems, for: side)
+            startTextEncodingScanIfNeeded(for: side, items: nextItems)
             statusMessage = "\(currentURL.path) - \(nextItems.count) items"
             logger.info("navigation", "directory.refreshed", metadata: [
                 "side": side.rawValue,
@@ -926,7 +1181,62 @@ final class DualFinderViewModel: ObservableObject {
         refresh(side)
     }
 
+    private func refreshAndroidDirectory(on side: PaneSide) {
+        guard let parsed = AndroidFileURL.parse(pane(for: side).selectedURL) else {
+            setItems([], for: side)
+            statusMessage = "Android path is invalid"
+            return
+        }
+
+        do {
+            let nextItems = try androidFileService.contents(
+                of: parsed.path,
+                on: parsed.deviceSerial,
+                includeHidden: showHiddenFiles
+            )
+            setItems(nextItems, for: side)
+            statusMessage = "\(parsed.deviceSerial):\(parsed.path) - \(nextItems.count) items"
+            logger.info("android", "directory.refreshed", metadata: [
+                "side": side.rawValue,
+                "device": parsed.deviceSerial,
+                "path": parsed.path,
+                "count": "\(nextItems.count)"
+            ])
+        } catch {
+            setItems([], for: side)
+            reportOperationFailure("android.refresh.failed", error: error)
+        }
+    }
+
+    private func navigateAndroid(_ side: PaneSide, to url: URL, selecting selection: URL? = nil) {
+        guard let parsed = AndroidFileURL.parse(url) else {
+            statusMessage = "Invalid Android path"
+            return
+        }
+
+        if let item = items(for: side).first(where: { $0.url == url }), !item.isDirectoryLike {
+            setSelection([url], for: side)
+            statusMessage = "Selected \(item.name)"
+            return
+        }
+
+        clearFlatViewState(on: side)
+        androidPaneDevices[side] = parsed.deviceSerial
+        mutatePane(side) { $0.navigateSelectedTab(to: url, selecting: selection) }
+        logger.info("android", "directory.changed", metadata: [
+            "side": side.rawValue,
+            "device": parsed.deviceSerial,
+            "path": parsed.path
+        ])
+        refresh(side)
+    }
+
     func navigate(_ side: PaneSide, to url: URL, selecting selection: URL? = nil) {
+        if isAndroidPane(side) || url.scheme == AndroidFileURL.scheme {
+            navigateAndroid(side, to: url, selecting: selection)
+            return
+        }
+
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else {
             openInFinder(url)
@@ -950,9 +1260,12 @@ final class DualFinderViewModel: ObservableObject {
             return
         }
 
+        reconcilePaneModeAfterHistoryNavigation(to: url, on: side)
         clearFlatViewState(on: side)
-        folderBookmarkStore.recordRecentFolder(url)
-        persistPaneSession()
+        if url.scheme != AndroidFileURL.scheme {
+            folderBookmarkStore.recordRecentFolder(url)
+            persistPaneSession()
+        }
         logger.info("navigation", "history.back", metadata: [
             "side": side.rawValue,
             "path": url.path
@@ -967,9 +1280,12 @@ final class DualFinderViewModel: ObservableObject {
             return
         }
 
+        reconcilePaneModeAfterHistoryNavigation(to: url, on: side)
         clearFlatViewState(on: side)
-        folderBookmarkStore.recordRecentFolder(url)
-        persistPaneSession()
+        if url.scheme != AndroidFileURL.scheme {
+            folderBookmarkStore.recordRecentFolder(url)
+            persistPaneSession()
+        }
         logger.info("navigation", "history.forward", metadata: [
             "side": side.rawValue,
             "path": url.path
@@ -983,6 +1299,16 @@ final class DualFinderViewModel: ObservableObject {
         guard !trimmedPath.isEmpty else {
             statusMessage = "Enter a folder path"
             return false
+        }
+
+        if isAndroidPane(side) {
+            guard let serial = androidDeviceSerial(for: side) else { return false }
+            let currentPath = AndroidFileURL.parse(pane(for: side).selectedURL)?.path ?? "/sdcard"
+            let nextPath = trimmedPath.hasPrefix("/")
+                ? AndroidFileURL.normalizedPath(trimmedPath)
+                : AndroidFileURL.appending(trimmedPath, to: currentPath)
+            navigate(side, to: AndroidFileURL.url(deviceSerial: serial, path: nextPath))
+            return true
         }
 
         let url = folderURL(fromPathText: trimmedPath, relativeTo: pane(for: side).selectedURL)
@@ -1010,6 +1336,13 @@ final class DualFinderViewModel: ObservableObject {
     }
 
     func navigateUp(_ side: PaneSide) {
+        if isAndroidPane(side) {
+            guard let parsed = AndroidFileURL.parse(pane(for: side).selectedURL),
+                  let parent = AndroidFileURL.parent(of: parsed.path) else { return }
+            navigate(side, to: AndroidFileURL.url(deviceSerial: parsed.deviceSerial, path: parent))
+            return
+        }
+
         let currentURL = pane(for: side).selectedURL
         guard let parent = fileSystem.parent(of: currentURL) else { return }
         navigate(side, to: parent, selecting: currentURL)
@@ -1024,6 +1357,11 @@ final class DualFinderViewModel: ObservableObject {
     }
 
     func openSelectionWithDefaultApp(on side: PaneSide) {
+        guard !isAndroidPane(side) else {
+            statusMessage = "Android files cannot be opened with local apps"
+            return
+        }
+
         let selected = pane(for: side).selectedItemURLs
         let urls = items(for: side).filter { selected.contains($0.url) }.map(\.url)
         guard !urls.isEmpty else { return }
@@ -1042,7 +1380,12 @@ final class DualFinderViewModel: ObservableObject {
         let orderedURLs = orderedSelection(urls, on: side)
         guard !orderedURLs.isEmpty else { return }
 
-        let paths = orderedURLs.map { $0.standardizedFileURL.path }
+        let paths = orderedURLs.map { url in
+            if let android = AndroidFileURL.parse(url) {
+                return "\(android.deviceSerial):\(android.path)"
+            }
+            return url.standardizedFileURL.path
+        }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(paths.joined(separator: "\n"), forType: .string)
         statusMessage = paths.count == 1 ? "Copied path: \(paths[0])" : "Copied \(paths.count) paths"
@@ -1053,6 +1396,14 @@ final class DualFinderViewModel: ObservableObject {
     }
 
     func copySelectionToFileClipboard(on side: PaneSide, requestID: String? = nil) {
+        guard !isAndroidPane(side) else {
+            copyAbsolutePaths(pane(for: side).selectedItemURLs, on: side)
+            logger.debug("clipboard", "android-files.copy-as-paths", metadata: metadataWithRequestID([
+                "side": side.rawValue
+            ], requestID: requestID))
+            return
+        }
+
         guard !isInlineRenaming else {
             logger.debug("clipboard", "files.copy.ignored", metadata: metadataWithRequestID([
                 "side": side.rawValue,
@@ -1106,6 +1457,12 @@ final class DualFinderViewModel: ObservableObject {
                 "side": side.rawValue,
                 "reason": "empty-file-clipboard"
             ], requestID: requestID))
+            return
+        }
+
+        if isAndroidPane(side) {
+            let move = operation == .move
+            receiveDroppedFiles(sources, into: side, move: move)
             return
         }
 
@@ -1175,6 +1532,11 @@ final class DualFinderViewModel: ObservableObject {
     }
 
     func previewSelection(on side: PaneSide) {
+        guard !isAndroidPane(side) else {
+            statusMessage = "Quick Look is local-only"
+            return
+        }
+
         let selected = pane(for: side).selectedItemURLs
         let urls = items(for: side).filter { selected.contains($0.url) }.map(\.url)
         guard !urls.isEmpty else { return }
@@ -1233,6 +1595,10 @@ final class DualFinderViewModel: ObservableObject {
     }
 
     func navigateHome(_ side: PaneSide) {
+        if let serial = androidDeviceSerial(for: side) {
+            navigate(side, to: AndroidFileURL.url(deviceSerial: serial, path: "/sdcard"))
+            return
+        }
         navigate(side, to: FileManager.default.homeDirectoryForCurrentUser)
     }
 
@@ -1340,6 +1706,10 @@ final class DualFinderViewModel: ObservableObject {
 
     @discardableResult
     func createFolder(in side: PaneSide) -> URL? {
+        if isAndroidPane(side) {
+            return createAndroidFolder(in: side)
+        }
+
         let directory = pane(for: side).selectedURL
         do {
             let created = try operationService.createFolder(named: "New Folder", in: directory)
@@ -1355,6 +1725,10 @@ final class DualFinderViewModel: ObservableObject {
 
     @discardableResult
     func createEmptyFile(named name: String, in side: PaneSide) -> URL? {
+        if isAndroidPane(side) {
+            return createAndroidEmptyFile(named: name, in: side)
+        }
+
         let directory = pane(for: side).selectedURL
         do {
             let created = try operationService.createEmptyFile(named: name, in: directory)
@@ -1369,6 +1743,11 @@ final class DualFinderViewModel: ObservableObject {
     }
 
     func renameItem(_ url: URL, to newName: String, on side: PaneSide) {
+        if url.scheme == AndroidFileURL.scheme {
+            renameAndroidItem(url, to: newName, on: side)
+            return
+        }
+
         do {
             let renamed = try operationService.rename(url, to: newName)
             statusMessage = "Renamed to \(renamed.lastPathComponent)"
@@ -1376,6 +1755,57 @@ final class DualFinderViewModel: ObservableObject {
             setSelection([renamed], for: side)
         } catch {
             reportOperationFailure("rename.failed", error: error)
+        }
+    }
+
+    private func createAndroidFolder(in side: PaneSide) -> URL? {
+        guard let parsed = AndroidFileURL.parse(pane(for: side).selectedURL) else { return nil }
+        do {
+            let path = try androidFileService.createDirectory(
+                named: "New Folder",
+                in: parsed.path,
+                on: parsed.deviceSerial
+            )
+            let created = AndroidFileURL.url(deviceSerial: parsed.deviceSerial, path: path)
+            statusMessage = "Created \(created.lastPathComponent)"
+            refresh(side)
+            setSelection([created], for: side)
+            return created
+        } catch {
+            reportOperationFailure("android.folder.create.failed", error: error)
+            return nil
+        }
+    }
+
+    private func createAndroidEmptyFile(named name: String, in side: PaneSide) -> URL? {
+        guard let parsed = AndroidFileURL.parse(pane(for: side).selectedURL) else { return nil }
+        do {
+            let path = try androidFileService.createEmptyFile(
+                named: name,
+                in: parsed.path,
+                on: parsed.deviceSerial
+            )
+            let created = AndroidFileURL.url(deviceSerial: parsed.deviceSerial, path: path)
+            statusMessage = "Created \(created.lastPathComponent)"
+            refresh(side)
+            setSelection([created], for: side)
+            return created
+        } catch {
+            reportOperationFailure("android.file.create.failed", error: error)
+            return nil
+        }
+    }
+
+    private func renameAndroidItem(_ url: URL, to newName: String, on side: PaneSide) {
+        guard let parsed = AndroidFileURL.parse(url) else { return }
+        do {
+            let path = try androidFileService.renameRemote(parsed.path, to: newName, on: parsed.deviceSerial)
+            let renamed = AndroidFileURL.url(deviceSerial: parsed.deviceSerial, path: path)
+            statusMessage = "Renamed to \(newName)"
+            refresh(side)
+            setSelection([renamed], for: side)
+        } catch {
+            reportOperationFailure("android.rename.failed", error: error)
         }
     }
 
@@ -1408,6 +1838,90 @@ final class DualFinderViewModel: ObservableObject {
             ])
         } catch {
             reportOperationFailure("batch-rename.failed", error: error)
+        }
+    }
+
+    func extractFilenamesFromContent(on side: PaneSide) {
+        guard !isAndroidPane(side), !isInlineRenaming else { return }
+        let items = selectedItems(on: side)
+        guard !items.isEmpty else {
+            statusMessage = "Select TXT files to rename"
+            return
+        }
+
+        let plan = ContentTitleRenamePlanner().plan(for: items)
+        guard !plan.operations.isEmpty else {
+            statusMessage = "No extractable filenames found"
+            logger.warning("content-title-rename", "no-operations", metadata: [
+                "side": side.rawValue,
+                "skipped": "\(plan.skipped.count)"
+            ])
+            return
+        }
+
+        do {
+            let operations = plan.operations
+            let renamedURLs = try operationService.batchRename(operations)
+            refresh(side)
+            setSelection(Set(renamedURLs), for: side)
+            let changedCount = operations.filter { $0.sourceURL.standardizedFileURL != $0.destinationURL }.count
+            statusMessage = plan.skipped.isEmpty
+                ? "Extracted filenames for \(changedCount) item(s)"
+                : "Extracted filenames for \(changedCount) item(s), skipped \(plan.skipped.count)"
+            logger.info("content-title-rename", "applied", metadata: [
+                "side": side.rawValue,
+                "count": "\(changedCount)",
+                "skipped": "\(plan.skipped.count)"
+            ])
+        } catch {
+            reportOperationFailure("content-title-rename.failed", error: error)
+        }
+    }
+
+    func mergeFiles(_ sources: [URL], named name: String, on side: PaneSide) {
+        guard !isAndroidPane(side), !isInlineRenaming else { return }
+        let mergeSources = mergeableFileURLs(sources, on: side)
+        guard mergeSources.count >= 2 else {
+            statusMessage = "Select at least two files to merge"
+            return
+        }
+
+        do {
+            let created = try operationService.mergeFiles(
+                mergeSources,
+                named: name,
+                in: pane(for: side).selectedURL,
+                trashSourcesAfterMerge: true
+            )
+            refresh(side)
+            setSelection([created], for: side)
+            requestPaneFocus(side, requestID: UUID().uuidString, source: "merge.completed")
+            statusMessage = "Merged \(mergeSources.count) files into \(created.lastPathComponent) and moved originals to Trash"
+            logger.info("file-operation", "merge.applied", metadata: [
+                "side": side.rawValue,
+                "count": "\(mergeSources.count)",
+                "path": created.path
+            ])
+        } catch {
+            reportOperationFailure("merge.failed", error: error)
+        }
+    }
+
+    func splitFile(_ preview: TextFileSplitPreview, on side: PaneSide) {
+        guard !isAndroidPane(side), !isInlineRenaming else { return }
+        do {
+            let created = try TextFileSplitService().split(preview, deleteOriginal: true)
+            refresh(side)
+            setSelection(Set(created), for: side)
+            requestPaneFocus(side, requestID: UUID().uuidString, source: "split-file.completed")
+            statusMessage = "Split \(preview.sourceURL.lastPathComponent) into \(created.count) file(s)"
+            logger.info("file-operation", "split-file.completed", metadata: [
+                "side": side.rawValue,
+                "source": preview.sourceURL.path,
+                "count": "\(created.count)"
+            ])
+        } catch {
+            reportOperationFailure("split-file.failed", error: error)
         }
     }
 
@@ -1514,10 +2028,19 @@ final class DualFinderViewModel: ObservableObject {
         performSelectionOperation(from: sourceSide, operation: .move)
     }
 
+    func syncSelection(from sourceSide: PaneSide) {
+        performSelectionOperation(from: sourceSide, operation: .sync)
+    }
+
     func trashSelection(
         from sourceSide: PaneSide,
         refreshPolicy: FileOperationRefreshPolicy = .refreshWhenFinished
     ) {
+        if isAndroidPane(sourceSide) {
+            deleteAndroidSelection(from: sourceSide)
+            return
+        }
+
         let sources = orderedSelection(pane(for: sourceSide).selectedItemURLs, on: sourceSide)
         guard !sources.isEmpty else { return }
         logger.info("file-operation", "trash.selection.requested", metadata: [
@@ -1542,6 +2065,21 @@ final class DualFinderViewModel: ObservableObject {
         enqueueFileOperation(.trash, sources: sources, destination: nil, refreshPolicy: refreshPolicy)
     }
 
+    private func deleteAndroidSelection(from side: PaneSide) {
+        let urls = orderedSelection(pane(for: side).selectedItemURLs, on: side)
+        let remotePaths = urls.compactMap { AndroidFileURL.parse($0)?.path }
+        guard let deviceSerial = androidDeviceSerial(for: side), !remotePaths.isEmpty else { return }
+        let remoteByteSizes = androidSelectionByteSizes(for: urls, on: side)
+
+        clearSelection(side)
+        enqueueFileOperation(
+            .trash,
+            sources: urls,
+            destination: nil,
+            execution: .android(.remove(remoteURLs: urls, remotePaths: remotePaths, remoteByteSizes: remoteByteSizes, deviceSerial: deviceSerial))
+        )
+    }
+
     func trashActiveSelection() {
         let side = activePaneSide
         let isSimilarReviewActive = similarFileReviewActiveSides.contains(side)
@@ -1562,12 +2100,52 @@ final class DualFinderViewModel: ObservableObject {
     func emptyTrash() {
         guard !isInlineRenaming else { return }
         do {
+            let summary = try operationService.trashContentsSummary()
+            guard !summary.isEmpty else {
+                statusMessage = "Trash is already empty"
+                return
+            }
+            emptyTrashConfirmationRequest = EmptyTrashConfirmationRequest(summary: summary)
+            statusMessage = "Confirm Empty Trash: \(summary.containedItemCount) item(s), \(ByteCountFormatter.string(fromByteCount: summary.totalByteCount, countStyle: .file))"
+            logger.warning("file-operation", "trash.empty.confirmation.requested", metadata: [
+                "topLevelItemCount": "\(summary.topLevelItemCount)",
+                "containedItemCount": "\(summary.containedItemCount)",
+                "totalByteCount": "\(summary.totalByteCount)"
+            ])
+        } catch {
+            reportOperationFailure("trash.empty.preview.failed", error: error)
+        }
+    }
+
+    func confirmEmptyTrash() {
+        guard let request = emptyTrashConfirmationRequest else {
+            logger.debug("file-operation", "trash.empty.confirm.ignored.no-request", metadata: [:])
+            return
+        }
+        emptyTrashConfirmationRequest = nil
+        logger.warning("file-operation", "trash.empty.confirmed", metadata: [
+            "topLevelItemCount": "\(request.summary.topLevelItemCount)",
+            "containedItemCount": "\(request.summary.containedItemCount)",
+            "totalByteCount": "\(request.summary.totalByteCount)"
+        ])
+        do {
             let removedCount = try operationService.emptyTrash()
             refreshAll()
             statusMessage = "Emptied Trash: \(removedCount) item(s)"
         } catch {
             reportOperationFailure("trash.empty.failed", error: error)
         }
+    }
+
+    func cancelEmptyTrash() {
+        guard let request = emptyTrashConfirmationRequest else { return }
+        emptyTrashConfirmationRequest = nil
+        statusMessage = "Empty Trash cancelled"
+        logger.info("file-operation", "trash.empty.cancelled", metadata: [
+            "topLevelItemCount": "\(request.summary.topLevelItemCount)",
+            "containedItemCount": "\(request.summary.containedItemCount)",
+            "totalByteCount": "\(request.summary.totalByteCount)"
+        ])
     }
 
     func compressSelectionToZip(on side: PaneSide) {
@@ -1598,9 +2176,13 @@ final class DualFinderViewModel: ObservableObject {
         ])
 
         let conversionLogger = logger
+        let textEncodingCache = textEncodingCache
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                let result = try TextEncodingConversionService(logger: conversionLogger).convertFilesToUTF8(sources) { completedCount, totalCount, fileResult in
+                let result = try TextEncodingConversionService(
+                    logger: conversionLogger,
+                    cache: textEncodingCache
+                ).convertFilesToUTF8(sources) { completedCount, totalCount, fileResult in
                     DispatchQueue.main.async { [weak self] in
                         guard let self, self.isTextEncodingConversionRunning else { return }
                         self.statusMessage = self.textEncodingConversionProgress(
@@ -1620,13 +2202,16 @@ final class DualFinderViewModel: ObservableObject {
                     if !finalSelection.isEmpty {
                         self.setSelection(finalSelection, for: side)
                     }
-                    self.statusMessage = self.textEncodingConversionSummary(result)
+                    let problemReportURL = self.writeTextEncodingProblemReport(for: result)
+                    self.statusMessage = self.textEncodingConversionSummary(result, problemReportURL: problemReportURL)
                     self.logger.info("text-encoding", "selection.convert.completed", metadata: [
                         "side": side.rawValue,
                         "converted": "\(result.convertedCount)",
                         "utf8": "\(result.alreadyUTF8Count)",
+                        "cachedUTF8": "\(result.cachedUTF8Count)",
                         "unknownRenamed": "\(result.renamedUnknownCount)",
-                        "skipped": "\(result.skippedCount)"
+                        "skipped": "\(result.skippedCount)",
+                        "failed": "\(result.failedCount)"
                     ])
                 }
             } catch {
@@ -1696,6 +2281,11 @@ final class DualFinderViewModel: ObservableObject {
     }
 
     func calculateSelectedFolderSizes(on side: PaneSide) {
+        guard !isAndroidPane(side) else {
+            statusMessage = "Folder size calculation is local-only"
+            return
+        }
+
         let selected = pane(for: side).selectedItemURLs
         let folders = items(for: side).filter { selected.contains($0.url) && $0.isDirectoryLike }
         guard !folders.isEmpty else { return }
@@ -1765,6 +2355,11 @@ final class DualFinderViewModel: ObservableObject {
     }
 
     func receiveDroppedFiles(_ sources: [URL], into side: PaneSide, move: Bool) {
+        if isAndroidPane(side) {
+            pushLocalFilesToAndroid(sources, into: side, move: move)
+            return
+        }
+
         let destination = pane(for: side).selectedURL.standardizedFileURL
         let operableSources = move
             ? sources.filter { $0.deletingLastPathComponent().standardizedFileURL != destination }
@@ -1801,6 +2396,10 @@ final class DualFinderViewModel: ObservableObject {
             return
         }
 
+        if performAndroidAwareSelectionOperation(sources: sources, from: sourceSide, operation: operation) {
+            return
+        }
+
         let destination = pane(for: opposite(sourceSide)).selectedURL
         logger.info("file-operation", "\(operation.rawValue).selection.requested", metadata: [
             "count": "\(sources.count)",
@@ -1812,10 +2411,114 @@ final class DualFinderViewModel: ObservableObject {
         enqueueFileOperation(operation, sources: sources, destination: destination)
     }
 
+    @discardableResult
+    private func performAndroidAwareSelectionOperation(
+        sources: [URL],
+        from sourceSide: PaneSide,
+        operation: QueuedFileOperationKind
+    ) -> Bool {
+        let destinationSide = opposite(sourceSide)
+        let sourceIsAndroid = isAndroidPane(sourceSide)
+        let destinationIsAndroid = isAndroidPane(destinationSide)
+        guard sourceIsAndroid || destinationIsAndroid else { return false }
+
+        switch (sourceIsAndroid, destinationIsAndroid) {
+        case (false, true):
+            guard let destination = AndroidFileURL.parse(pane(for: destinationSide).selectedURL) else { return true }
+            clearSelection(sourceSide)
+            enqueueFileOperation(
+                operation,
+                sources: sources,
+                destination: pane(for: destinationSide).selectedURL,
+                execution: .android(.push(
+                    localURLs: sources,
+                    remoteDirectory: destination.path,
+                    deviceSerial: destination.deviceSerial,
+                    removeLocalAfterCopy: operation == .move,
+                    sync: operation == .sync
+                ))
+            )
+        case (true, false):
+            guard let sourceDevice = androidDeviceSerial(for: sourceSide) else { return true }
+            let remotePaths = sources.compactMap { AndroidFileURL.parse($0)?.path }
+            guard !remotePaths.isEmpty else { return true }
+            let remoteByteSizes = androidSelectionByteSizes(for: sources, on: sourceSide)
+            clearSelection(sourceSide)
+            enqueueFileOperation(
+                operation,
+                sources: sources,
+                destination: pane(for: destinationSide).selectedURL,
+                execution: .android(.pull(
+                    remoteURLs: sources,
+                    remotePaths: remotePaths,
+                    remoteByteSizes: remoteByteSizes,
+                    localDirectory: pane(for: destinationSide).selectedURL,
+                    deviceSerial: sourceDevice,
+                    removeRemoteAfterCopy: operation == .move,
+                    sync: operation == .sync
+                ))
+            )
+        case (true, true):
+            guard let sourceDevice = androidDeviceSerial(for: sourceSide),
+                  let destination = AndroidFileURL.parse(pane(for: destinationSide).selectedURL) else { return true }
+            guard sourceDevice == destination.deviceSerial else {
+                reportOperationFailure("android.\(operation.rawValue).failed", error: AndroidPaneTransferError.differentDevices)
+                return true
+            }
+            let remotePaths = sources.compactMap { AndroidFileURL.parse($0)?.path }
+            guard !remotePaths.isEmpty else { return true }
+            let remoteByteSizes = androidSelectionByteSizes(for: sources, on: sourceSide)
+            clearSelection(sourceSide)
+            enqueueFileOperation(
+                operation,
+                sources: sources,
+                destination: pane(for: destinationSide).selectedURL,
+                execution: .android(.transfer(
+                    remoteURLs: sources,
+                    remotePaths: remotePaths,
+                    remoteByteSizes: remoteByteSizes,
+                    remoteDirectory: destination.path,
+                    deviceSerial: sourceDevice,
+                    move: operation == .move,
+                    sync: operation == .sync
+                ))
+            )
+        case (false, false):
+            return false
+        }
+        return true
+    }
+
+    private func androidSelectionByteSizes(for sources: [URL], on side: PaneSide) -> [Int64?] {
+        let itemsByURL = Dictionary(uniqueKeysWithValues: items(for: side).map { ($0.url, $0) })
+        return sources.map { source in
+            guard let item = itemsByURL[source], item.kind == .file else { return nil }
+            return item.size
+        }
+    }
+
+    private func pushLocalFilesToAndroid(_ sources: [URL], into side: PaneSide, move: Bool, refresh: Bool = true) {
+        guard let parsed = AndroidFileURL.parse(pane(for: side).selectedURL) else { return }
+        enqueueFileOperation(
+            move ? .move : .copy,
+            sources: sources,
+            destination: pane(for: side).selectedURL,
+            execution: .android(.push(
+                localURLs: sources,
+                remoteDirectory: parsed.path,
+                deviceSerial: parsed.deviceSerial,
+                removeLocalAfterCopy: move,
+                sync: false
+            )),
+            refreshPolicy: refresh ? .refreshWhenFinished : .deferSuccessfulRefresh
+        )
+    }
+
     private func enqueueFileOperation(
         _ kind: QueuedFileOperationKind,
         sources: [URL],
         destination: URL?,
+        execution: QueuedFileOperationExecution = .local,
         refreshPolicy: FileOperationRefreshPolicy = .refreshWhenFinished
     ) {
         let id = UUID()
@@ -1825,6 +2528,7 @@ final class DualFinderViewModel: ObservableObject {
             kind: kind,
             sources: sources,
             destination: destination,
+            execution: execution,
             cancellation: cancellation,
             refreshPolicy: refreshPolicy
         )
@@ -1857,11 +2561,13 @@ final class DualFinderViewModel: ObservableObject {
         let kind = request.kind
         let sources = request.sources
         let destination = request.destination
+        let execution = request.execution
         let cancellation = request.cancellation
         let refreshPolicy = request.refreshPolicy
         let conflictPreviews = destination.map {
             Self.fileConflictPreviews(for: sources, destinationDirectory: $0)
         } ?? []
+        let androidFileService = androidFileService
 
         Task.detached(priority: .userInitiated) { [weak self] in
             let service = FileOperationService(logger: nil)
@@ -1886,36 +2592,50 @@ final class DualFinderViewModel: ObservableObject {
             }
 
             do {
-                switch kind {
-                case .copy:
-                    guard let destination else { return }
-                    try service.copy(
-                        sources,
-                        to: destination,
-                        cancellation: cancellation,
-                        progress: { progress in
-                            Task { @MainActor [weak self] in
-                                self?.recordFileOperationProgress(progress, for: id)
+                switch execution {
+                case .local:
+                    switch kind {
+                    case .copy, .sync:
+                        guard let destination else { throw FileOperationError.invalidDestination }
+                        try service.copy(
+                            sources,
+                            to: destination,
+                            cancellation: cancellation,
+                            progress: { progress in
+                                Task { @MainActor [weak self] in
+                                    self?.recordFileOperationProgress(progress, for: id)
+                                }
+                            },
+                            conflictResolver: resolveConflict
+                        )
+                    case .move:
+                        guard let destination else { throw FileOperationError.invalidDestination }
+                        try service.move(
+                            sources,
+                            to: destination,
+                            cancellation: cancellation,
+                            progress: { progress in
+                                Task { @MainActor [weak self] in
+                                    self?.recordFileOperationProgress(progress, for: id)
+                                }
+                            },
+                            conflictResolver: resolveConflict
+                        )
+                    case .trash:
+                        try service.trash(
+                            sources,
+                            cancellation: cancellation,
+                            progress: { progress in
+                                Task { @MainActor [weak self] in
+                                    self?.recordFileOperationProgress(progress, for: id)
+                                }
                             }
-                        },
-                        conflictResolver: resolveConflict
-                    )
-                case .move:
-                    guard let destination else { return }
-                    try service.move(
-                        sources,
-                        to: destination,
-                        cancellation: cancellation,
-                        progress: { progress in
-                            Task { @MainActor [weak self] in
-                                self?.recordFileOperationProgress(progress, for: id)
-                            }
-                        },
-                        conflictResolver: resolveConflict
-                    )
-                case .trash:
-                    try service.trash(
-                        sources,
+                        )
+                    }
+                case .android(let androidOperation):
+                    try Self.performQueuedAndroidOperation(
+                        androidOperation,
+                        service: androidFileService,
                         cancellation: cancellation,
                         progress: { progress in
                             Task { @MainActor [weak self] in
@@ -1956,12 +2676,425 @@ final class DualFinderViewModel: ObservableObject {
         }
     }
 
+    private nonisolated static func performQueuedAndroidOperation(
+        _ operation: AndroidQueuedFileOperation,
+        service: AndroidFileService,
+        cancellation: FileOperationCancellation,
+        progress: @escaping (FileOperationProgress) -> Void
+    ) throws {
+        let itemURLs = operation.itemURLs
+        let totalItems = itemURLs.count
+        let itemByteSizes = Self.estimatedAndroidOperationByteSizes(operation, service: service)
+        let totalBytes = itemByteSizes.allSatisfy { $0 != nil }
+            ? itemByteSizes.compactMap { $0 }.reduce(0, +)
+            : 0
+
+        func throwIfCancelled() throws {
+            if cancellation.isCancelled {
+                throw FileOperationError.cancelled
+            }
+        }
+
+        func completedBytes(for completedItems: Int, currentItemBytes: Int64 = 0) -> Int64 {
+            guard totalBytes > 0 else { return 0 }
+            let priorBytes = itemByteSizes
+                .prefix(completedItems)
+                .compactMap { $0 }
+                .reduce(0, +)
+            guard itemByteSizes.indices.contains(completedItems),
+                  let expectedCurrentItemBytes = itemByteSizes[completedItems] else {
+                return priorBytes
+            }
+            return priorBytes + min(max(currentItemBytes, 0), expectedCurrentItemBytes)
+        }
+
+        func report(completedItems: Int, currentItem: URL?, currentIndex: Int?, currentCompletedBytes: Int64 = 0) {
+            progress(FileOperationProgress(
+                completedBytes: completedBytes(for: completedItems, currentItemBytes: currentCompletedBytes),
+                totalBytes: totalBytes,
+                completedItems: completedItems,
+                totalItems: totalItems,
+                currentItem: currentItem,
+                currentItemBytes: currentIndex.flatMap { itemByteSizes.indices.contains($0) ? itemByteSizes[$0] : nil }
+            ))
+        }
+
+        switch operation {
+        case .push(let localURLs, let remoteDirectory, let deviceSerial, let removeLocalAfterCopy, let sync):
+            guard totalItems > 0 else { return }
+            report(completedItems: 0, currentItem: itemURLs.first, currentIndex: 0)
+            for (index, url) in localURLs.enumerated() {
+                try throwIfCancelled()
+                report(completedItems: index, currentItem: url, currentIndex: index)
+                try service.push(localURLs: [url], to: remoteDirectory, on: deviceSerial, sync: sync, cancellation: cancellation)
+                if removeLocalAfterCopy, FileManager.default.fileExists(atPath: url.path) {
+                    try FileManager.default.removeItem(at: url)
+                }
+                report(completedItems: index + 1, currentItem: nextItem(after: index, in: localURLs), currentIndex: index + 1)
+            }
+        case .pull(let remoteURLs, let remotePaths, _, let localDirectory, let deviceSerial, let removeRemoteAfterCopy, let sync):
+            if sync {
+                let plan = try androidSyncPullPlan(
+                    remotePaths: remotePaths,
+                    deviceSerial: deviceSerial,
+                    service: service,
+                    cancellation: cancellation
+                )
+                var stats = AndroidSyncPullStats()
+
+                func reportSyncProgress(
+                    currentRemotePath: String?,
+                    currentFileBytes: Int64?,
+                    currentCopiedBytes: Int64 = 0
+                ) {
+                    progress(FileOperationProgress(
+                        completedBytes: stats.completedBytes + min(max(currentCopiedBytes, 0), currentFileBytes ?? 0),
+                        totalBytes: plan.totalBytes,
+                        completedItems: stats.completedItems,
+                        totalItems: plan.totalItems,
+                        currentItem: currentRemotePath.map {
+                            AndroidFileURL.url(deviceSerial: deviceSerial, path: $0)
+                        },
+                        currentItemBytes: currentFileBytes,
+                        copiedItems: stats.copiedItems,
+                        copiedBytes: stats.copiedBytes + min(max(currentCopiedBytes, 0), currentFileBytes ?? 0),
+                        skippedItems: stats.skippedItems,
+                        skippedBytes: stats.skippedBytes
+                    ))
+                }
+
+                reportSyncProgress(
+                    currentRemotePath: plan.roots.first?.remoteFiles.first?.path,
+                    currentFileBytes: plan.roots.first?.remoteFiles.first?.size
+                )
+
+                for root in plan.roots {
+                    for remoteFile in root.remoteFiles {
+                        try throwIfCancelled()
+
+                        let localFile = localFileURL(
+                            forRemoteFile: remoteFile.path,
+                            remoteRoot: root.remoteRoot,
+                            rootName: root.rootName,
+                            localDirectory: localDirectory
+                        )
+
+                        if localByteSize(at: localFile) == remoteFile.size {
+                            stats.completedItems += 1
+                            stats.completedBytes += remoteFile.size
+                            stats.skippedItems += 1
+                            stats.skippedBytes += remoteFile.size
+                            service.logSyncDecision("file.skipped.same-size", remotePath: remoteFile.path, localPath: localFile.path, size: remoteFile.size)
+                            reportSyncProgress(currentRemotePath: remoteFile.path, currentFileBytes: remoteFile.size)
+                            continue
+                        }
+
+                        service.logSyncDecision("file.copying", remotePath: remoteFile.path, localPath: localFile.path, size: remoteFile.size)
+                        reportSyncProgress(currentRemotePath: remoteFile.path, currentFileBytes: remoteFile.size)
+                        let poller = AndroidPullProgressPoller(
+                            targetURL: localFile,
+                            expectedBytes: remoteFile.size,
+                            interval: 1.0
+                        ) { copiedFileBytes in
+                            reportSyncProgress(
+                                currentRemotePath: remoteFile.path,
+                                currentFileBytes: remoteFile.size,
+                                currentCopiedBytes: copiedFileBytes
+                            )
+                        }
+                        poller.start()
+                        defer { poller.stop() }
+                        try service.pullFile(remotePath: remoteFile.path, to: localFile, on: deviceSerial, cancellation: cancellation)
+                        stats.completedItems += 1
+                        stats.completedBytes += remoteFile.size
+                        stats.copiedItems += 1
+                        stats.copiedBytes += remoteFile.size
+                        service.logSyncDecision("file.copied", remotePath: remoteFile.path, localPath: localFile.path, size: remoteFile.size)
+                        reportSyncProgress(currentRemotePath: remoteFile.path, currentFileBytes: remoteFile.size)
+                    }
+                }
+
+                if removeRemoteAfterCopy {
+                    for path in remotePaths {
+                        try service.removeRemote([path], on: deviceSerial)
+                    }
+                }
+                reportSyncProgress(currentRemotePath: nil, currentFileBytes: nil)
+            } else {
+                guard totalItems > 0 else { return }
+                report(completedItems: 0, currentItem: itemURLs.first, currentIndex: 0)
+                for (index, pair) in zip(remoteURLs, remotePaths).enumerated() {
+                    try throwIfCancelled()
+                    let (url, path) = pair
+                    report(completedItems: index, currentItem: url, currentIndex: index)
+                    let targetURL = localDirectory
+                        .appendingPathComponent((AndroidFileURL.normalizedPath(path) as NSString).lastPathComponent)
+                        .standardizedFileURL
+                    let poller = AndroidPullProgressPoller(
+                        targetURL: targetURL,
+                        expectedBytes: itemByteSizes.indices.contains(index) ? itemByteSizes[index] : nil,
+                        interval: 1.0
+                    ) { copiedBytes in
+                        report(
+                            completedItems: index,
+                            currentItem: url,
+                            currentIndex: index,
+                            currentCompletedBytes: copiedBytes
+                        )
+                    }
+                    poller.start()
+                    defer { poller.stop() }
+                    try service.pull(remotePaths: [path], to: localDirectory, on: deviceSerial, cancellation: cancellation)
+                    if removeRemoteAfterCopy {
+                        try service.removeRemote([path], on: deviceSerial)
+                    }
+                    report(completedItems: index + 1, currentItem: nextItem(after: index, in: remoteURLs), currentIndex: index + 1)
+                }
+            }
+        case .transfer(let remoteURLs, let remotePaths, _, let remoteDirectory, let deviceSerial, let move, let sync):
+            guard totalItems > 0 else { return }
+            report(completedItems: 0, currentItem: itemURLs.first, currentIndex: 0)
+            for (index, pair) in zip(remoteURLs, remotePaths).enumerated() {
+                try throwIfCancelled()
+                let (url, path) = pair
+                report(completedItems: index, currentItem: url, currentIndex: index)
+                if move {
+                    try service.moveRemote([path], to: remoteDirectory, on: deviceSerial)
+                } else if sync {
+                    try service.copyRemote([path], to: remoteDirectory, on: deviceSerial)
+                } else {
+                    try service.copyRemote([path], to: remoteDirectory, on: deviceSerial)
+                }
+                report(completedItems: index + 1, currentItem: nextItem(after: index, in: remoteURLs), currentIndex: index + 1)
+            }
+        case .remove(let remoteURLs, let remotePaths, _, let deviceSerial):
+            guard totalItems > 0 else { return }
+            report(completedItems: 0, currentItem: itemURLs.first, currentIndex: 0)
+            for (index, pair) in zip(remoteURLs, remotePaths).enumerated() {
+                try throwIfCancelled()
+                let (url, path) = pair
+                report(completedItems: index, currentItem: url, currentIndex: index)
+                try service.removeRemote([path], on: deviceSerial)
+                report(completedItems: index + 1, currentItem: nextItem(after: index, in: remoteURLs), currentIndex: index + 1)
+            }
+        }
+    }
+
+    private nonisolated static func estimatedAndroidOperationByteSizes(
+        _ operation: AndroidQueuedFileOperation,
+        service: AndroidFileService
+    ) -> [Int64?] {
+        let maximumRemoteItemsForByteEstimates = 32
+
+        switch operation {
+        case .push(let localURLs, _, _, _, _):
+            return localURLs.map { localByteSize(at: $0) }
+        case .pull(_, let remotePaths, let remoteByteSizes, _, let deviceSerial, _, _):
+            if remoteByteSizes.count == remotePaths.count {
+                return remoteByteSizes
+            }
+            guard remotePaths.count <= maximumRemoteItemsForByteEstimates else {
+                return Array(repeating: nil, count: remotePaths.count)
+            }
+            return remotePaths.map { service.estimatedByteSize(of: $0, on: deviceSerial) }
+        case .transfer(_, let remotePaths, let remoteByteSizes, _, let deviceSerial, _, _):
+            if remoteByteSizes.count == remotePaths.count {
+                return remoteByteSizes
+            }
+            guard remotePaths.count <= maximumRemoteItemsForByteEstimates else {
+                return Array(repeating: nil, count: remotePaths.count)
+            }
+            return remotePaths.map { service.estimatedByteSize(of: $0, on: deviceSerial) }
+        case .remove(_, let remotePaths, let remoteByteSizes, let deviceSerial):
+            if remoteByteSizes.count == remotePaths.count {
+                return remoteByteSizes
+            }
+            guard remotePaths.count <= maximumRemoteItemsForByteEstimates else {
+                return Array(repeating: nil, count: remotePaths.count)
+            }
+            return remotePaths.map { service.estimatedByteSize(of: $0, on: deviceSerial) }
+        }
+    }
+
+    private nonisolated static func androidSyncPullPlan(
+        remotePaths: [String],
+        deviceSerial: String,
+        service: AndroidFileService,
+        cancellation: FileOperationCancellation
+    ) throws -> AndroidSyncPullPlan {
+        let roots = try remotePaths.map { remotePath in
+            if cancellation.isCancelled {
+                throw FileOperationError.cancelled
+            }
+            let remoteRoot = AndroidFileURL.normalizedPath(remotePath)
+            return AndroidSyncPullRootPlan(
+                remoteRoot: remoteRoot,
+                rootName: (remoteRoot as NSString).lastPathComponent,
+                remoteFiles: try service.regularFiles(under: remoteRoot, on: deviceSerial, cancellation: cancellation)
+            )
+        }
+        return AndroidSyncPullPlan(roots: roots)
+    }
+
+    private nonisolated static func localFileURL(
+        forRemoteFile remoteFile: String,
+        remoteRoot: String,
+        rootName: String,
+        localDirectory: URL
+    ) -> URL {
+        let normalizedRemoteFile = AndroidFileURL.normalizedPath(remoteFile)
+        if normalizedRemoteFile == remoteRoot {
+            return localDirectory.appendingPathComponent(rootName).standardizedFileURL
+        }
+
+        let rootPrefix = remoteRoot == "/" ? "/" : remoteRoot + "/"
+        let relativePath = normalizedRemoteFile.hasPrefix(rootPrefix)
+            ? String(normalizedRemoteFile.dropFirst(rootPrefix.count))
+            : (normalizedRemoteFile as NSString).lastPathComponent
+        return localDirectory
+            .appendingPathComponent(rootName, isDirectory: true)
+            .appendingPathComponent(relativePath)
+            .standardizedFileURL
+    }
+
+    private struct AndroidSyncPullPlan {
+        let roots: [AndroidSyncPullRootPlan]
+        let totalItems: Int
+        let totalBytes: Int64
+
+        init(roots: [AndroidSyncPullRootPlan]) {
+            self.roots = roots
+            totalItems = roots.reduce(0) { $0 + $1.remoteFiles.count }
+            totalBytes = roots.reduce(Int64(0)) { rootTotal, root in
+                rootTotal + root.remoteFiles.reduce(Int64(0)) { $0 + $1.size }
+            }
+        }
+    }
+
+    private struct AndroidSyncPullRootPlan {
+        let remoteRoot: String
+        let rootName: String
+        let remoteFiles: [AndroidRemoteFile]
+    }
+
+    private struct AndroidSyncPullStats {
+        var completedItems = 0
+        var completedBytes: Int64 = 0
+        var copiedItems = 0
+        var copiedBytes: Int64 = 0
+        var skippedItems = 0
+        var skippedBytes: Int64 = 0
+    }
+
+    private nonisolated static func localByteSize(at url: URL) -> Int64? {
+        let fileManager = FileManager.default
+        guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]) else {
+            return nil
+        }
+        if values.isRegularFile == true {
+            return Int64(values.fileSize ?? 0)
+        }
+        guard values.isDirectory == true && values.isSymbolicLink != true else {
+            return 0
+        }
+
+        var total: Int64 = 0
+        guard let enumerator = fileManager.enumerator(
+            at: url,
+            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+            options: []
+        ) else {
+            return nil
+        }
+        for case let child as URL in enumerator {
+            guard let childValues = try? child.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+                  childValues.isRegularFile == true else {
+                continue
+            }
+            total += Int64(childValues.fileSize ?? 0)
+        }
+        return total
+    }
+
+    private final class AndroidPullProgressPoller: @unchecked Sendable {
+        private let targetURL: URL
+        private let expectedBytes: Int64?
+        private let interval: TimeInterval
+        private let onProgress: (Int64) -> Void
+        private let lock = NSLock()
+        private var isRunning = false
+
+        init(
+            targetURL: URL,
+            expectedBytes: Int64?,
+            interval: TimeInterval,
+            onProgress: @escaping (Int64) -> Void
+        ) {
+            self.targetURL = targetURL
+            self.expectedBytes = expectedBytes
+            self.interval = interval
+            self.onProgress = onProgress
+        }
+
+        func start() {
+            lock.lock()
+            guard !isRunning else {
+                lock.unlock()
+                return
+            }
+            isRunning = true
+            lock.unlock()
+
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                self?.run()
+            }
+        }
+
+        func stop() {
+            lock.lock()
+            isRunning = false
+            lock.unlock()
+        }
+
+        private func run() {
+            while running {
+                publishCurrentSize()
+                Thread.sleep(forTimeInterval: interval)
+            }
+            publishCurrentSize()
+        }
+
+        private var running: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return isRunning
+        }
+
+        private func publishCurrentSize() {
+            guard var size = DualFinderViewModel.localByteSize(at: targetURL) else { return }
+            if let expectedBytes {
+                size = min(size, expectedBytes)
+            }
+            onProgress(size)
+        }
+    }
+
+    private nonisolated static func nextItem(after index: Int, in urls: [URL]) -> URL? {
+        let nextIndex = index + 1
+        guard urls.indices.contains(nextIndex) else { return nil }
+        return urls[nextIndex]
+    }
+
     private func recordFileOperationProgress(_ progress: FileOperationProgress, for id: UUID) {
         updateQueuedOperation(id) {
             $0.progress = progress
             if let currentItem = progress.currentItem {
                 $0.message = currentItem.lastPathComponent
             }
+        }
+        if let operation = fileOperationQueue.first(where: { $0.id == id }) {
+            let detail = operation.progressDetailText
+            statusMessage = detail.isEmpty ? operation.message : "\(operation.message) • \(detail)"
         }
     }
 
@@ -2005,6 +3138,7 @@ final class DualFinderViewModel: ObservableObject {
     func canRetryFileOperation(_ id: UUID) -> Bool {
         guard let operation = fileOperationQueue.first(where: { $0.id == id }) else { return false }
         guard operation.status == .failed || operation.status == .cancelled else { return false }
+        guard !operationInvolvesAndroid(operation) else { return false }
         if operation.kind != .trash, operation.destination == nil { return false }
         return operation.sources.contains { FileManager.default.fileExists(atPath: $0.path) }
     }
@@ -2027,6 +3161,9 @@ final class DualFinderViewModel: ObservableObject {
     }
 
     func recoverySuggestion(for operation: QueuedFileOperation) -> String {
+        if operationInvolvesAndroid(operation) {
+            return "Recovery unavailable: retry Android transfers from the pane after checking the device connection."
+        }
         let existingSourceCount = operation.sources.filter { FileManager.default.fileExists(atPath: $0.path) }.count
         if existingSourceCount == 0 {
             return "Recovery unavailable: the source item no longer exists."
@@ -2035,6 +3172,11 @@ final class DualFinderViewModel: ObservableObject {
             return "Recovery unavailable: the destination folder is missing from the operation record."
         }
         return "Fix the reported issue, then retry with \(existingSourceCount) available source item(s)."
+    }
+
+    private func operationInvolvesAndroid(_ operation: QueuedFileOperation) -> Bool {
+        operation.sources.contains { $0.scheme == AndroidFileURL.scheme }
+            || operation.destination?.scheme == AndroidFileURL.scheme
     }
 
     private func updateQueuedOperation(_ id: UUID, mutate: (inout QueuedFileOperation) -> Void) {
@@ -2154,9 +3296,12 @@ final class DualFinderViewModel: ObservableObject {
                 of: root,
                 includeHidden: showHiddenFiles,
                 sortRule: rule,
-                folderSizeCache: folderSizeCache
+                folderSizeCache: folderSizeCache,
+                textEncodingCache: textEncodingCache,
+                includeTextEncoding: uiLayoutPreferences.isEncodingColumnVisible
             )
             setItems(nextItems, for: side)
+            startTextEncodingScanIfNeeded(for: side, items: nextItems)
             statusMessage = "Flat: \(root.path) - \(nextItems.count) file(s)"
             logger.info("flat-view", "refreshed", metadata: [
                 "side": side.rawValue,
@@ -2184,6 +3329,73 @@ final class DualFinderViewModel: ObservableObject {
         } else {
             rightItems = items
         }
+    }
+
+    private func startTextEncodingScanIfNeeded(for side: PaneSide, items: [FileItem]) {
+        cancelTextEncodingScan(for: side)
+        guard uiLayoutPreferences.isEncodingColumnVisible else { return }
+
+        let pendingItems = items.filter { $0.kind == .file && $0.textEncoding == nil }
+        guard !pendingItems.isEmpty else { return }
+
+        let cancellation = TextEncodingScanCancellation()
+        textEncodingScanCancellations[side] = cancellation
+        let cache = textEncodingCache
+        let logger = logger
+
+        DispatchQueue.global(qos: .utility).async {
+            let service = TextEncodingConversionService(logger: logger, cache: cache)
+            for item in pendingItems {
+                guard !cancellation.isCancelled else { return }
+                let encoding = (try? service.detectFileEncoding(item.url)) ?? "unknown"
+                guard !cancellation.isCancelled else { return }
+
+                DispatchQueue.main.async { [weak self] in
+                    guard let self,
+                          self.textEncodingScanCancellations[side] === cancellation,
+                          self.uiLayoutPreferences.isEncodingColumnVisible else {
+                        return
+                    }
+                    self.updateTextEncoding(encoding, for: item.url, on: side)
+                }
+            }
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      self.textEncodingScanCancellations[side] === cancellation else {
+                    return
+                }
+                self.textEncodingScanCancellations[side] = nil
+            }
+        }
+    }
+
+    private func updateTextEncoding(_ encoding: String, for url: URL, on side: PaneSide) {
+        if side == .left {
+            updateTextEncoding(encoding, for: url, in: &leftItems)
+        } else {
+            updateTextEncoding(encoding, for: url, in: &rightItems)
+        }
+    }
+
+    private func updateTextEncoding(_ encoding: String, for url: URL, in items: inout [FileItem]) {
+        guard let index = items.firstIndex(where: { $0.url == url }),
+              items[index].textEncoding == nil else {
+            return
+        }
+        items[index] = items[index].withTextEncoding(encoding)
+    }
+
+    private func cancelTextEncodingScans() {
+        for cancellation in textEncodingScanCancellations.values {
+            cancellation.cancel()
+        }
+        textEncodingScanCancellations.removeAll()
+    }
+
+    private func cancelTextEncodingScan(for side: PaneSide) {
+        textEncodingScanCancellations[side]?.cancel()
+        textEncodingScanCancellations[side] = nil
     }
 
     private func setFlatViewRoot(_ root: URL?, for side: PaneSide) {
@@ -2236,7 +3448,26 @@ final class DualFinderViewModel: ObservableObject {
     }
 
     private func persistPaneSession() {
-        paneSessionStore.save(left: leftPane, right: rightPane)
+        paneSessionStore.save(
+            left: paneForSessionPersistence(.left),
+            right: paneForSessionPersistence(.right)
+        )
+    }
+
+    private func paneForSessionPersistence(_ side: PaneSide) -> PaneState {
+        guard isAndroidPane(side) else { return pane(for: side) }
+        return PaneState(
+            side: side,
+            initialURL: localPaneReturnURLs[side] ?? FileManager.default.homeDirectoryForCurrentUser
+        )
+    }
+
+    private func reconcilePaneModeAfterHistoryNavigation(to url: URL, on side: PaneSide) {
+        if let parsed = AndroidFileURL.parse(url) {
+            androidPaneDevices[side] = parsed.deviceSerial
+        } else {
+            androidPaneDevices[side] = nil
+        }
     }
 
     private func folderURL(fromPathText pathText: String, relativeTo baseURL: URL) -> URL {
@@ -2263,6 +3494,33 @@ final class DualFinderViewModel: ObservableObject {
         let itemURLs = items(for: side).map(\.url)
         let ordered = itemURLs.filter { selection.contains($0) }
         return ordered.isEmpty ? Array(selection).sorted { $0.path < $1.path } : ordered
+    }
+
+    private func mergeableFileURLs(in selection: Set<URL>, on side: PaneSide) -> [URL] {
+        guard selection.count >= 2 else { return [] }
+        return mergeableFileURLs(orderedSelection(selection, on: side), on: side)
+    }
+
+    private func mergeableFileURLs(_ urls: [URL], on side: PaneSide) -> [URL] {
+        guard urls.count >= 2, Set(urls).count == urls.count else { return [] }
+        let itemByURL = Dictionary(uniqueKeysWithValues: items(for: side).map { ($0.url, $0) })
+        guard urls.allSatisfy({ itemByURL[$0]?.kind == .file }) else {
+            return []
+        }
+        return urls
+    }
+
+    func canSplitFile(in selection: Set<URL>, on side: PaneSide) -> Bool {
+        canSplitFile(orderedSelection(selection, on: side), on: side)
+    }
+
+    private func canSplitFile(_ urls: [URL], on side: PaneSide) -> Bool {
+        guard !isAndroidPane(side), !isInlineRenaming else { return false }
+        let itemByURL = Dictionary(uniqueKeysWithValues: items(for: side).map { ($0.url, $0) })
+        guard urls.count == 1, let source = urls.first, itemByURL[source]?.kind == .file else {
+            return false
+        }
+        return TextFileSplitService.canSplit(urls)
     }
 
     private func fileURLsFromPasteboard() -> [URL] {
@@ -2301,15 +3559,23 @@ final class DualFinderViewModel: ObservableObject {
         return directories
     }
 
-    private func textEncodingConversionSummary(_ result: TextEncodingBatchConversionResult) -> String {
+    private func textEncodingConversionSummary(
+        _ result: TextEncodingBatchConversionResult,
+        problemReportURL: URL? = nil
+    ) -> String {
         let parts = [
             result.convertedCount > 0 ? "\(result.convertedCount) converted to UTF-8" : nil,
-            result.alreadyUTF8Count > 0 ? "\(result.alreadyUTF8Count) already UTF-8" : nil,
-            result.renamedUnknownCount > 0 ? "\(result.renamedUnknownCount) renamed _unknown_encode" : nil,
-            result.skippedCount > 0 ? "\(result.skippedCount) skipped" : nil
+            result.alreadyUTF8Count > 0 ? alreadyUTF8Summary(for: result) : nil,
+            result.renamedUnknownCount > 0 ? "\(result.renamedUnknownCount) moved to unknown_encode" : nil,
+            result.skippedCount > 0 ? "\(result.skippedCount) skipped" : nil,
+            result.failedCount > 0 ? "\(result.failedCount) failed" : nil
         ].compactMap { $0 }
 
-        return parts.isEmpty ? "No text encoding changes" : "Encoding check complete: \(parts.joined(separator: ", "))"
+        var summary = parts.isEmpty ? "No text encoding changes" : "Encoding check complete: \(parts.joined(separator: ", "))"
+        if let problemReportURL {
+            summary += ". Problem list: \(problemReportURL.lastPathComponent)"
+        }
+        return summary
     }
 
     private func textEncodingConversionProgress(
@@ -2319,16 +3585,90 @@ final class DualFinderViewModel: ObservableObject {
     ) -> String {
         let action = switch result.status {
         case .alreadyUTF8:
-            "already UTF-8"
+            result.usedCache ? "already UTF-8 (cached)" : "already UTF-8"
         case .converted:
             "converted to UTF-8"
         case .renamedUnknown:
-            "renamed _unknown_encode"
+            "moved to unknown_encode"
         case .skipped:
             "skipped"
+        case .failed:
+            "failed"
         }
         return "Encoding \(completedCount)/\(totalCount): \(result.finalURL.lastPathComponent) \(action)"
     }
+
+    private func alreadyUTF8Summary(for result: TextEncodingBatchConversionResult) -> String {
+        guard result.cachedUTF8Count > 0 else {
+            return "\(result.alreadyUTF8Count) already UTF-8"
+        }
+        return "\(result.alreadyUTF8Count) already UTF-8 (\(result.cachedUTF8Count) cached)"
+    }
+
+    private func writeTextEncodingProblemReport(for result: TextEncodingBatchConversionResult) -> URL? {
+        let problemResults = result.problemResults
+        guard !problemResults.isEmpty, let appLogger = logger as? AppLogger else {
+            return nil
+        }
+
+        let timestamp = Self.textEncodingReportTimestampFormatter.string(from: Date())
+        let reportURL = appLogger.logDirectory.appendingPathComponent("text-encoding-problems-\(timestamp).txt")
+        var lines = [
+            "DualFinder text encoding problem files",
+            "Generated: \(timestamp)",
+            "Unknown: \(result.renamedUnknownCount)",
+            "Failed: \(result.failedCount)",
+            ""
+        ]
+
+        for result in problemResults {
+            lines.append("Status:   \(textEncodingReportStatus(for: result.status))")
+            lines.append("Original: \(result.originalURL.path)")
+            lines.append("Current:  \(result.finalURL.path)")
+            if let diagnostic = result.diagnostic {
+                lines.append("Reason:   \(diagnostic)")
+            }
+            lines.append("")
+        }
+
+        do {
+            try FileManager.default.createDirectory(at: appLogger.logDirectory, withIntermediateDirectories: true)
+            try lines.joined(separator: "\n").write(to: reportURL, atomically: true, encoding: .utf8)
+            logger.warning("text-encoding", "selection.convert.problem-report", metadata: [
+                "path": reportURL.path,
+                "unknown": "\(result.renamedUnknownCount)",
+                "failed": "\(result.failedCount)"
+            ])
+            return reportURL
+        } catch {
+            logger.error("text-encoding", "selection.convert.problem-report.failed", metadata: [
+                "error": String(describing: error)
+            ])
+            return nil
+        }
+    }
+
+    private func textEncodingReportStatus(for status: TextEncodingConversionStatus) -> String {
+        switch status {
+        case .alreadyUTF8:
+            "already UTF-8"
+        case .converted:
+            "converted"
+        case .renamedUnknown:
+            "moved to unknown_encode"
+        case .skipped:
+            "skipped"
+        case .failed:
+            "failed"
+        }
+    }
+
+    private static let textEncodingReportTimestampFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return formatter
+    }()
 
     private func terminalDirectory(for url: URL) -> URL {
         var isDirectory: ObjCBool = false

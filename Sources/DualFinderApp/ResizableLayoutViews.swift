@@ -165,8 +165,9 @@ private final class LayoutResizeTrackingNSView: NSView {
     }
 }
 
-struct FileListColumnLayout<Name: View, TypeColumn: View, SizeColumn: View, ModifiedColumn: View>: View {
+struct FileListColumnLayout<Name: View, TypeColumn: View, EncodingColumn: View, SizeColumn: View, ModifiedColumn: View>: View {
     let columnWidths: FileListColumnWidths
+    let showsEncoding: Bool
     let showsResizeHandles: Bool
     let onResizeColumn: (FileListColumn, CGFloat) -> Void
     var onResizeEnded: (() -> Void)? = nil
@@ -175,25 +176,30 @@ struct FileListColumnLayout<Name: View, TypeColumn: View, SizeColumn: View, Modi
     @State private var dragAccumulatedDelta: CGFloat = 0
     @ViewBuilder let name: () -> Name
     @ViewBuilder let type: () -> TypeColumn
+    @ViewBuilder let encoding: () -> EncodingColumn
     @ViewBuilder let size: () -> SizeColumn
     @ViewBuilder let modified: () -> ModifiedColumn
 
     init(
         columnWidths: FileListColumnWidths,
+        showsEncoding: Bool = false,
         showsResizeHandles: Bool = false,
         onResizeColumn: @escaping (FileListColumn, CGFloat) -> Void = { _, _ in },
         onResizeEnded: (() -> Void)? = nil,
         @ViewBuilder name: @escaping () -> Name,
         @ViewBuilder type: @escaping () -> TypeColumn,
+        @ViewBuilder encoding: @escaping () -> EncodingColumn,
         @ViewBuilder size: @escaping () -> SizeColumn,
         @ViewBuilder modified: @escaping () -> ModifiedColumn
     ) {
         self.columnWidths = columnWidths
+        self.showsEncoding = showsEncoding
         self.showsResizeHandles = showsResizeHandles
         self.onResizeColumn = onResizeColumn
         self.onResizeEnded = onResizeEnded
         self.name = name
         self.type = type
+        self.encoding = encoding
         self.size = size
         self.modified = modified
     }
@@ -209,6 +215,12 @@ struct FileListColumnLayout<Name: View, TypeColumn: View, SizeColumn: View, Modi
                 .frame(width: columnWidths.width(for: .type), alignment: .leading)
 
             columnGap(.afterType)
+            if showsEncoding {
+                encoding()
+                    .frame(width: columnWidths.width(for: .encoding), alignment: .leading)
+                columnGap(.afterEncoding)
+            }
+
             size()
                 .frame(width: columnWidths.width(for: .size), alignment: .trailing)
 
@@ -245,7 +257,7 @@ struct FileListColumnLayout<Name: View, TypeColumn: View, SizeColumn: View, Modi
                 onDragEnded: {
                     let totalColumnDelta = CGFloat(boundary.columnDelta(forDragDelta: Double(dragAccumulatedDelta)))
                     if totalColumnDelta != 0 {
-                        onResizeColumn(boundary.resizedColumn, totalColumnDelta)
+                        onResizeColumn(boundary.resizedColumn(showsEncoding: showsEncoding), totalColumnDelta)
                     }
                     resetColumnDrag()
                     onResizeEnded?()
@@ -265,7 +277,7 @@ struct FileListColumnLayout<Name: View, TypeColumn: View, SizeColumn: View, Modi
             return nil
         }
         let totalColumnDelta = activeResizeBoundary.columnDelta(forDragDelta: Double(dragAccumulatedDelta))
-        widths.adjust(activeResizeBoundary.resizedColumn, by: totalColumnDelta)
+        widths.adjust(activeResizeBoundary.resizedColumn(showsEncoding: showsEncoding), by: totalColumnDelta)
         return widths
     }
 
@@ -291,15 +303,30 @@ struct FileListColumnLayout<Name: View, TypeColumn: View, SizeColumn: View, Modi
         let handleWidth: CGFloat = 5
         switch boundary {
         case .afterName:
-            return totalWidth
+            var position = totalWidth
                 - trailingPadding
                 - widths.width(for: .modified)
                 - handleWidth
                 - widths.width(for: .size)
                 - handleWidth
+            if showsEncoding {
+                position -= widths.width(for: .encoding) + handleWidth
+            }
+            return position
                 - widths.width(for: .type)
                 - handleWidth
         case .afterType:
+            var position = totalWidth
+                - trailingPadding
+                - widths.width(for: .modified)
+                - handleWidth
+                - widths.width(for: .size)
+                - handleWidth
+            if showsEncoding {
+                position -= widths.width(for: .encoding) + handleWidth
+            }
+            return position
+        case .afterEncoding:
             return totalWidth
                 - trailingPadding
                 - widths.width(for: .modified)

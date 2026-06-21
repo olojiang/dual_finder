@@ -33,6 +33,31 @@ struct FileOperationServiceTests {
         #expect(!FileManager.default.fileExists(atPath: source.path))
         #expect(FileManager.default.fileExists(atPath: destination.appendingPathComponent("source.txt").path))
         #expect(logger.messages.contains { $0.contains("move.completed") })
+        #expect(logger.messages.contains { $0.contains("move.item.renamed") })
+        #expect(!logger.messages.contains { $0.contains("copy.item.completed") })
+    }
+
+    @Test("move without destination conflict does not ask resolver")
+    func moveWithoutDestinationConflictDoesNotAskResolver() throws {
+        let root = try TemporaryDirectory()
+        let source = root.url.appendingPathComponent("source.txt")
+        let destination = root.url.appendingPathComponent("destination", isDirectory: true)
+        try "payload".write(to: source, atomically: true, encoding: .utf8)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        var resolverWasCalled = false
+
+        try FileOperationService(logger: CapturingLogger()).move(
+            [source],
+            to: destination,
+            conflictResolver: { _ in
+                resolverWasCalled = true
+                return .skip
+            }
+        )
+
+        #expect(!resolverWasCalled)
+        #expect(!FileManager.default.fileExists(atPath: source.path))
+        #expect(FileManager.default.fileExists(atPath: destination.appendingPathComponent("source.txt").path))
     }
 
     @Test("move skip conflict keeps original source")
@@ -398,6 +423,64 @@ struct FileOperationServiceTests {
         #expect(FileManager.default.fileExists(atPath: source.path))
     }
 
+    @Test("merges files in source order with line breaks")
+    func mergesFilesInSourceOrder() throws {
+        let root = try TemporaryDirectory()
+        let first = root.url.appendingPathComponent("first.txt")
+        let second = root.url.appendingPathComponent("second.txt")
+        try "one".write(to: first, atomically: true, encoding: .utf8)
+        try "two\n".write(to: second, atomically: true, encoding: .utf8)
+
+        let merged = try FileOperationService(logger: CapturingLogger()).mergeFiles(
+            [first, second],
+            named: "merged.txt",
+            in: root.url
+        )
+
+        #expect(merged.lastPathComponent == "merged.txt")
+        #expect(try String(contentsOf: merged, encoding: .utf8) == "one\ntwo\n")
+    }
+
+    @Test("merging files creates a unique destination")
+    func mergingFilesCreatesUniqueDestination() throws {
+        let root = try TemporaryDirectory()
+        let first = root.url.appendingPathComponent("first.txt")
+        let second = root.url.appendingPathComponent("second.txt")
+        try "one".write(to: first, atomically: true, encoding: .utf8)
+        try "two".write(to: second, atomically: true, encoding: .utf8)
+        try "existing".write(to: root.url.appendingPathComponent("merged.txt"), atomically: true, encoding: .utf8)
+
+        let merged = try FileOperationService(logger: CapturingLogger()).mergeFiles(
+            [first, second],
+            named: "merged.txt",
+            in: root.url
+        )
+
+        #expect(merged.lastPathComponent == "merged 2.txt")
+        #expect(try String(contentsOf: merged, encoding: .utf8) == "one\ntwo")
+        #expect(try String(contentsOf: root.url.appendingPathComponent("merged.txt"), encoding: .utf8) == "existing")
+    }
+
+    @Test("merging files can move originals to trash")
+    func mergingFilesCanTrashOriginals() throws {
+        let root = try TemporaryDirectory()
+        let first = root.url.appendingPathComponent("first.txt")
+        let second = root.url.appendingPathComponent("second.txt")
+        try "one".write(to: first, atomically: true, encoding: .utf8)
+        try "two".write(to: second, atomically: true, encoding: .utf8)
+
+        let merged = try FileOperationService(logger: CapturingLogger()).mergeFiles(
+            [first, second],
+            named: "merged.txt",
+            in: root.url,
+            trashSourcesAfterMerge: true
+        )
+
+        #expect(FileManager.default.fileExists(atPath: merged.path))
+        #expect(!FileManager.default.fileExists(atPath: first.path))
+        #expect(!FileManager.default.fileExists(atPath: second.path))
+    }
+
     @Test("batch renames through temporary names so items can swap")
     func batchRenamesSwappingItems() throws {
         let root = try TemporaryDirectory()
@@ -432,6 +515,47 @@ struct FileOperationServiceTests {
         #expect(FileManager.default.fileExists(atPath: trash.path))
         #expect(try FileManager.default.contentsOfDirectory(atPath: trash.path).isEmpty)
         #expect(logger.messages.contains { $0.contains("trash.empty.completed") })
+    }
+
+    @Test("summarizes trash contents before emptying")
+    func summarizesTrashContentsBeforeEmptying() throws {
+        let root = try TemporaryDirectory()
+        let trash = root.url.appendingPathComponent("Trash", isDirectory: true)
+        let file = trash.appendingPathComponent("discard.txt")
+        let folder = trash.appendingPathComponent("discard-folder", isDirectory: true)
+        let nested = folder.appendingPathComponent("nested.txt")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try "discard".write(to: file, atomically: true, encoding: .utf8)
+        try "nested".write(to: nested, atomically: true, encoding: .utf8)
+
+        let summary = try FileOperationService(logger: CapturingLogger()).trashContentsSummary(at: trash)
+
+        #expect(summary.topLevelItemCount == 2)
+        #expect(summary.containedItemCount == 3)
+        #expect(summary.totalByteCount == 13)
+        #expect(!summary.isEmpty)
+    }
+
+    @Test("ignores trash metadata files when summarizing and emptying")
+    func ignoresTrashMetadataFilesWhenSummarizingAndEmptying() throws {
+        let root = try TemporaryDirectory()
+        let trash = root.url.appendingPathComponent("Trash", isDirectory: true)
+        let file = trash.appendingPathComponent("discard.txt")
+        let metadata = trash.appendingPathComponent(".DS_Store")
+        try FileManager.default.createDirectory(at: trash, withIntermediateDirectories: true)
+        try "discard".write(to: file, atomically: true, encoding: .utf8)
+        try "metadata".write(to: metadata, atomically: true, encoding: .utf8)
+
+        let service = FileOperationService(logger: CapturingLogger())
+        let summary = try service.trashContentsSummary(at: trash)
+        let removedCount = try service.emptyTrash(at: trash)
+
+        #expect(summary.topLevelItemCount == 1)
+        #expect(summary.containedItemCount == 1)
+        #expect(summary.totalByteCount == 7)
+        #expect(removedCount == 1)
+        #expect(!FileManager.default.fileExists(atPath: file.path))
+        #expect(FileManager.default.fileExists(atPath: metadata.path))
     }
 
     #if os(macOS)
