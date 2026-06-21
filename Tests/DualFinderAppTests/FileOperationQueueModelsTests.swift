@@ -23,7 +23,8 @@ struct FileOperationQueueModelsTests {
                 completedItems: 1,
                 totalItems: 2,
                 currentItem: nil,
-                currentItemBytes: 3
+                currentItemBytes: 3,
+                elapsedSeconds: 2
             ),
             message: "Copying",
             finishedAt: nil
@@ -32,6 +33,8 @@ struct FileOperationQueueModelsTests {
         #expect(operation.title == "Copy 2 item(s)")
         #expect(operation.fractionCompleted == 0.5)
         #expect(operation.progressDetailText.contains("1/2 item(s)"))
+        #expect(operation.progressDetailText.contains("0.50 files/s"))
+        #expect(operation.progressDetailText.contains("s/MB"))
         #expect(operation.progressDetailText.contains("current"))
         #expect(QueuedFileOperationKind.move.displayName == "Move")
         #expect(QueuedFileOperationKind.sync.displayName == "Sync")
@@ -57,7 +60,8 @@ struct FileOperationQueueModelsTests {
                 copiedItems: 1,
                 copiedBytes: 2_048,
                 skippedItems: 2,
-                skippedBytes: 1_024
+                skippedBytes: 1_024,
+                elapsedSeconds: 1
             ),
             message: "current.txt",
             finishedAt: nil
@@ -66,6 +70,7 @@ struct FileOperationQueueModelsTests {
         #expect(operation.progressDetailText.contains("3/4 item(s)"))
         #expect(operation.progressDetailText.contains("copied 1"))
         #expect(operation.progressDetailText.contains("skipped 2"))
+        #expect(operation.progressDetailText.contains("3.00 files/s"))
     }
 
     @Test("refresh policy can defer only successful directory refreshes")

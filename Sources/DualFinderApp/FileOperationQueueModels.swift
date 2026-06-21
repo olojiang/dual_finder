@@ -91,6 +91,12 @@ struct QueuedFileOperation: Identifiable, Equatable {
         if progress.skippedItems > 0 || progress.skippedBytes > 0 {
             parts.append("skipped \(progress.skippedItems) (\(Self.formatBytes(progress.skippedBytes)))")
         }
+        if let itemRate = Self.itemRateText(progress) {
+            parts.append(itemRate)
+        }
+        if let secondsPerMegabyte = Self.secondsPerMegabyteText(progress) {
+            parts.append(secondsPerMegabyte)
+        }
         if let currentItemBytes = progress.currentItemBytes {
             parts.append("current item \(Self.formatBytes(currentItemBytes))")
         }
@@ -99,6 +105,30 @@ struct QueuedFileOperation: Identifiable, Equatable {
 
     private static func formatBytes(_ bytes: Int64) -> String {
         ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+
+    private static func itemRateText(_ progress: FileOperationProgress) -> String? {
+        guard let elapsed = progress.elapsedSeconds, elapsed > 0, progress.completedItems > 0 else { return nil }
+        return "\(formatDecimal(Double(progress.completedItems) / elapsed)) files/s"
+    }
+
+    private static func secondsPerMegabyteText(_ progress: FileOperationProgress) -> String? {
+        guard let elapsed = progress.elapsedSeconds, elapsed > 0 else { return nil }
+        let measuredBytes = progress.copiedBytes > 0 ? progress.copiedBytes : progress.completedBytes
+        guard measuredBytes > 0 else { return nil }
+        let megabytes = Double(measuredBytes) / 1_000_000
+        guard megabytes > 0 else { return nil }
+        return "\(formatDecimal(elapsed / megabytes)) s/MB"
+    }
+
+    private static func formatDecimal(_ value: Double) -> String {
+        if value >= 100 {
+            return String(format: "%.0f", value)
+        }
+        if value >= 10 {
+            return String(format: "%.1f", value)
+        }
+        return String(format: "%.2f", value)
     }
 }
 

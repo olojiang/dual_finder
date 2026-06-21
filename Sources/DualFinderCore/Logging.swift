@@ -124,6 +124,7 @@ public final class RotatingLogStore: @unchecked Sendable {
 
 public final class AppLogger: AppLogging, @unchecked Sendable {
     private let store: RotatingLogStore
+    private let queue = DispatchQueue(label: "com.dualfinder.app-logger", qos: .utility)
 
     public init(store: RotatingLogStore = RotatingLogStore()) {
         self.store = store
@@ -134,10 +135,12 @@ public final class AppLogger: AppLogging, @unchecked Sendable {
     }
 
     public func log(_ level: LogLevel, _ category: String, _ message: String, metadata: [String: String] = [:]) {
-        do {
-            try store.append(level: level, category: category, message: message, metadata: metadata)
-        } catch {
-            fputs("DualFinder log write failed: \(error)\n", stderr)
+        queue.async { [store] in
+            do {
+                try store.append(level: level, category: category, message: message, metadata: metadata)
+            } catch {
+                fputs("DualFinder log write failed: \(error)\n", stderr)
+            }
         }
     }
 }

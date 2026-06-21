@@ -36,6 +36,7 @@ public struct FileOperationProgress: Sendable, Equatable {
     public let copiedBytes: Int64
     public let skippedItems: Int
     public let skippedBytes: Int64
+    public let elapsedSeconds: TimeInterval?
 
     public init(
         completedBytes: Int64,
@@ -47,7 +48,8 @@ public struct FileOperationProgress: Sendable, Equatable {
         copiedItems: Int = 0,
         copiedBytes: Int64 = 0,
         skippedItems: Int = 0,
-        skippedBytes: Int64 = 0
+        skippedBytes: Int64 = 0,
+        elapsedSeconds: TimeInterval? = nil
     ) {
         self.completedBytes = completedBytes
         self.totalBytes = totalBytes
@@ -59,6 +61,7 @@ public struct FileOperationProgress: Sendable, Equatable {
         self.copiedBytes = copiedBytes
         self.skippedItems = skippedItems
         self.skippedBytes = skippedBytes
+        self.elapsedSeconds = elapsedSeconds
     }
 
     public var fractionCompleted: Double? {

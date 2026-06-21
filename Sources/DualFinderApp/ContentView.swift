@@ -22,6 +22,8 @@ struct ContentView: View {
             model.addTab(on: model.activePaneSide)
         } newRightTab: {
             model.addTab(on: .right)
+        } newFolder: {
+            model.createFolderAndRequestRename(in: model.activePaneSide)
         } showShortcutHelp: {
             model.requestShortcutHelp()
         } goToFolder: {
@@ -66,9 +68,7 @@ struct ContentView: View {
         .sheet(item: $model.folderBookmarkDialogRequest) { _ in
             FolderBookmarkDialog(model: model)
         }
-        .sheet(item: $model.batchRenameDialogRequest) { request in
-            BatchRenameDialog(model: model, side: request.side)
-        }
+        .background(BatchRenameWindowPresenter(request: model.batchRenameDialogRequest, model: model))
         .sheet(item: $model.mergeFilesDialogRequest) { request in
             MergeFilesDialog(model: model, request: request)
         }
@@ -272,6 +272,7 @@ struct ContentView: View {
 
 private struct CommonLocationsSidebar: View {
     @ObservedObject var model: DualFinderViewModel
+    @State private var volumeEntries: [MountedVolumeLocation] = []
 
     private var isCollapsed: Bool {
         model.uiLayoutPreferences.isSidebarCollapsed
@@ -296,7 +297,7 @@ private struct CommonLocationsSidebar: View {
                 }
                 Spacer()
                 if !isCollapsed {
-                    IconButton(systemName: "star.badge.plus", help: "Add active folder to favorites") {
+                    IconButton(systemName: "star", help: "Add active folder to favorites") {
                         model.addActiveFolderToFavorites()
                     }
                 }
@@ -313,6 +314,9 @@ private struct CommonLocationsSidebar: View {
             ScrollView {
                 VStack(alignment: isCollapsed ? .center : .leading, spacing: 14) {
                     sidebarSection("Pinned", entries: pinnedEntries)
+                    if !volumeEntries.isEmpty {
+                        volumeSection("Volumes", entries: volumeEntries)
+                    }
                     if !favorites.isEmpty {
                         sidebarSection("Favorites", entries: favorites)
                     }
@@ -325,6 +329,16 @@ private struct CommonLocationsSidebar: View {
             }
         }
         .background(.bar.opacity(0.45))
+        .onAppear(perform: refreshVolumeEntries)
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)) { _ in
+            refreshVolumeEntries()
+        }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didUnmountNotification)) { _ in
+            refreshVolumeEntries()
+        }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didRenameVolumeNotification)) { _ in
+            refreshVolumeEntries()
+        }
     }
 
     private var pinnedEntries: [FolderBookmarkEntry] {
@@ -364,6 +378,36 @@ private struct CommonLocationsSidebar: View {
         }
     }
 
+    private func volumeSection(_ title: String, entries: [MountedVolumeLocation]) -> some View {
+        VStack(alignment: isCollapsed ? .center : .leading, spacing: 4) {
+            if !isCollapsed {
+                Text(title.uppercased())
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+            }
+            ForEach(entries) { entry in
+                CommonLocationRow(
+                    entry: FolderBookmarkEntry(url: entry.url, isFavorite: false),
+                    isActive: isActive(entry.url),
+                    isCollapsed: isCollapsed,
+                    overrideIconName: entry.iconName,
+                    open: {
+                        model.navigateToBookmarkedFolder(entry.url)
+                    },
+                    removeFavorite: {},
+                    unmount: {
+                        model.unmountVolume(entry.url)
+                    }
+                )
+            }
+        }
+    }
+
+    private func refreshVolumeEntries() {
+        volumeEntries = MountedVolumeLocations.current()
+    }
+
     private func isActive(_ url: URL) -> Bool {
         model.pane(for: model.activePaneSide).selectedURL.standardizedFileURL == url.standardizedFileURL
     }
@@ -373,8 +417,10 @@ private struct CommonLocationRow: View {
     let entry: FolderBookmarkEntry
     let isActive: Bool
     let isCollapsed: Bool
+    var overrideIconName: String?
     let open: () -> Void
     let removeFavorite: () -> Void
+    var unmount: (() -> Void)?
     @State private var isRemoveConfirmationPresented = false
 
     var body: some View {
@@ -391,6 +437,9 @@ private struct CommonLocationRow: View {
                 Button("Remove Favorite") {
                     isRemoveConfirmationPresented = true
                 }
+            }
+            if let unmount {
+                Button("Unmount", role: .destructive, action: unmount)
             }
         }
         .confirmationDialog(
@@ -436,7 +485,7 @@ private struct CommonLocationRow: View {
             Image(systemName: "star.fill")
                 .foregroundStyle(Color.accentColor)
         } else {
-            Image(systemName: iconName)
+            Image(systemName: overrideIconName ?? iconName)
                 .foregroundStyle(Color.secondary)
         }
     }
@@ -454,7 +503,7 @@ private struct CommonLocationRow: View {
             .buttonStyle(.plain)
             .help("Remove from favorites")
         } else {
-            Image(systemName: iconName)
+            Image(systemName: overrideIconName ?? iconName)
                 .foregroundStyle(Color.secondary)
                 .frame(width: 18)
         }
@@ -754,6 +803,10 @@ private struct ConflictPreviewList: View {
         conflicts.count - overwriteCount
     }
 
+    private var currentConflictID: String? {
+        conflicts.first(where: isCurrent)?.id
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
@@ -765,14 +818,23 @@ private struct ConflictPreviewList: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(conflicts) { conflict in
-                        ConflictPreviewRow(conflict: conflict, isCurrent: isCurrent(conflict))
-                        if conflict.id != conflicts.last?.id {
-                            Divider()
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(conflicts) { conflict in
+                            ConflictPreviewRow(conflict: conflict, isCurrent: isCurrent(conflict))
+                                .id(conflict.id)
+                            if conflict.id != conflicts.last?.id {
+                                Divider()
+                            }
                         }
                     }
+                }
+                .onAppear {
+                    scrollToCurrentConflict(with: proxy)
+                }
+                .onChange(of: currentConflictID) { _, _ in
+                    scrollToCurrentConflict(with: proxy)
                 }
             }
             .frame(maxHeight: 190)
@@ -785,6 +847,15 @@ private struct ConflictPreviewList: View {
 
     private func isCurrent(_ conflict: FileConflictPreview) -> Bool {
         conflict.source == request.source && conflict.destination == request.destination
+    }
+
+    private func scrollToCurrentConflict(with proxy: ScrollViewProxy) {
+        guard let currentConflictID else { return }
+        DispatchQueue.main.async {
+            withAnimation(.easeOut(duration: 0.16)) {
+                proxy.scrollTo(currentConflictID, anchor: .center)
+            }
+        }
     }
 }
 
@@ -1201,6 +1272,7 @@ private enum ShortcutHelpCatalog {
             ]),
             ShortcutHelpGroup(title: "Selection and Files", entries: [
                 ShortcutHelpEntry(title: "Select All", shortcut: "⌘A", note: nil),
+                entry(.newFolder, note: "Creates in the active pane"),
                 ShortcutHelpEntry(title: "Rename", shortcut: "Return", note: "Single selected item"),
                 entry(.batchRename),
                 ShortcutHelpEntry(title: "Open Selection", shortcut: "⌘O", note: nil),
@@ -1236,6 +1308,7 @@ private struct AppShortcutHandler: NSViewRepresentable {
     let isSuspended: Bool
     let newActiveTab: () -> Void
     let newRightTab: () -> Void
+    let newFolder: () -> Void
     let showShortcutHelp: () -> Void
     let goToFolder: () -> Void
     let showFileSearch: () -> Void
@@ -1258,6 +1331,7 @@ private struct AppShortcutHandler: NSViewRepresentable {
         Coordinator(
             newActiveTab: newActiveTab,
             newRightTab: newRightTab,
+            newFolder: newFolder,
             showShortcutHelp: showShortcutHelp,
             goToFolder: goToFolder,
             showFileSearch: showFileSearch,
@@ -1287,6 +1361,7 @@ private struct AppShortcutHandler: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {
         context.coordinator.newActiveTab = newActiveTab
         context.coordinator.newRightTab = newRightTab
+        context.coordinator.newFolder = newFolder
         context.coordinator.showShortcutHelp = showShortcutHelp
         context.coordinator.goToFolder = goToFolder
         context.coordinator.showFileSearch = showFileSearch
@@ -1314,6 +1389,7 @@ private struct AppShortcutHandler: NSViewRepresentable {
     final class Coordinator {
         var newActiveTab: () -> Void
         var newRightTab: () -> Void
+        var newFolder: () -> Void
         var showShortcutHelp: () -> Void
         var goToFolder: () -> Void
         var showFileSearch: () -> Void
@@ -1337,6 +1413,7 @@ private struct AppShortcutHandler: NSViewRepresentable {
         init(
             newActiveTab: @escaping () -> Void,
             newRightTab: @escaping () -> Void,
+            newFolder: @escaping () -> Void,
             showShortcutHelp: @escaping () -> Void,
             goToFolder: @escaping () -> Void,
             showFileSearch: @escaping () -> Void,
@@ -1358,6 +1435,7 @@ private struct AppShortcutHandler: NSViewRepresentable {
         ) {
             self.newActiveTab = newActiveTab
             self.newRightTab = newRightTab
+            self.newFolder = newFolder
             self.showShortcutHelp = showShortcutHelp
             self.goToFolder = goToFolder
             self.showFileSearch = showFileSearch
@@ -1396,6 +1474,9 @@ private struct AppShortcutHandler: NSViewRepresentable {
                     return nil
                 case .newRightTab:
                     self?.newRightTab()
+                    return nil
+                case .newFolder:
+                    self?.newFolder()
                     return nil
                 case .goToFolder:
                     self?.goToFolder()
@@ -1546,6 +1627,7 @@ private struct EmptyTrashConfirmationDialog: View {
                 Button("Empty Trash", role: .destructive) {
                     model.confirmEmptyTrash()
                 }
+                .keyboardShortcut(.defaultAction)
                 .focused($focusedAction, equals: .confirm)
             }
         }

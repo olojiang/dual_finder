@@ -102,9 +102,13 @@ public final class TextEncodingConversionCache: @unchecked Sendable {
         guard let size, let modifiedAt else { return nil }
         lock.lock()
         defer { lock.unlock() }
-        guard let entry = entries[normalizedPath(for: file)],
-              entry.size == size,
-              Self.matchesStoredModificationDate(entry.modifiedAt, modifiedAt) else {
+        let candidateKeys = [
+            cacheKey(for: file, size: size, modifiedAt: modifiedAt),
+            legacyPathCacheKey(for: file)
+        ]
+        guard let entry = candidateKeys.compactMap({ entries[$0] }).first(where: {
+            $0.size == size && Self.matchesStoredModificationDate($0.modifiedAt, modifiedAt)
+        }) else {
             return nil
         }
         return entry.encoding
@@ -121,7 +125,11 @@ public final class TextEncodingConversionCache: @unchecked Sendable {
     public func markEncoding(_ encoding: String, for file: URL, size: Int64?, modifiedAt: Date?) throws {
         guard let size, let modifiedAt else { return }
         lock.lock()
-        entries[normalizedPath(for: file)] = Entry(size: size, modifiedAt: modifiedAt, encoding: encoding)
+        entries[cacheKey(for: file, size: size, modifiedAt: modifiedAt)] = Entry(
+            size: size,
+            modifiedAt: modifiedAt,
+            encoding: encoding
+        )
         let snapshot = entries
         lock.unlock()
         try save(snapshot)
@@ -154,8 +162,20 @@ public final class TextEncodingConversionCache: @unchecked Sendable {
         try data.write(to: storageURL, options: [.atomic])
     }
 
-    private func normalizedPath(for file: URL) -> String {
+    private func cacheKey(for file: URL, size: Int64, modifiedAt: Date) -> String {
+        [
+            file.lastPathComponent,
+            String(size),
+            String(Self.modificationDateCacheToken(for: modifiedAt))
+        ].joined(separator: "\u{1f}")
+    }
+
+    private func legacyPathCacheKey(for file: URL) -> String {
         file.standardizedFileURL.path
+    }
+
+    private static func modificationDateCacheToken(for date: Date) -> Int64 {
+        Int64((date.timeIntervalSince1970 * 1_000).rounded())
     }
 
     private static func matchesStoredModificationDate(_ stored: Date, _ current: Date) -> Bool {

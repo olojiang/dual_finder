@@ -124,6 +124,23 @@ struct FileSystemServiceTests {
         #expect(service.parent(of: URL(fileURLWithPath: "/tmp/example")) == URL(fileURLWithPath: "/tmp"))
     }
 
+    @Test("finds nearest existing directory ancestor")
+    func findsNearestExistingDirectoryAncestor() throws {
+        let root = try TemporaryDirectory()
+        let nested = root.url.appendingPathComponent("Existing", isDirectory: true)
+        let file = nested.appendingPathComponent("file.txt")
+        let missing = nested
+            .appendingPathComponent("Deleted", isDirectory: true)
+            .appendingPathComponent("Current", isDirectory: true)
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        try "file".write(to: file, atomically: true, encoding: .utf8)
+
+        let service = FileSystemService()
+
+        #expect(service.existingDirectoryAncestor(startingAt: missing) == nested.standardizedFileURL)
+        #expect(service.existingDirectoryAncestor(startingAt: file) == nested.standardizedFileURL)
+    }
+
     @Test("returns available capacity for a directory volume")
     func returnsAvailableCapacityForDirectoryVolume() throws {
         let root = try TemporaryDirectory()

@@ -5,6 +5,7 @@ import SwiftUI
 enum AppShortcutAction: String, CaseIterable, Identifiable {
     case newActiveTab
     case newRightTab
+    case newFolder
     case goToFolder
     case fileSearch
     case flatView
@@ -36,6 +37,7 @@ enum AppShortcutAction: String, CaseIterable, Identifiable {
         switch self {
         case .newActiveTab: "New Tab in Active Pane"
         case .newRightTab: "New Right Tab"
+        case .newFolder: "New Folder"
         case .goToFolder: "Go to Folder"
         case .fileSearch: "Filter Current Folder"
         case .flatView: "Flat View"
@@ -73,7 +75,7 @@ enum AppShortcutAction: String, CaseIterable, Identifiable {
             "Navigation"
         case .selectTab1, .selectTab2, .selectTab3, .selectTab4, .selectTab5, .selectTab6, .selectTab7, .selectTab8, .selectTab9:
             "Tabs"
-        case .copyLeftSelectionToRight, .copyRightSelectionToLeft, .moveLeftSelectionToRight, .moveRightSelectionToLeft:
+        case .newFolder, .copyLeftSelectionToRight, .copyRightSelectionToLeft, .moveLeftSelectionToRight, .moveRightSelectionToLeft:
             "File Operations"
         }
     }
@@ -99,6 +101,8 @@ enum AppShortcutAction: String, CaseIterable, Identifiable {
             AppShortcutBinding(key: "t", keyCode: nil, modifiers: [.command])
         case .newRightTab:
             AppShortcutBinding(key: "t", keyCode: nil, modifiers: [.command, .shift])
+        case .newFolder:
+            AppShortcutBinding(key: "n", keyCode: nil, modifiers: [.command, .shift])
         case .goToFolder:
             AppShortcutBinding(key: "g", keyCode: nil, modifiers: [.command, .shift])
         case .fileSearch:

@@ -7,6 +7,37 @@ import Testing
 @Suite("FilePane interactions")
 struct FilePaneInteractionTests {
     @MainActor
+    @Test("new folder shortcut path creates a folder and requests inline rename")
+    func newFolderShortcutPathCreatesFolderAndRequestsInlineRename() throws {
+        let root = try AppTestTemporaryDirectory()
+        let model = makeLocalModel(initialURL: root.url)
+
+        model.createFolderAndRequestRename(in: .left)
+
+        let created = root.url.appendingPathComponent("New Folder").standardizedFileURL
+        #expect(FileManager.default.fileExists(atPath: created.path))
+        #expect(model.pane(for: .left).selectedItemURLs == [created])
+        #expect(model.inlineRenameRequest?.side == .left)
+        #expect(model.inlineRenameRequest?.url == created)
+    }
+
+    @MainActor
+    @Test("renaming a newly-created folder keeps selection equal to the rendered row URL")
+    func renamingNewFolderKeepsSelectionEqualToRenderedRowURL() throws {
+        let root = try AppTestTemporaryDirectory()
+        let model = makeLocalModel(initialURL: root.url)
+        let created = try #require(model.createFolder(in: .left))
+
+        let renamed = try #require(model.renameItem(created, to: "Finished", on: .left))
+        let selected = try #require(model.pane(for: .left).selectedItemURLs.first)
+        let renderedRow = try #require(model.items(for: .left).first { $0.name == "Finished" })
+
+        #expect(selected == renamed)
+        #expect(renderedRow.url == selected)
+        #expect(renderedRow.isDirectoryLike)
+    }
+
+    @MainActor
     @Test("switches a pane to android view and lists the selected device")
     func switchesPaneToAndroidView() throws {
         let root = try AppTestTemporaryDirectory()
@@ -78,6 +109,82 @@ struct FilePaneInteractionTests {
     }
 
     @MainActor
+    @Test("toolbar Android device refresh is cached and expires")
+    func toolbarAndroidDeviceRefreshIsCachedAndExpires() throws {
+        let root = try AppTestTemporaryDirectory()
+        let runner = AppRecordingCommandRunner(results: [
+            CommandResult(
+                exitCode: 0,
+                stdout: """
+                List of devices attached
+                emulator-5554 device model:Pixel_8
+
+                """,
+                stderr: ""
+            ),
+            CommandResult(
+                exitCode: 0,
+                stdout: """
+                List of devices attached
+                emulator-5556 device model:Pixel_9
+
+                """,
+                stderr: ""
+            )
+        ])
+        let model = makeModel(initialURL: root.url, androidRunner: runner)
+        let start = Date(timeIntervalSince1970: 1_000)
+
+        model.refreshAndroidDevicesForToolbar(now: start, staleAfter: 5)
+        model.refreshAndroidDevicesForToolbar(now: start.addingTimeInterval(1), staleAfter: 5)
+        #expect(runner.calls.map(\.arguments) == [
+            ["adb", "devices", "-l"]
+        ])
+        #expect(model.androidDevices.map(\.serial) == ["emulator-5554"])
+
+        model.refreshAndroidDevicesForToolbar(now: start.addingTimeInterval(6), staleAfter: 5)
+        #expect(runner.calls.map(\.arguments) == [
+            ["adb", "devices", "-l"],
+            ["adb", "devices", "-l"]
+        ])
+        #expect(model.androidDevices.map(\.serial) == ["emulator-5556"])
+    }
+
+    @MainActor
+    @Test("toolbar Android device refresh caches failed attempts briefly")
+    func toolbarAndroidDeviceRefreshCachesFailedAttemptsBriefly() throws {
+        let root = try AppTestTemporaryDirectory()
+        let runner = AppRecordingCommandRunner(results: [
+            CommandResult(exitCode: 1, stdout: "", stderr: "adb unavailable"),
+            CommandResult(
+                exitCode: 0,
+                stdout: """
+                List of devices attached
+                emulator-5554 device model:Pixel_8
+
+                """,
+                stderr: ""
+            )
+        ])
+        let model = makeModel(initialURL: root.url, androidRunner: runner)
+        let start = Date(timeIntervalSince1970: 2_000)
+
+        model.refreshAndroidDevicesForToolbar(now: start, staleAfter: 5)
+        model.refreshAndroidDevicesForToolbar(now: start.addingTimeInterval(1), staleAfter: 5)
+        #expect(runner.calls.map(\.arguments) == [
+            ["adb", "devices", "-l"]
+        ])
+        #expect(model.androidDevices.isEmpty)
+
+        model.refreshAndroidDevicesForToolbar(now: start.addingTimeInterval(6), staleAfter: 5)
+        #expect(runner.calls.map(\.arguments) == [
+            ["adb", "devices", "-l"],
+            ["adb", "devices", "-l"]
+        ])
+        #expect(model.androidDevices.map(\.serial) == ["emulator-5554"])
+    }
+
+    @MainActor
     @Test("android pane opens selected folders without using local file existence")
     func androidPaneNavigatesIntoSelectedFolder() throws {
         let root = try AppTestTemporaryDirectory()
@@ -135,6 +242,39 @@ struct FilePaneInteractionTests {
 
         #expect(!model.isAndroidPane(.left))
         #expect(model.pane(for: .left).selectedURL == root.url.standardizedFileURL)
+    }
+
+    @MainActor
+    @Test("navigate up skips deleted parent directories")
+    func navigateUpSkipsDeletedParentDirectories() throws {
+        let root = try AppTestTemporaryDirectory()
+        let parent = root.url.appendingPathComponent("Parent", isDirectory: true)
+        let child = parent.appendingPathComponent("Child", isDirectory: true)
+        try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
+        let model = makeLocalModel(initialURL: child)
+
+        try FileManager.default.removeItem(at: parent)
+        model.navigateUp(.left)
+
+        #expect(model.pane(for: .left).selectedURL == root.url.standardizedFileURL)
+    }
+
+    @MainActor
+    @Test("refresh recovers to existing ancestor when current directory was deleted")
+    func refreshRecoversToExistingAncestorWhenCurrentDirectoryWasDeleted() throws {
+        let root = try AppTestTemporaryDirectory()
+        let parent = root.url.appendingPathComponent("Parent", isDirectory: true)
+        let child = parent.appendingPathComponent("Child", isDirectory: true)
+        let visible = root.url.appendingPathComponent("visible.txt")
+        try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
+        try "visible".write(to: visible, atomically: true, encoding: .utf8)
+        let model = makeLocalModel(initialURL: child)
+
+        try FileManager.default.removeItem(at: parent)
+        model.refresh(.left)
+
+        #expect(model.pane(for: .left).selectedURL == root.url.standardizedFileURL)
+        #expect(model.items(for: .left).map(\.url).contains(visible.standardizedFileURL))
     }
 
     @MainActor
@@ -439,6 +579,17 @@ struct FilePaneInteractionTests {
 
         #expect(mouseDownSelection == nil)
         #expect(mouseUpSelection == [urls[0], urls[1]])
+    }
+
+    @Test("selection snapshot matches exact and standardized file URLs")
+    func selectionSnapshotMatchesExactAndStandardizedFileURLs() {
+        let exact = URL(fileURLWithPath: "/tmp/DualFinder/a.txt").standardizedFileURL
+        let nonStandard = URL(fileURLWithPath: "/tmp/DualFinder/../DualFinder/b.txt")
+        let snapshot = FileSelectionSnapshot(selection: [exact, nonStandard])
+
+        #expect(snapshot.contains(exact))
+        #expect(snapshot.contains(nonStandard.standardizedFileURL))
+        #expect(!snapshot.contains(URL(fileURLWithPath: "/tmp/DualFinder/c.txt")))
     }
 
     @Test("keyboard navigation starts from mouse-updated anchor")

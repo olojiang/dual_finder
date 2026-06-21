@@ -48,6 +48,26 @@ struct ShortcutMatrixTests {
         #expect(AppShortcutMatrix.action(matching: event, defaults: defaults) == .copyLeftSelectionToRight)
     }
 
+    @Test("matches default new folder shortcut")
+    func matchesDefaultNewFolderShortcut() throws {
+        let (defaults, suiteName) = makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let event = try #require(NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [.command, .shift],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "N",
+            charactersIgnoringModifiers: "n",
+            isARepeat: false,
+            keyCode: 45
+        ))
+
+        #expect(AppShortcutMatrix.action(matching: event, defaults: defaults) == .newFolder)
+    }
+
     @Test("formats shortcut display text in modifier sort order")
     func formatsShortcutDisplayText() {
         let binding = AppShortcutBinding(key: "left", keyCode: 123, modifiers: [.shift, .command, .option])
@@ -55,6 +75,7 @@ struct ShortcutMatrixTests {
         #expect(binding.displayText == "⌘⌥⇧←")
         #expect(AppShortcutBinding(key: "space", keyCode: 49, modifiers: [.control]).displayText == "⌃Space")
         #expect(AppShortcutAction.flatView.defaultBinding.displayText == "⌃B")
+        #expect(AppShortcutAction.newFolder.defaultBinding.displayText == "⌘⇧N")
     }
 
     private func makeDefaults() -> (UserDefaults, String) {

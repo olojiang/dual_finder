@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Menu bar commands grouped to match Dual Finder features and selection state.
@@ -15,7 +16,9 @@ struct AppMenuCommands: Commands {
             trashCommands
         }
 
-        CommandGroup(replacing: .undoRedo) { }
+        CommandGroup(replacing: .undoRedo) {
+            textUndoCommands
+        }
 
         CommandGroup(replacing: .pasteboard) {
             editClipboardCommands
@@ -55,10 +58,9 @@ struct AppMenuCommands: Commands {
     @ViewBuilder
     private var createCommands: some View {
         Button("New Folder") {
-            if let created = model.createFolder(in: model.activePaneSide) {
-                model.requestInlineRename(for: created, on: model.activePaneSide)
-            }
+            model.createFolderAndRequestRename(in: model.activePaneSide)
         }
+        .keyboardShortcut("n", modifiers: [.command, .shift])
         .disabled(!model.canCreateInActivePane)
 
         Button("New Empty Text File") {
@@ -112,18 +114,40 @@ struct AppMenuCommands: Commands {
     // MARK: - Edit
 
     @ViewBuilder
+    private var textUndoCommands: some View {
+        Button("Undo") {
+            _ = TextEditingCommandRouter.perform(Selector(("undo:")))
+        }
+        .keyboardShortcut("z", modifiers: [.command])
+
+        Button("Redo") {
+            _ = TextEditingCommandRouter.perform(Selector(("redo:")))
+        }
+        .keyboardShortcut("z", modifiers: [.command, .shift])
+    }
+
+    @ViewBuilder
     private var editClipboardCommands: some View {
+        Button("Cut") {
+            _ = TextEditingCommandRouter.perform(#selector(NSText.cut(_:)))
+        }
+        .keyboardShortcut("x", modifiers: [.command])
+
         Button("Copy") {
+            if TextEditingCommandRouter.perform(#selector(NSText.copy(_:))) {
+                return
+            }
             model.copySelectionToFileClipboard(on: model.activePaneSide)
         }
         .keyboardShortcut("c", modifiers: [.command])
-        .disabled(!model.canCopyActiveSelection)
 
         Button("Paste") {
+            if TextEditingCommandRouter.perform(#selector(NSText.paste(_:))) {
+                return
+            }
             model.pasteFileClipboard(into: model.activePaneSide, operation: .copy)
         }
         .keyboardShortcut("v", modifiers: [.command])
-        .disabled(!model.canPasteToActivePane)
 
         Button("Paste and Move") {
             model.pasteFileClipboard(into: model.activePaneSide, operation: .move)
@@ -142,10 +166,12 @@ struct AppMenuCommands: Commands {
     @ViewBuilder
     private var editSelectionCommands: some View {
         Button("Select All") {
+            if TextEditingCommandRouter.perform(#selector(NSText.selectAll(_:))) {
+                return
+            }
             model.selectAllItems(on: model.activePaneSide)
         }
         .keyboardShortcut("a", modifiers: [.command])
-        .disabled(!model.canSelectAllInActivePane)
 
         Button("Rename") {
             model.requestInlineRenameActiveSelection()

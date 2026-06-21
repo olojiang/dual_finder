@@ -297,6 +297,64 @@ struct TextEncodingConversionServiceTests {
         #expect(try String(contentsOf: file, encoding: .utf8) == sourceText)
     }
 
+    @Test("UTF-8 cache key follows file name size and modification date")
+    func utf8CacheKeyFollowsFileNameSizeAndModificationDate() throws {
+        let root = try TemporaryDirectory()
+        let firstDirectory = root.url.appendingPathComponent("first", isDirectory: true)
+        let secondDirectory = root.url.appendingPathComponent("second", isDirectory: true)
+        try FileManager.default.createDirectory(at: firstDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: secondDirectory, withIntermediateDirectories: true)
+        let first = firstDirectory.appendingPathComponent("same.txt")
+        let second = secondDirectory.appendingPathComponent("same.txt")
+        let differentName = secondDirectory.appendingPathComponent("other.txt")
+        let cacheURL = root.url.appendingPathComponent("encoding-cache.json")
+        let cache = TextEncodingConversionCache(storageURL: cacheURL)
+        let modifiedAt = Date(timeIntervalSince1970: 1_800)
+        try "abcd".write(to: first, atomically: true, encoding: .utf8)
+        try Data([0xff, 0x00, 0xfe, 0x01]).write(to: second)
+        try Data([0xff, 0x00, 0xfe, 0x01]).write(to: differentName)
+        try FileManager.default.setAttributes([.modificationDate: modifiedAt], ofItemAtPath: first.path)
+        try FileManager.default.setAttributes([.modificationDate: modifiedAt], ofItemAtPath: second.path)
+        try FileManager.default.setAttributes([.modificationDate: modifiedAt], ofItemAtPath: differentName.path)
+
+        _ = try TextEncodingConversionService(logger: CapturingLogger(), cache: cache).convertFileToUTF8(first)
+        let sameNameResult = try TextEncodingConversionService(logger: CapturingLogger(), cache: cache).convertFileToUTF8(second)
+        let differentNameResult = try TextEncodingConversionService(logger: CapturingLogger(), cache: cache).convertFileToUTF8(differentName)
+
+        #expect(sameNameResult.status == .alreadyUTF8)
+        #expect(sameNameResult.usedCache)
+        #expect(differentNameResult.status == .renamedUnknown)
+        #expect(!differentNameResult.usedCache)
+    }
+
+    @Test("reads legacy path based encoding cache entries")
+    func readsLegacyPathBasedEncodingCacheEntries() throws {
+        struct LegacyEntry: Codable {
+            var size: Int64
+            var modifiedAt: Date
+            var encoding: String
+        }
+
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("legacy.txt")
+        let cacheURL = root.url.appendingPathComponent("encoding-cache.json")
+        try "legacy".write(to: file, atomically: true, encoding: .utf8)
+        let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
+        let size = try #require((attributes[.size] as? NSNumber)?.int64Value)
+        let modifiedAt = try #require(attributes[.modificationDate] as? Date)
+        let legacy = [file.standardizedFileURL.path: LegacyEntry(size: size, modifiedAt: modifiedAt, encoding: "utf-8")]
+        try JSONEncoder().encode(legacy).write(to: cacheURL)
+
+        let result = try TextEncodingConversionService(
+            logger: CapturingLogger(),
+            cache: TextEncodingConversionCache(storageURL: cacheURL)
+        ).convertFileToUTF8(file)
+
+        #expect(result.status == .alreadyUTF8)
+        #expect(result.usedCache)
+        #expect(result.detectedEncoding == "utf-8")
+    }
+
     @Test("detects and caches file list encoding by size and modification date")
     func detectsAndCachesEncodingForFileList() throws {
         let root = try TemporaryDirectory()

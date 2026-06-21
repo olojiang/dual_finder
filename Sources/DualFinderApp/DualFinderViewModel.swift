@@ -185,6 +185,7 @@ final class DualFinderViewModel: ObservableObject {
     private var rightFlatViewReturnSelection: Set<URL> = []
     private var androidPaneDevices: [PaneSide: String] = [:]
     private var localPaneReturnURLs: [PaneSide: URL] = [:]
+    private var androidDevicesLastRefreshedAt: Date?
     private var globalSearchCancellation: FileOperationCancellation?
     private var archiveCancellation: FileOperationCancellation?
     private var textEncodingScanCancellations: [PaneSide: TextEncodingScanCancellation] = [:]
@@ -547,6 +548,17 @@ final class DualFinderViewModel: ObservableObject {
         inlineRenameRequest = InlineRenameRequest(side: side, url: url)
     }
 
+    func createFolderAndRequestRename(in side: PaneSide) {
+        guard MenuActionAvailability.canCreateItems(
+            isInlineRenaming: isInlineRenaming,
+            isArchiveOperationRunning: isArchiveOperationRunning
+        ) else { return }
+
+        if let created = createFolder(in: side) {
+            requestInlineRename(for: created, on: side)
+        }
+    }
+
     func shareActiveSelection() {
         shareItems([], on: activePaneSide)
     }
@@ -576,10 +588,11 @@ final class DualFinderViewModel: ObservableObject {
                 guard self.pane(for: side).selectedItemURLs != newValue else { return }
 
                 self.setSelection(newValue, for: side)
-                self.logger.debug("selection", "selection.changed", metadata: [
-                    "side": side.rawValue,
-                    "count": "\(newValue.count)"
-                ])
+                self.logger.debug(
+                    "selection",
+                    "selection.changed",
+                    metadata: self.selectionLogMetadata(newValue, side: side)
+                )
             }
         )
     }
@@ -643,6 +656,10 @@ final class DualFinderViewModel: ObservableObject {
         logger.debug("pane-focus", message, metadata: metadata)
     }
 
+    func logSelectionPerformanceEvent(_ message: String, metadata: [String: String] = [:]) {
+        logger.debug("selection-performance", message, metadata: metadata)
+    }
+
     func logShortcutEvent(_ message: String, metadata: [String: String] = [:]) {
         logger.debug("shortcut", message, metadata: metadata)
     }
@@ -662,7 +679,8 @@ final class DualFinderViewModel: ObservableObject {
         ])
     }
 
-    func refreshAndroidDevices() {
+    func refreshAndroidDevices(refreshedAt: Date = Date()) {
+        androidDevicesLastRefreshedAt = refreshedAt
         do {
             androidDevices = try androidFileService.devices()
             statusMessage = androidDevices.isEmpty
@@ -674,6 +692,15 @@ final class DualFinderViewModel: ObservableObject {
         } catch {
             reportOperationFailure("android.devices.failed", error: error)
         }
+    }
+
+    func refreshAndroidDevicesForToolbar(now: Date = Date(), staleAfter: TimeInterval = 5) {
+        guard !isInlineRenaming else { return }
+        if let androidDevicesLastRefreshedAt,
+           now.timeIntervalSince(androidDevicesLastRefreshedAt) < staleAfter {
+            return
+        }
+        refreshAndroidDevices(refreshedAt: now)
     }
 
     func refreshAndroidStateForViewButton(on side: PaneSide) {
@@ -997,6 +1024,36 @@ final class DualFinderViewModel: ObservableObject {
         navigate(activePaneSide, to: url)
     }
 
+    func unmountVolume(_ url: URL) {
+        let displayName = url.lastPathComponent.isEmpty ? url.path : url.lastPathComponent
+        statusMessage = "Unmounting \(displayName)..."
+        logger.info("volume", "unmount.requested", metadata: [
+            "path": url.path
+        ])
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = Result {
+                try NSWorkspace.shared.unmountAndEjectDevice(at: url)
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                switch result {
+                case .success:
+                    self.statusMessage = "Unmounted \(displayName)"
+                    self.logger.info("volume", "unmount.completed", metadata: [
+                        "path": url.path
+                    ])
+                case .failure(let error):
+                    self.statusMessage = "Could not unmount \(displayName)"
+                    self.logger.error("volume", "unmount.failed", metadata: [
+                        "path": url.path,
+                        "error": error.localizedDescription
+                    ])
+                }
+            }
+        }
+    }
+
     func selectItem(_ url: URL, on side: PaneSide) {
         activatePane(side)
         guard pane(for: side).selectedItemURLs != [url] else { return }
@@ -1031,11 +1088,11 @@ final class DualFinderViewModel: ObservableObject {
         guard pane(for: side).selectedItemURLs != selection else { return }
 
         setSelection(selection, for: side)
-        logger.debug("selection", "selection.replaced", metadata: [
-            "side": side.rawValue,
-            "count": "\(selection.count)",
-            "source": source
-        ])
+        logger.debug(
+            "selection",
+            "selection.replaced",
+            metadata: selectionLogMetadata(selection, side: side, source: source)
+        )
     }
 
     func extendSelection(to url: URL, on side: PaneSide) {
@@ -1137,7 +1194,17 @@ final class DualFinderViewModel: ObservableObject {
             return
         }
 
-        let currentURL = pane(for: side).selectedURL
+        let currentURL = pane(for: side).selectedURL.standardizedFileURL
+        if let existingDirectory = fileSystem.existingDirectoryAncestor(startingAt: currentURL),
+           existingDirectory != currentURL {
+            navigateToExistingLocalDirectory(
+                side,
+                to: existingDirectory,
+                source: "refresh.recovered-missing-directory"
+            )
+            return
+        }
+
         do {
             let rule = sortRuleStore.rule(for: currentURL)
             let nextItems = try fileSystem.contents(
@@ -1253,6 +1320,25 @@ final class DualFinderViewModel: ObservableObject {
         refresh(side)
     }
 
+    private func navigateToExistingLocalDirectory(
+        _ side: PaneSide,
+        to url: URL,
+        selecting selection: URL? = nil,
+        source: String
+    ) {
+        let directory = url.standardizedFileURL
+        clearFlatViewState(on: side)
+        mutatePane(side) { $0.navigateSelectedTab(to: directory, selecting: selection) }
+        folderBookmarkStore.recordRecentFolder(directory)
+        persistPaneSession()
+        logger.info("navigation", source, metadata: [
+            "side": side.rawValue,
+            "path": directory.path,
+            "selection": selection?.path ?? ""
+        ])
+        refresh(side)
+    }
+
     func navigateBack(_ side: PaneSide) {
         guard !isInlineRenaming else { return }
         guard let url = mutatePane(side, { $0.navigateSelectedTabBack() }) else {
@@ -1343,9 +1429,18 @@ final class DualFinderViewModel: ObservableObject {
             return
         }
 
-        let currentURL = pane(for: side).selectedURL
-        guard let parent = fileSystem.parent(of: currentURL) else { return }
-        navigate(side, to: parent, selecting: currentURL)
+        let currentURL = pane(for: side).selectedURL.standardizedFileURL
+        guard let parent = fileSystem.parent(of: currentURL),
+              let existingParent = fileSystem.existingDirectoryAncestor(startingAt: parent)
+        else { return }
+
+        let selection = existingParent == parent ? currentURL : nil
+        navigateToExistingLocalDirectory(
+            side,
+            to: existingParent,
+            selecting: selection,
+            source: "navigate.up"
+        )
     }
 
     func navigateIntoSelectedDirectory(_ side: PaneSide) {
@@ -1742,10 +1837,10 @@ final class DualFinderViewModel: ObservableObject {
         }
     }
 
-    func renameItem(_ url: URL, to newName: String, on side: PaneSide) {
+    @discardableResult
+    func renameItem(_ url: URL, to newName: String, on side: PaneSide) -> URL? {
         if url.scheme == AndroidFileURL.scheme {
-            renameAndroidItem(url, to: newName, on: side)
-            return
+            return renameAndroidItem(url, to: newName, on: side)
         }
 
         do {
@@ -1753,9 +1848,115 @@ final class DualFinderViewModel: ObservableObject {
             statusMessage = "Renamed to \(renamed.lastPathComponent)"
             refresh(side)
             setSelection([renamed], for: side)
+            mergeRenamedItemIntoCurrentItems(renamed, replacing: url, on: side, source: "rename.commit")
+            ensureRenamedItemAppears(renamed, on: side)
+            logger.debug("selection", "selection.replaced", metadata: [
+                "side": side.rawValue,
+                "count": "1",
+                "source": "rename.commit",
+                "path": renamed.path
+            ])
+            return renamed
         } catch {
             reportOperationFailure("rename.failed", error: error)
+            return nil
         }
+    }
+
+    private func ensureRenamedItemAppears(_ url: URL, on side: PaneSide) {
+        guard !items(for: side).contains(where: { sameFileIdentity($0.url, url) }) else {
+            logger.debug("navigation", "rename.refresh.target-present", metadata: [
+                "side": side.rawValue,
+                "path": url.path,
+                "attempt": "0"
+            ])
+            return
+        }
+
+        logger.warning("navigation", "rename.refresh.target-missing", metadata: [
+            "side": side.rawValue,
+            "path": url.path,
+            "attempt": "0",
+            "itemCount": "\(items(for: side).count)"
+        ])
+
+        let delays: [TimeInterval] = [0.03, 0.10, 0.25, 0.50]
+        for (index, delay) in delays.enumerated() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self else { return }
+                guard self.selection(on: side, contains: url) else {
+                    self.logger.debug("navigation", "rename.refresh.retry-cancelled", metadata: [
+                        "side": side.rawValue,
+                        "path": url.path,
+                        "attempt": "\(index + 1)",
+                        "reason": "selection-changed"
+                    ])
+                    return
+                }
+
+                self.refresh(side)
+                self.mergeRenamedItemIntoCurrentItems(url, replacing: nil, on: side, source: "rename.refresh.retry")
+                self.setSelection([url], for: side)
+                let containsTarget = self.items(for: side).contains(where: { self.sameFileIdentity($0.url, url) })
+                self.logger.debug("navigation", "rename.refresh.retry", metadata: [
+                    "side": side.rawValue,
+                    "path": url.path,
+                    "attempt": "\(index + 1)",
+                    "delay": String(format: "%.2f", delay),
+                    "containsTarget": "\(containsTarget)",
+                    "itemCount": "\(self.items(for: side).count)"
+                ])
+            }
+        }
+    }
+
+    private func mergeRenamedItemIntoCurrentItems(
+        _ url: URL,
+        replacing oldURL: URL?,
+        on side: PaneSide,
+        source: String
+    ) {
+        do {
+            let item = try fileSystem.item(
+                at: url,
+                folderSizeCache: folderSizeCache,
+                textEncodingCache: textEncodingCache,
+                includeTextEncoding: uiLayoutPreferences.isEncodingColumnVisible
+            )
+            let rule = sortRuleStore.rule(for: flatViewRoot(for: side) ?? pane(for: side).selectedURL)
+            let oldStandardizedURL = oldURL?.standardizedFileURL
+            var nextItems = items(for: side).filter { existing in
+                !sameFileIdentity(existing.url, item.url)
+                    && oldStandardizedURL.map { !sameFileIdentity(existing.url, $0) } != false
+            }
+            nextItems.append(item)
+            nextItems.sort { FileSystemService.sortItems($0, $1, rule: rule) }
+            setItems(nextItems, for: side)
+            logger.debug("navigation", "rename.items.merged", metadata: [
+                "side": side.rawValue,
+                "path": url.path,
+                "source": source,
+                "itemCount": "\(nextItems.count)",
+                "index": "\(nextItems.firstIndex(where: { sameFileIdentity($0.url, item.url) }) ?? -1)",
+                "itemURL": item.url.absoluteString,
+                "targetURL": url.absoluteString
+            ])
+        } catch {
+            logger.error("navigation", "rename.items.merge-failed", metadata: [
+                "side": side.rawValue,
+                "path": url.path,
+                "source": source,
+                "error": error.localizedDescription
+            ])
+        }
+    }
+
+    private func selection(on side: PaneSide, contains url: URL) -> Bool {
+        pane(for: side).selectedItemURLs.contains { sameFileIdentity($0, url) }
+    }
+
+    private func sameFileIdentity(_ lhs: URL, _ rhs: URL) -> Bool {
+        lhs.standardizedFileURL.path == rhs.standardizedFileURL.path
     }
 
     private func createAndroidFolder(in side: PaneSide) -> URL? {
@@ -1796,26 +1997,30 @@ final class DualFinderViewModel: ObservableObject {
         }
     }
 
-    private func renameAndroidItem(_ url: URL, to newName: String, on side: PaneSide) {
-        guard let parsed = AndroidFileURL.parse(url) else { return }
+    private func renameAndroidItem(_ url: URL, to newName: String, on side: PaneSide) -> URL? {
+        guard let parsed = AndroidFileURL.parse(url) else { return nil }
         do {
             let path = try androidFileService.renameRemote(parsed.path, to: newName, on: parsed.deviceSerial)
             let renamed = AndroidFileURL.url(deviceSerial: parsed.deviceSerial, path: path)
             statusMessage = "Renamed to \(newName)"
             refresh(side)
             setSelection([renamed], for: side)
+            logger.debug("selection", "selection.replaced", metadata: [
+                "side": side.rawValue,
+                "count": "1",
+                "source": "android.rename.commit",
+                "path": renamed.path
+            ])
+            return renamed
         } catch {
             reportOperationFailure("android.rename.failed", error: error)
+            return nil
         }
     }
 
     func selectedItems(on side: PaneSide) -> [FileItem] {
         let selected = pane(for: side).selectedItemURLs
         return items(for: side).filter { selected.contains($0.url) }
-    }
-
-    func batchRenamePreviews(rule: BatchRenameRule, on side: PaneSide) throws -> [BatchRenamePreview] {
-        try BatchRenamePlanner().previews(for: selectedItems(on: side), rule: rule)
     }
 
     func applyBatchRename(_ previews: [BatchRenamePreview], on side: PaneSide) {
@@ -2296,8 +2501,10 @@ final class DualFinderViewModel: ObservableObject {
 
         DispatchQueue.global(qos: .userInitiated).async {
             let service = FileSystemService()
-            var results: [(url: URL, size: Int64, source: String)] = []
-            var failure: Error?
+            var completed = 0
+            var computed = 0
+            var cached = 0
+            var failures = 0
 
             for folderURL in folderURLs {
                 do {
@@ -2306,37 +2513,56 @@ final class DualFinderViewModel: ObservableObject {
                     switch result {
                     case .cached:
                         source = "cache"
+                        cached += 1
                     case .computed:
                         source = "computed"
+                        computed += 1
                     }
-                    results.append((folderURL, result.size, source))
+                    completed += 1
+                    let snapshot = (completed: completed, computed: computed, cached: cached, failures: failures)
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self else { return }
+                        self.logger.info("folder-size", "folder.size.resolved", metadata: [
+                            "side": side.rawValue,
+                            "path": folderURL.path,
+                            "bytes": "\(result.size)",
+                            "source": source
+                        ])
+                        self.refresh(side)
+                        self.statusMessage = self.folderSizeProgressMessage(snapshot, total: folderURLs.count)
+                    }
                 } catch {
-                    failure = error
-                    break
+                    failures += 1
+                    completed += 1
+                    let snapshot = (completed: completed, computed: computed, cached: cached, failures: failures)
+                    let errorDescription = error.localizedDescription
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self else { return }
+                        self.logger.error("folder-size", "folder.size.failed", metadata: [
+                            "side": side.rawValue,
+                            "path": folderURL.path,
+                            "error": errorDescription
+                        ])
+                        self.statusMessage = self.folderSizeProgressMessage(snapshot, total: folderURLs.count)
+                    }
                 }
-            }
-
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                if let failure {
-                    self.reportOperationFailure("folder.size.failed", error: failure)
-                    return
-                }
-
-                let computed = results.filter { $0.source == "computed" }.count
-                let cached = results.filter { $0.source == "cache" }.count
-                for result in results {
-                    self.logger.info("folder-size", "folder.size.resolved", metadata: [
-                        "side": side.rawValue,
-                        "path": result.url.path,
-                        "bytes": "\(result.size)",
-                        "source": result.source
-                    ])
-                }
-                self.refresh(side)
-                self.statusMessage = "Folder size: \(computed) computed, \(cached) cached"
             }
         }
+    }
+
+    private func folderSizeProgressMessage(
+        _ progress: (completed: Int, computed: Int, cached: Int, failures: Int),
+        total: Int
+    ) -> String {
+        var parts = [
+            "\(progress.completed)/\(total) done",
+            "\(progress.computed) computed",
+            "\(progress.cached) cached"
+        ]
+        if progress.failures > 0 {
+            parts.append("\(progress.failures) failed")
+        }
+        return "Folder size: " + parts.joined(separator: ", ")
     }
 
     func openLogFolder() {
@@ -2682,6 +2908,7 @@ final class DualFinderViewModel: ObservableObject {
         cancellation: FileOperationCancellation,
         progress: @escaping (FileOperationProgress) -> Void
     ) throws {
+        let operationStart = Date()
         let itemURLs = operation.itemURLs
         let totalItems = itemURLs.count
         let itemByteSizes = Self.estimatedAndroidOperationByteSizes(operation, service: service)
@@ -2715,7 +2942,8 @@ final class DualFinderViewModel: ObservableObject {
                 completedItems: completedItems,
                 totalItems: totalItems,
                 currentItem: currentItem,
-                currentItemBytes: currentIndex.flatMap { itemByteSizes.indices.contains($0) ? itemByteSizes[$0] : nil }
+                currentItemBytes: currentIndex.flatMap { itemByteSizes.indices.contains($0) ? itemByteSizes[$0] : nil },
+                elapsedSeconds: Date().timeIntervalSince(operationStart)
             ))
         }
 
@@ -2759,7 +2987,8 @@ final class DualFinderViewModel: ObservableObject {
                         copiedItems: stats.copiedItems,
                         copiedBytes: stats.copiedBytes + min(max(currentCopiedBytes, 0), currentFileBytes ?? 0),
                         skippedItems: stats.skippedItems,
-                        skippedBytes: stats.skippedBytes
+                        skippedBytes: stats.skippedBytes,
+                        elapsedSeconds: Date().timeIntervalSince(operationStart)
                     ))
                 }
 
@@ -3437,6 +3666,27 @@ final class DualFinderViewModel: ObservableObject {
 
     private func clearSelection(_ side: PaneSide) {
         setSelection([], for: side)
+    }
+
+    private func selectionLogMetadata(
+        _ selection: Set<URL>,
+        side: PaneSide,
+        source: String? = nil
+    ) -> [String: String] {
+        var metadata = [
+            "side": side.rawValue,
+            "count": "\(selection.count)"
+        ]
+        if let source {
+            metadata["source"] = source
+        }
+        guard selection.count <= 20 else {
+            metadata["samplePaths"] = selection.lazy.prefix(5).map(\.path).joined(separator: "|")
+            metadata["pathsTruncated"] = "true"
+            return metadata
+        }
+        metadata["paths"] = selection.map(\.path).sorted().joined(separator: "|")
+        return metadata
     }
 
     private func setSelection(_ selection: Set<URL>, for side: PaneSide) {

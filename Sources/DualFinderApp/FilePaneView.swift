@@ -57,6 +57,7 @@ struct FilePaneView: View {
     @State private var handledSimilarFileGroupIDs: Set<String> = []
     @State private var visuallyDeletedSimilarFileURLs: Set<URL> = []
     @State private var fileListKeyboardAnchorURL: URL?
+    @State private var toolbarVolumeEntries: [MountedVolumeLocation] = []
     @FocusState private var isFileListFocused: Bool
     @FocusState private var isPathFieldFocused: Bool
     @FocusState private var isFileSearchFocused: Bool
@@ -111,6 +112,19 @@ struct FilePaneView: View {
         .task(id: model.pane(for: side).selectedURL) {
             refreshFreeSpace()
         }
+        .onAppear(perform: refreshToolbarVolumeEntries)
+        .onAppear {
+            model.refreshAndroidDevicesForToolbar()
+        }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)) { _ in
+            refreshToolbarVolumeEntries()
+        }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didUnmountNotification)) { _ in
+            refreshToolbarVolumeEntries()
+        }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didRenameVolumeNotification)) { _ in
+            refreshToolbarVolumeEntries()
+        }
     }
 
     private func refreshFreeSpace() {
@@ -144,6 +158,7 @@ struct FilePaneView: View {
                 model.chooseFolder(for: side)
             }
             androidViewMenu
+            toolbarVolumeButtons
             pathControl
             Button {
                 model.setEncodingColumnVisible(!model.isEncodingColumnVisible)
@@ -173,41 +188,68 @@ struct FilePaneView: View {
         .padding(.vertical, 6)
     }
 
+    private var toolbarVolumeButtons: some View {
+        HStack(spacing: 4) {
+            ForEach(toolbarVolumeEntries) { entry in
+                Button {
+                    model.navigate(side, to: entry.url)
+                } label: {
+                    Image(systemName: entry.iconName)
+                        .frame(width: 22, height: 22)
+                        .foregroundStyle(isCurrentDirectory(entry.url) ? Color.accentColor : Color.primary)
+                }
+                .buttonStyle(.borderless)
+                .help(entry.displayName)
+                .accessibilityLabel("Open volume \(entry.displayName)")
+                .contextMenu {
+                    Button("Unmount \(entry.displayName)", role: .destructive) {
+                        model.unmountVolume(entry.url)
+                    }
+                }
+            }
+        }
+    }
+
+    private func refreshToolbarVolumeEntries() {
+        toolbarVolumeEntries = MountedVolumeLocations.current()
+    }
+
+    private func isCurrentDirectory(_ url: URL) -> Bool {
+        model.pane(for: side).selectedURL.standardizedFileURL == url.standardizedFileURL
+    }
+
     private var androidViewMenu: some View {
         Menu {
-            Button("Local Files") {
-                model.switchPaneToLocal(side)
-            }
-            .disabled(!model.isAndroidPane(side))
+            if model.isAndroidPane(side) {
+                Button("Local Files") {
+                    model.switchPaneToLocal(side)
+                }
 
-            Divider()
-
-            Button("Use First Connected Android Device") {
-                model.switchPaneToAndroid(side)
+                Divider()
             }
 
             Button("Refresh Android Devices") {
                 model.refreshAndroidDevices()
             }
 
-            if !model.androidDevices.isEmpty {
-                Divider()
-            }
+            Divider()
 
-            ForEach(model.androidDevices) { device in
-                Button(androidDeviceTitle(device)) {
-                    model.switchPaneToAndroid(side, deviceSerial: device.serial)
+            let connectedDevices = model.androidDevices.filter { $0.state == .device }
+            if connectedDevices.isEmpty {
+                Text("No Android devices")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(connectedDevices) { device in
+                    Button(androidDeviceTitle(device)) {
+                        model.switchPaneToAndroid(side, deviceSerial: device.serial)
+                    }
                 }
-                .disabled(device.state != .device)
             }
         } label: {
             Image(systemName: model.isAndroidPane(side) ? "iphone.gen3.radiowaves.left.and.right" : "iphone.gen3")
                 .frame(width: 22, height: 22)
                 .foregroundStyle(model.isAndroidPane(side) ? Color.accentColor : Color.primary)
         }
-        .simultaneousGesture(TapGesture().onEnded {
-            model.refreshAndroidStateForViewButton(on: side)
-        })
         .menuStyle(.borderlessButton)
         .help(model.isAndroidPane(side) ? "Android view" : "Switch to Android view")
         .accessibilityLabel(model.isAndroidPane(side) ? "Android view" : "Switch to Android view")
@@ -363,6 +405,45 @@ struct FilePaneView: View {
     }
 
     @ViewBuilder
+    private func listContextMenuItems() -> some View {
+        let selection = model.pane(for: side).selectedItemURLs
+
+        if model.isAndroidPane(side) {
+            Button("Copy Path") {
+                model.copyAbsolutePaths(selection, on: side)
+            }
+        } else {
+            finderStyleContextMenuItems(for: selection)
+            Divider()
+            pathAndTerminalContextMenuItems(for: selection)
+            archiveContextMenuItems(for: selection)
+            favoriteContextMenuItems(for: selection)
+            Divider()
+            Button("Convert Text Encoding to UTF-8") {
+                model.convertSelectedTextEncodingToUTF8(on: side)
+            }
+            Button("Extract Filename from Content") {
+                model.extractFilenamesFromContent(on: side)
+            }
+            Button("Batch Rename...") {
+                model.requestBatchRenameDialog(on: side)
+            }
+        }
+        Button("Copy to Other Pane") {
+            model.copySelection(from: side)
+        }
+        Button("Move to Other Pane") {
+            model.moveSelection(from: side)
+        }
+        Button("Sync to Other Pane") {
+            model.syncSelection(from: side)
+        }
+        Button(model.isAndroidPane(side) ? "Delete" : "Move to Trash", role: .destructive) {
+            trashSelectionFromPane(selectionHint: selection)
+        }
+    }
+
+    @ViewBuilder
     private func pathAndTerminalContextMenuItems(for urls: Set<URL>, selectTabID: UUID? = nil) -> some View {
         Button("Copy Absolute Path") {
             if let selectTabID {
@@ -426,55 +507,70 @@ struct FilePaneView: View {
     }
 
     private var fileList: some View {
-        VStack(spacing: 0) {
+        let visibleFileItems = visibleItems
+        let selectionSnapshot = FileSelectionSnapshot(selection: model.pane(for: side).selectedItemURLs)
+
+        return VStack(spacing: 0) {
             sortHeader
             ZStack(alignment: .topTrailing) {
                 ScrollViewReader { scrollProxy in
-                    List(selection: model.bindingForSelection(side: side)) {
-                        ForEach(visibleItems) { item in
-                            FileRow(
-                                item: item,
-                                displayName: displayName(for: item),
-                                columnWidths: model.columnWidths(for: side),
-                                showsEncoding: model.isEncodingColumnVisible,
-                                isRenaming: renamingURL == item.url,
-                                isVisuallyDeleted: isSimilarFileVisuallyDeleted(item.url),
-                                renameText: $renameText,
-                                commitRename: commitRename,
-                                cancelRename: cancelRename
-                            )
-                                .id(item.url)
-                                .tag(item.url)
-                                .listRowBackground(similarFileRowBackground(for: item))
-                                .contentShape(Rectangle())
-                                .overlay {
-                                    if renamingURL != item.url {
-                                        RowMouseHandler(
-                                            mouseDown: { modifierFlags in
-                                                selectItemFromRowMouseDown(item.url, modifierFlags: modifierFlags)
-                                            },
-                                            mouseUp: { modifierFlags in
-                                                selectItemFromRowMouseUp(item.url, modifierFlags: modifierFlags)
-                                            },
-                                            doubleClick: {
-                                                activateItem(item.url)
-                                            },
-                                            dragURLsProvider: {
-                                                dragURLs(startingWith: item.url)
-                                            },
-                                            onDragStarted: { urls in
-                                                model.logDragDropEvent("drag.started", metadata: [
-                                                    "side": side.rawValue,
-                                                    "count": "\(urls.count)",
-                                                    "paths": urls.map(\.path).joined(separator: "|")
-                                                ])
-                                            }
-                                        )
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            ForEach(visibleFileItems) { item in
+                                FileRow(
+                                    item: item,
+                                    displayName: displayName(for: item),
+                                    columnWidths: model.columnWidths(for: side),
+                                    showsEncoding: model.isEncodingColumnVisible,
+                                    isRenaming: renamingURL == item.url,
+                                    isSelected: selectionSnapshot.contains(item.url),
+                                    isActivePane: model.activePaneSide == side,
+                                    isVisuallyDeleted: isSimilarFileVisuallyDeleted(item.url),
+                                    renameText: $renameText,
+                                    commitRename: commitRename,
+                                    cancelRename: cancelRename
+                                )
+                                    .equatable()
+                                    .id(item.url)
+                                    .background(similarFileRowBackground(for: item))
+                                    .contentShape(Rectangle())
+                                    .overlay {
+                                        if renamingURL != item.url {
+                                            RowMouseHandler(
+                                                mouseDown: { modifierFlags in
+                                                    selectItemFromRowMouseDown(
+                                                        item.url,
+                                                        modifierFlags: modifierFlags
+                                                    )
+                                                },
+                                                mouseUp: { modifierFlags in
+                                                    selectItemFromRowMouseUp(
+                                                        item.url,
+                                                        modifierFlags: modifierFlags
+                                                    )
+                                                },
+                                                doubleClick: {
+                                                    activateItem(item.url)
+                                                },
+                                                dragURLsProvider: {
+                                                    dragURLs(startingWith: item.url)
+                                                },
+                                                onDragStarted: { urls in
+                                                    model.logDragDropEvent("drag.started", metadata: [
+                                                        "side": side.rawValue,
+                                                        "count": "\(urls.count)",
+                                                        "paths": urls.map(\.path).joined(separator: "|")
+                                                    ])
+                                                }
+                                            )
+                                        }
                                     }
-                                }
+                            }
                         }
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
                     }
                     .id(isSimilarFileNavigatorEnabled ? "similar-review" : "normal-file-list")
+                    .focusable()
                     .focused($isFileListFocused)
                     .onChange(of: isFileListFocused) { _, isFocused in
                         model.logPaneFocusEvent("file-list.focus-state.changed", metadata: [
@@ -583,49 +679,26 @@ struct FilePaneView: View {
                     .onKeyPress(keys: [.upArrow, .downArrow], phases: .down) { keyPress in
                         guard keyPress.modifiers.isEmpty,
                               renamingURL == nil,
-                              !isFileSearchPresented,
-                              isSimilarFileNavigatorEnabled else {
+                              !isFileSearchPresented else {
                             return .ignored
                         }
 
-                        moveSimilarFileSelection(keyPress.key == .upArrow ? -1 : 1)
+                        if isSimilarFileNavigatorEnabled {
+                            moveSimilarFileSelection(keyPress.key == .upArrow ? -1 : 1)
+                        } else {
+                            moveFileListSelection(keyPress.key == .upArrow ? -1 : 1)
+                        }
                         return .handled
                     }
                     .background {
                         LocalKeyDownMonitor(
-                            isEnabled: isSimilarFileNavigatorEnabled && isFileListFocused,
-                            handle: handleSimilarFileKeyDown
+                            isEnabled: isFileListFocused,
+                            handle: handleFileListKeyDown
                         )
                         .frame(width: 0, height: 0)
                     }
-                    .contextMenu(forSelectionType: URL.self) { selection in
-                        if model.isAndroidPane(side) {
-                            Button("Copy Path") {
-                                model.copyAbsolutePaths(selection, on: side)
-                            }
-                        } else {
-                            finderStyleContextMenuItems(for: selection)
-                            Divider()
-                            pathAndTerminalContextMenuItems(for: selection)
-                            archiveContextMenuItems(for: selection)
-                            favoriteContextMenuItems(for: selection)
-                            Divider()
-                            Button("Convert Text Encoding to UTF-8") {
-                                model.convertSelectedTextEncodingToUTF8(on: side)
-                            }
-                            Button("Extract Filename from Content") {
-                                model.extractFilenamesFromContent(on: side)
-                            }
-                            Button("Batch Rename...") { model.requestBatchRenameDialog(on: side) }
-                        }
-                        Button("Copy to Other Pane") { model.copySelection(from: side) }
-                        Button("Move to Other Pane") { model.moveSelection(from: side) }
-                        Button("Sync to Other Pane") { model.syncSelection(from: side) }
-                        Button(model.isAndroidPane(side) ? "Delete" : "Move to Trash", role: .destructive) {
-                            trashSelectionFromPane(selectionHint: selection)
-                        }
-                    } primaryAction: { selection in
-                        model.activateFirstItem(in: selection, on: side)
+                    .contextMenu {
+                        listContextMenuItems()
                     }
                     .safeAreaInset(edge: .bottom) {
                         HStack(spacing: 8) {
@@ -1403,6 +1476,25 @@ struct FilePaneView: View {
         restoreFileListFocus()
     }
 
+    private func moveFileListSelection(_ delta: Int) {
+        let orderedURLs = visibleItems.map(\.url)
+        let currentSelection = model.pane(for: side).selectedItemURLs
+        guard let replacementSelection = FileKeyboardSelectionNavigator.selectionAfterMove(
+            anchorURL: fileListKeyboardAnchorURL,
+            currentSelection: currentSelection,
+            orderedURLs: orderedURLs,
+            delta: delta
+        ) else {
+            return
+        }
+
+        guard let nextURL = replacementSelection.first else { return }
+        fileListKeyboardAnchorURL = nextURL
+        pendingRevealURL = nextURL
+        model.replaceSelection(replacementSelection, on: side, source: "file-list.keyboard")
+        restoreFileListFocus()
+    }
+
     private func updateSimilarFileGroupIndex(containing url: URL) {
         guard let index = similarFileGroupIndexByURL[url] else {
             return
@@ -1412,24 +1504,41 @@ struct FilePaneView: View {
         rebuildSimilarFileReviewCaches()
     }
 
-    private func handleSimilarFileKeyDown(_ event: NSEvent) -> Bool {
-        guard isSimilarFileNavigatorEnabled,
-              isFileListFocused,
+    private func handleFileListKeyDown(_ event: NSEvent) -> Bool {
+        guard isFileListFocused,
               renamingURL == nil,
-              !isFileSearchPresented,
-              event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty else {
+              !isFileSearchPresented else {
             return false
         }
 
+        let relevantModifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
         switch event.keyCode {
         case 126:
-            moveSimilarFileSelection(-1)
+            if relevantModifiers.isEmpty {
+                moveFocusedFileListSelection(-1)
+                return true
+            }
+            guard relevantModifiers == .command else { return false }
+            model.navigateUp(side)
             return true
         case 125:
-            moveSimilarFileSelection(1)
+            if relevantModifiers.isEmpty {
+                moveFocusedFileListSelection(1)
+                return true
+            }
+            guard relevantModifiers == .command else { return false }
+            model.navigateIntoSelectedDirectory(side)
             return true
         default:
             return false
+        }
+    }
+
+    private func moveFocusedFileListSelection(_ delta: Int) {
+        if isSimilarFileNavigatorEnabled {
+            moveSimilarFileSelection(delta)
+        } else {
+            moveFileListSelection(delta)
         }
     }
 
@@ -1450,6 +1559,7 @@ struct FilePaneView: View {
     }
 
     private func beginRenaming(_ url: URL) {
+        pendingRevealURL = url
         if let item = model.items(for: side).first(where: { $0.url == url }) {
             beginRenaming(item)
         } else {
@@ -1469,23 +1579,40 @@ struct FilePaneView: View {
 
     private func beginPendingRenameIfReady() {
         guard let pendingRenameURL,
-              model.items(for: side).contains(where: { $0.url == pendingRenameURL }) else {
+              let item = model.items(for: side).first(where: { sameFileIdentity($0.url, pendingRenameURL) }) else {
             return
         }
         self.pendingRenameURL = nil
-        beginRenaming(pendingRenameURL)
+        beginRenaming(item.url)
     }
 
     private func revealPendingItemIfReady(with scrollProxy: ScrollViewProxy) {
         guard let url = pendingRevealURL,
-              model.items(for: side).contains(where: { $0.url == url }) else {
+              let item = model.items(for: side).first(where: { sameFileIdentity($0.url, url) }) else {
+            if let url = pendingRevealURL {
+                model.logPaneFocusEvent("pending-reveal.waiting", metadata: [
+                    "side": side.rawValue,
+                    "path": url.path,
+                    "itemsCount": "\(model.items(for: side).count)",
+                    "visibleCount": "\(visibleItems.count)",
+                    "isSelected": "\(selectionContains(url))"
+                ])
+            }
             return
         }
 
         pendingRevealURL = nil
+        let revealURL = item.url
+        model.logPaneFocusEvent("pending-reveal.applied", metadata: [
+            "side": side.rawValue,
+            "path": url.path,
+            "revealURL": revealURL.absoluteString,
+            "isSelected": "\(selectionContains(url))",
+            "visibleIndex": "\(visibleItems.firstIndex(where: { sameFileIdentity($0.url, revealURL) }) ?? -1)"
+        ])
         DispatchQueue.main.async {
             withAnimation(.easeInOut(duration: 0.18)) {
-                scrollProxy.scrollTo(url, anchor: .center)
+                scrollProxy.scrollTo(revealURL, anchor: .center)
             }
         }
     }
@@ -1498,6 +1625,9 @@ struct FilePaneView: View {
     private func commitRename() {
         guard let renamingURL else { return }
         let newName = renameText
+        let expectedRenamedURL = expectedRenameURL(for: renamingURL, newName: newName)
+        let traceID = UUID().uuidString
+        logInlineRenameSnapshot("inline-rename.commit.started", traceID: traceID, targetURL: expectedRenamedURL)
 
         if let moveSources = pendingNewFolderMoveSources {
             if model.commitNewFolderWithSelection(
@@ -1514,8 +1644,23 @@ struct FilePaneView: View {
         }
 
         clearRenameState()
-        model.renameItem(renamingURL, to: newName, on: side)
-        restoreFileListFocus()
+        pendingRevealURL = expectedRenamedURL
+        let renamedURL = model.renameItem(renamingURL, to: newName, on: side)
+        let targetURL = renamedURL ?? expectedRenamedURL
+        logInlineRenameSnapshot("inline-rename.commit.returned", traceID: traceID, targetURL: targetURL)
+        restoreFileListFocus(requestID: traceID, reason: "inline-rename.commit", revealURL: targetURL)
+    }
+
+    private func expectedRenameURL(for url: URL, newName: String) -> URL {
+        if let parsed = AndroidFileURL.parse(url) {
+            let parent = (parsed.path as NSString).deletingLastPathComponent
+            let path = parent == "/" ? "/\(newName)" : "\(parent)/\(newName)"
+            return AndroidFileURL.url(deviceSerial: parsed.deviceSerial, path: path)
+        }
+        let isDirectoryLike = model.items(for: side).first(where: { sameFileIdentity($0.url, url) })?.isDirectoryLike ?? false
+        return url.deletingLastPathComponent()
+            .appendingPathComponent(newName, isDirectory: isDirectoryLike)
+            .standardizedFileURL
     }
 
     private func cancelRename() {
@@ -1582,48 +1727,93 @@ struct FilePaneView: View {
         restoreFileListFocus()
     }
 
-    private func selectItemFromRowMouseDown(_ url: URL, modifierFlags: NSEvent.ModifierFlags) {
+    private func selectItemFromRowMouseDown(
+        _ url: URL,
+        modifierFlags: NSEvent.ModifierFlags
+    ) {
         guard renamingURL == nil else { return }
 
+        let startedAt = Date()
         fileListKeyboardAnchorURL = url
         if isSimilarFileNavigatorEnabled {
             updateSimilarFileGroupIndex(containing: url)
         }
         isFileListFocused = true
         model.activatePane(side)
+        let visibleCount = visibleItems.count
+        let orderedURLs = modifierFlags.contains(.shift) ? visibleItems.map(\.url) : []
 
         applyRowSelection(
             FileRowSelectionReducer.selectionAfterMouseDown(
                 target: url,
                 currentSelection: model.pane(for: side).selectedItemURLs,
-                orderedURLs: visibleItems.map(\.url),
+                orderedURLs: orderedURLs,
                 modifierFlags: modifierFlags
             ),
             source: "file-row.mouse-down"
         )
+        logRowSelectionApplyTiming(source: "file-row.mouse-down", url: url, visibleCount: visibleCount, startedAt: startedAt)
+        logRowSelectionTiming(source: "file-row.mouse-down", url: url, visibleCount: visibleCount, startedAt: startedAt)
     }
 
-    private func selectItemFromRowMouseUp(_ url: URL, modifierFlags: NSEvent.ModifierFlags) {
+    private func selectItemFromRowMouseUp(
+        _ url: URL,
+        modifierFlags: NSEvent.ModifierFlags
+    ) {
         guard renamingURL == nil else { return }
 
+        let startedAt = Date()
         fileListKeyboardAnchorURL = url
         if isSimilarFileNavigatorEnabled {
             updateSimilarFileGroupIndex(containing: url)
         }
+        let visibleCount = visibleItems.count
         applyRowSelection(
             FileRowSelectionReducer.selectionAfterMouseUp(
                 target: url,
                 currentSelection: model.pane(for: side).selectedItemURLs,
-                orderedURLs: visibleItems.map(\.url),
+                orderedURLs: [],
                 modifierFlags: modifierFlags
             ),
             source: "file-row.mouse-up"
         )
+        logRowSelectionApplyTiming(source: "file-row.mouse-up", url: url, visibleCount: visibleCount, startedAt: startedAt)
+        logRowSelectionTiming(source: "file-row.mouse-up", url: url, visibleCount: visibleCount, startedAt: startedAt)
     }
 
     private func applyRowSelection(_ selection: Set<URL>?, source: String) {
         guard let selection else { return }
         model.replaceSelection(selection, on: side, source: source)
+    }
+
+    private func logRowSelectionApplyTiming(source: String, url: URL, visibleCount: Int, startedAt: Date) {
+        let elapsedMilliseconds = Date().timeIntervalSince(startedAt) * 1_000
+        guard elapsedMilliseconds >= 20 else { return }
+        model.logSelectionPerformanceEvent("row-selection.apply-slow", metadata: [
+            "side": side.rawValue,
+            "source": source,
+            "path": url.path,
+            "elapsedMs": String(format: "%.1f", elapsedMilliseconds),
+            "visibleCount": "\(visibleCount)",
+            "selectionCount": "\(model.pane(for: side).selectedItemURLs.count)",
+            "activePane": model.activePaneSide.rawValue
+        ])
+    }
+
+    private func logRowSelectionTiming(source: String, url: URL, visibleCount: Int, startedAt: Date) {
+        DispatchQueue.main.async {
+            let elapsedMilliseconds = Date().timeIntervalSince(startedAt) * 1_000
+            guard elapsedMilliseconds >= 50 else { return }
+            model.logSelectionPerformanceEvent("row-selection.slow", metadata: [
+                "side": side.rawValue,
+                "source": source,
+                "path": url.path,
+                "elapsedMs": String(format: "%.1f", elapsedMilliseconds),
+                "visibleCount": "\(visibleCount)",
+                "selectionCount": "\(model.pane(for: side).selectedItemURLs.count)",
+                "activePane": model.activePaneSide.rawValue
+            ])
+        }
     }
 
     private func trashSelectionFromPane(selectionHint: Set<URL>? = nil) {
@@ -1686,20 +1876,85 @@ struct FilePaneView: View {
             if let revealURL {
                 pendingRevealURL = revealURL
             }
+            isPathFieldFocused = false
+            isFileSearchFocused = false
             isFileListFocused = true
-            guard let requestID else { return }
-            var metadata = [
-                "requestID": requestID,
-                "side": side.rawValue
-            ]
-            if let reason {
-                metadata["reason"] = reason
-            }
-            if let revealURL {
-                metadata["revealPath"] = revealURL.path
-            }
-            model.logPaneFocusEvent("file-list.focus-set.requested", metadata: metadata)
+            logFileListFocusRequest(requestID: requestID, reason: reason, revealURL: revealURL)
         }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
+            isPathFieldFocused = false
+            isFileSearchFocused = false
+            isFileListFocused = true
+        }
+    }
+
+    private func logFileListFocusRequest(requestID: String?, reason: String?, revealURL: URL?) {
+        var metadata = [
+            "side": side.rawValue
+        ]
+        if let requestID {
+            metadata["requestID"] = requestID
+        }
+        if let reason {
+            metadata["reason"] = reason
+        }
+        if let revealURL {
+            metadata["revealPath"] = revealURL.path
+        }
+        model.logPaneFocusEvent("file-list.focus-set.requested", metadata: metadata)
+    }
+
+    private func logInlineRenameSnapshot(
+        _ event: String,
+        traceID: String,
+        targetURL: URL,
+    ) {
+        let items = model.items(for: side)
+        let selection = model.pane(for: side).selectedItemURLs
+        let metadata = [
+            "traceID": traceID,
+            "side": side.rawValue,
+            "targetPath": targetURL.path,
+            "selectedContainsTarget": "\(selectionContains(targetURL))",
+            "itemsContainsTarget": "\(items.contains(where: { sameFileIdentity($0.url, targetURL) }))",
+            "visibleContainsTarget": "\(visibleItems.contains(where: { sameFileIdentity($0.url, targetURL) }))",
+            "itemIndex": "\(items.firstIndex(where: { sameFileIdentity($0.url, targetURL) }) ?? -1)",
+            "visibleIndex": "\(visibleItems.firstIndex(where: { sameFileIdentity($0.url, targetURL) }) ?? -1)",
+            "selectionCount": "\(selection.count)",
+            "selectionPaths": selection.map(\.path).sorted().joined(separator: "|"),
+            "itemsCount": "\(items.count)",
+            "visibleCount": "\(visibleItems.count)",
+            "activePane": model.activePaneSide.rawValue,
+            "isFileListFocused": "\(isFileListFocused)",
+            "isPathFieldFocused": "\(isPathFieldFocused)",
+            "isFileSearchFocused": "\(isFileSearchFocused)",
+            "renamingPath": renamingURL?.path ?? "",
+            "pendingRevealPath": pendingRevealURL?.path ?? "",
+            "isInlineRenaming": "\(model.isInlineRenaming)"
+        ]
+        model.logPaneFocusEvent(event, metadata: metadata)
+    }
+
+    private func selectionContains(_ url: URL) -> Bool {
+        selectionContains(url, in: model.pane(for: side).selectedItemURLs)
+    }
+
+    private func selectionContains(_ url: URL, in selection: Set<URL>) -> Bool {
+        if selection.contains(url) {
+            return true
+        }
+
+        let standardizedURL = url.standardizedFileURL
+        if standardizedURL != url, selection.contains(standardizedURL) {
+            return true
+        }
+
+        return selection.contains { sameFileIdentity($0, url) }
+    }
+
+    private func sameFileIdentity(_ lhs: URL, _ rhs: URL) -> Bool {
+        lhs.standardizedFileURL.path == rhs.standardizedFileURL.path
     }
 }
 
@@ -2094,16 +2349,31 @@ private final class DroppedURLAccumulator: @unchecked Sendable {
     }
 }
 
-private struct FileRow: View {
+private struct FileRow: View, Equatable {
     let item: FileItem
     let displayName: String
     let columnWidths: FileListColumnWidths
     let showsEncoding: Bool
     let isRenaming: Bool
+    let isSelected: Bool
+    let isActivePane: Bool
     let isVisuallyDeleted: Bool
     @Binding var renameText: String
     let commitRename: () -> Void
     let cancelRename: () -> Void
+
+    nonisolated static func == (lhs: FileRow, rhs: FileRow) -> Bool {
+        guard !lhs.isRenaming, !rhs.isRenaming else { return false }
+
+        return lhs.item == rhs.item
+            && lhs.displayName == rhs.displayName
+            && lhs.columnWidths == rhs.columnWidths
+            && lhs.showsEncoding == rhs.showsEncoding
+            && lhs.isRenaming == rhs.isRenaming
+            && lhs.isSelected == rhs.isSelected
+            && lhs.isActivePane == rhs.isActivePane
+            && lhs.isVisuallyDeleted == rhs.isVisuallyDeleted
+    }
 
     var body: some View {
         HStack(spacing: FileListMetrics.iconColumnSpacing) {
@@ -2116,32 +2386,49 @@ private struct FileRow: View {
                 type: {
                     Text(item.type)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(secondaryTextColor)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 },
                 encoding: {
                     Text(encodingText)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(secondaryTextColor)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 },
                 size: {
                     Text(sizeText)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(secondaryTextColor)
                         .monospacedDigit()
                 },
                 modified: {
                     Text(dateText)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(secondaryTextColor)
                 }
             )
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, FileListMetrics.horizontalPadding)
         .padding(.vertical, 2)
+        .foregroundStyle(primaryTextColor)
+        .background {
+            if isSelected {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(rowSelectionBackgroundColor)
+                    .padding(.vertical, 1)
+            }
+        }
+        .overlay {
+            if isRenaming {
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(Color.accentColor.opacity(0.7), lineWidth: 1)
+                    .padding(.vertical, 1)
+                    .allowsHitTesting(false)
+            }
+        }
         .opacity(isVisuallyDeleted ? 0.55 : 1)
         .overlay(alignment: .center) {
             if isVisuallyDeleted {
@@ -2149,7 +2436,7 @@ private struct FileRow: View {
                     .fill(Color.red)
                     .frame(height: 2)
                     .padding(.horizontal, 2)
-                    .allowsHitTesting(false)
+                .allowsHitTesting(false)
             }
         }
     }
@@ -2168,6 +2455,27 @@ private struct FileRow: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
         }
+    }
+
+    private var primaryTextColor: Color {
+        if isRenaming {
+            return .primary
+        }
+        return isSelected && isActivePane ? Color.white : Color.primary
+    }
+
+    private var secondaryTextColor: Color {
+        if isRenaming {
+            return .secondary
+        }
+        return isSelected && isActivePane ? Color.white.opacity(0.86) : Color.secondary
+    }
+
+    private var rowSelectionBackgroundColor: Color {
+        if isRenaming {
+            return Color(nsColor: .textBackgroundColor)
+        }
+        return isActivePane ? Color.accentColor.opacity(0.88) : Color.secondary.opacity(0.24)
     }
 
     private var sizeText: String {
@@ -2196,9 +2504,11 @@ private struct InlineRenameTextField: NSViewRepresentable {
 
     func makeNSView(context: Context) -> RenameNSTextField {
         let textField = RenameNSTextField()
-        textField.isBordered = false
+        textField.isBordered = true
         textField.isBezeled = false
-        textField.drawsBackground = false
+        textField.drawsBackground = true
+        textField.backgroundColor = .textBackgroundColor
+        textField.textColor = .labelColor
         textField.focusRingType = .none
         textField.usesSingleLineMode = true
         textField.cell?.isScrollable = true
@@ -2222,6 +2532,8 @@ private struct InlineRenameTextField: NSViewRepresentable {
         if textField.stringValue != text {
             textField.stringValue = text
         }
+        textField.backgroundColor = .textBackgroundColor
+        textField.textColor = .labelColor
         textField.requestInitialSelection(initialSelectionRange)
     }
 

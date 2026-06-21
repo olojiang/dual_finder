@@ -411,6 +411,20 @@ struct FileOperationServiceTests {
         #expect(logger.messages.contains { $0.contains("rename.completed") })
     }
 
+    @Test("renaming folders returns the same URL identity as directory listings")
+    func renamingFoldersReturnsListedURLIdentity() throws {
+        let root = try TemporaryDirectory()
+        let source = root.url.appendingPathComponent("Old Folder", isDirectory: true)
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+
+        let renamed = try FileOperationService(logger: CapturingLogger()).rename(source, to: "New Folder")
+        let listed = try #require(FileSystemService().contents(of: root.url).first { $0.name == "New Folder" })
+
+        #expect(renamed == listed.url)
+        #expect(renamed.absoluteString == listed.url.absoluteString)
+        #expect(listed.isDirectoryLike)
+    }
+
     @Test("rejects empty rename names")
     func rejectsEmptyRenameNames() throws {
         let root = try TemporaryDirectory()

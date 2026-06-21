@@ -72,6 +72,29 @@ struct SimilarFileReviewState {
     }
 }
 
+struct FileSelectionSnapshot {
+    private let exactURLs: Set<URL>
+    private let standardizedPaths: Set<String>
+
+    init(selection: Set<URL>) {
+        exactURLs = selection
+        standardizedPaths = Set(selection.map { $0.standardizedFileURL.path })
+    }
+
+    func contains(_ url: URL) -> Bool {
+        if exactURLs.contains(url) {
+            return true
+        }
+
+        if standardizedPaths.contains(url.path) {
+            return true
+        }
+
+        let standardizedPath = url.standardizedFileURL.path
+        return standardizedPath != url.path && standardizedPaths.contains(standardizedPath)
+    }
+}
+
 enum FileRowSelectionReducer {
     static func selectionAfterMouseDown(
         target: URL,

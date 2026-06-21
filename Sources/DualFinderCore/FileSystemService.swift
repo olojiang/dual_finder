@@ -49,6 +49,20 @@ public struct FileSystemService {
             .sorted { FileSystemService.sortItems($0, $1, rule: sortRule) }
     }
 
+    public func item(
+        at url: URL,
+        folderSizeCache: FolderSizeCache? = nil,
+        textEncodingCache: TextEncodingConversionCache? = nil,
+        includeTextEncoding: Bool = false
+    ) throws -> FileItem {
+        try item(
+            for: url,
+            folderSizeCache: folderSizeCache,
+            textEncodingCache: textEncodingCache,
+            includeTextEncoding: includeTextEncoding
+        )
+    }
+
     public func recursiveFileContents(
         of directory: URL,
         includeHidden: Bool = false,
@@ -92,6 +106,20 @@ public struct FileSystemService {
         guard item.path != "/" else { return nil }
         let parent = item.deletingLastPathComponent().standardizedFileURL
         return parent.path == item.path ? nil : parent
+    }
+
+    public func existingDirectoryAncestor(startingAt url: URL) -> URL? {
+        var candidate = url.standardizedFileURL
+        while true {
+            var isDirectory: ObjCBool = false
+            if fileManager.fileExists(atPath: candidate.path, isDirectory: &isDirectory),
+               isDirectory.boolValue {
+                return candidate
+            }
+
+            guard let parent = parent(of: candidate) else { return nil }
+            candidate = parent
+        }
     }
 
     public func availableCapacity(at url: URL) throws -> Int64? {
@@ -195,7 +223,7 @@ public struct FileSystemService {
         return total
     }
 
-    private static func sortItems(_ left: FileItem, _ right: FileItem, rule: FileSortRule) -> Bool {
+    public static func sortItems(_ left: FileItem, _ right: FileItem, rule: FileSortRule) -> Bool {
         if left.isDirectoryLike != right.isDirectoryLike {
             return left.isDirectoryLike
         }

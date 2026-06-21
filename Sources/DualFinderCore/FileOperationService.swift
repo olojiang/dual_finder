@@ -162,9 +162,11 @@ public struct FileOperationService {
             throw FileOperationError.emptyName
         }
 
+        let sourceValues = try? source.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey])
+        let isDirectoryLike = sourceValues?.isDirectory == true || sourceValues?.isPackage == true
         let destination = source.deletingLastPathComponent().appendingPathComponent(newName)
         let standardizedSource = source.standardizedFileURL
-        let standardizedDestination = destination.standardizedFileURL
+        let standardizedDestination = URL(fileURLWithPath: destination.path, isDirectory: isDirectoryLike).standardizedFileURL
         guard standardizedDestination != standardizedSource else {
             return standardizedSource
         }
@@ -277,6 +279,7 @@ public struct FileOperationService {
         progress: ((FileOperationProgress) -> Void)? = nil
     ) throws {
         logger?.info("file-operation", "trash.started", metadata: ["count": "\(sources.count)"])
+        let operationStart = Date()
         var completedItems = 0
         for source in sources {
             if cancellation?.isCancelled == true {
@@ -293,7 +296,8 @@ public struct FileOperationService {
                 totalBytes: 0,
                 completedItems: completedItems,
                 totalItems: sources.count,
-                currentItem: source
+                currentItem: source,
+                elapsedSeconds: Date().timeIntervalSince(operationStart)
             ))
             logger?.warning("file-operation", "trash.item.completed", metadata: ["source": source.path])
         }
@@ -308,13 +312,15 @@ public struct FileOperationService {
         progress: ((FileOperationProgress) -> Void)?,
         conflictResolver: ((FileOperationConflict) -> FileOperationConflictResolution)?
     ) throws {
+        let operationStart = Date()
         var completedItems = 0
         progress?(FileOperationProgress(
             completedBytes: 0,
             totalBytes: 0,
             completedItems: 0,
             totalItems: sources.count,
-            currentItem: sources.first
+            currentItem: sources.first,
+            elapsedSeconds: 0
         ))
 
         for source in sources {
@@ -343,7 +349,8 @@ public struct FileOperationService {
                 totalBytes: 0,
                 completedItems: completedItems,
                 totalItems: sources.count,
-                currentItem: source
+                currentItem: source,
+                elapsedSeconds: Date().timeIntervalSince(operationStart)
             ))
             logger?.info("file-operation", "move.item.renamed", metadata: [
                 "source": source.path,
@@ -726,6 +733,7 @@ public struct FileOperationService {
     private final class OperationContext {
         private let cancellation: FileOperationCancellation?
         private let progress: ((FileOperationProgress) -> Void)?
+        private let operationStart = Date()
         private let totalBytes: Int64
         private let totalItems: Int
         private var completedBytes: Int64 = 0
@@ -772,7 +780,8 @@ public struct FileOperationService {
                 totalBytes: totalBytes,
                 completedItems: completedItems,
                 totalItems: totalItems,
-                currentItem: currentItem
+                currentItem: currentItem,
+                elapsedSeconds: Date().timeIntervalSince(operationStart)
             ))
         }
 
