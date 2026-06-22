@@ -38,14 +38,15 @@ public struct RecursiveFileSearchService {
         cancellation: FileOperationCancellation? = nil,
         progress: ((Int) -> Void)? = nil
     ) throws -> [RecursiveFileSearchResult] {
+        let matcher = FileNameSearch.Matcher(query: rawQuery)
+        guard !matcher.isEmpty else { return [] }
         let query = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return [] }
 
-        let keys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey, .fileSizeKey, .isHiddenKey]
+        let keys: Set<URLResourceKey> = [.isDirectoryKey, .isPackageKey, .isRegularFileKey, .fileSizeKey, .isHiddenKey]
         let enumerationOptions: FileManager.DirectoryEnumerationOptions = options.includeHidden ? [] : [.skipsHiddenFiles]
         guard let enumerator = fileManager.enumerator(
             at: root,
-            includingPropertiesForKeys: keys,
+            includingPropertiesForKeys: Array(keys),
             options: enumerationOptions
         ) else {
             return []
@@ -62,10 +63,17 @@ public struct RecursiveFileSearchService {
                 progress?(scannedCount)
             }
 
-            let values = try url.resourceValues(forKeys: Set(keys))
+            let values = try url.resourceValues(forKeys: keys)
             guard options.includeHidden || values.isHidden != true else { continue }
+            if values.isDirectory == true, values.isPackage == true {
+                if matcher.matches(url.lastPathComponent) {
+                    results.append(RecursiveFileSearchResult(url: url.standardizedFileURL, matchedContent: false))
+                }
+                enumerator.skipDescendants()
+                continue
+            }
 
-            if FileNameSearch.matches(url.lastPathComponent, query: query) {
+            if matcher.matches(url.lastPathComponent) {
                 results.append(RecursiveFileSearchResult(url: url.standardizedFileURL, matchedContent: false))
                 continue
             }

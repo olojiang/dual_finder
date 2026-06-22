@@ -2,22 +2,39 @@ import Foundation
 
 public enum FileNameSearch {
     public static func matches(_ name: String, query rawQuery: String) -> Bool {
-        let query = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return true }
+        Matcher(query: rawQuery).matches(name)
+    }
 
-        if name.localizedStandardContains(query) {
-            return true
+    public struct Matcher: Sendable {
+        private let query: String
+        private let normalizedQuery: String
+
+        public init(query rawQuery: String) {
+            let query = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+            self.query = query
+            self.normalizedQuery = FileNameSearch.normalizedCompactLatin(query)
         }
 
-        let normalizedQuery = normalizedCompactLatin(query)
-        guard !normalizedQuery.isEmpty else { return false }
-
-        let latinName = normalizedLatin(name)
-        if compactAlphanumerics(latinName).contains(normalizedQuery) {
-            return true
+        public var isEmpty: Bool {
+            query.isEmpty
         }
 
-        return initials(from: latinName).contains(normalizedQuery)
+        public func matches(_ name: String) -> Bool {
+            guard !query.isEmpty else { return true }
+
+            if name.localizedStandardContains(query) {
+                return true
+            }
+
+            guard !normalizedQuery.isEmpty else { return false }
+
+            let latinName = normalizedLatin(name)
+            if compactAlphanumerics(latinName).contains(normalizedQuery) {
+                return true
+            }
+
+            return initials(from: latinName).contains(normalizedQuery)
+        }
     }
 
     private static func normalizedLatin(_ text: String) -> String {

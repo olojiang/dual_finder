@@ -17,42 +17,87 @@ struct SimilarFileNameDetectorTests {
 
         #expect(groups.count == 1)
         #expect(groups[0].items.map(\.name) == [
-            "杨帆的校园生活.txt",
             "杨帆的校园生活1-2.23.txt",
+            "杨帆的校园生活.txt",
             "杨帆的校园生活1-18 作者：就酱.txt"
         ])
     }
 
-    @Test("orders group members by localized file name")
-    func ordersGroupMembersByName() {
+    @Test("orders group members by size")
+    func ordersGroupMembersBySize() {
         let items = [
-            file("《娇妻迷途》(全本) 作者：兮夜.txt"),
-            file("《娇妻迷途》(1_434 全本) ［方远、张爱玲］ 作者：夜郎中～.txt")
+            file("《娇妻迷途》(全本) 作者：兮夜.txt", size: 1_000),
+            file("《娇妻迷途》(1_434 全本) ［方远、张爱玲］ 作者：夜郎中～.txt", size: 3_000)
         ]
 
         let groups = SimilarFileNameDetector.groups(in: items)
 
         #expect(groups.count == 1)
+        #expect(groups[0].size == 3_000)
         #expect(groups[0].items.map(\.name) == [
             "《娇妻迷途》(1_434 全本) ［方远、张爱玲］ 作者：夜郎中～.txt",
             "《娇妻迷途》(全本) 作者：兮夜.txt"
         ])
     }
 
-    @Test("orders multiple groups by localized group name")
-    func ordersGroupsByName() {
+    @Test("orders multiple groups by their largest file size")
+    func ordersGroupsByLargestFileSize() {
         let items = [
-            file("乙篇故事(全本).txt"),
-            file("甲篇故事(全本).txt"),
-            file("乙篇故事 1-20.txt"),
-            file("甲篇故事 1-20.txt")
+            file("乙篇故事(全本).txt", size: 8_000),
+            file("甲篇故事(全本).txt", size: 2_000),
+            file("乙篇故事 1-20.txt", size: 4_000),
+            file("甲篇故事 1-20.txt", size: 12_000)
         ]
 
         let groups = SimilarFileNameDetector.groups(in: items)
 
         #expect(groups.map { $0.items[0].name } == [
-            "甲篇故事(全本).txt",
+            "甲篇故事 1-20.txt",
             "乙篇故事(全本).txt"
+        ])
+        #expect(groups.map(\.size) == [12_000, 8_000])
+    }
+
+    @Test("sorts by size only after similar-name grouping succeeds")
+    func sortsBySizeAfterGrouping() {
+        let items = [
+            file("乙篇故事(全本).txt", size: 1_000),
+            file("甲篇故事(全本).txt", size: 100_000),
+            file("乙篇故事 1-20.txt", size: 90_000),
+            file("甲篇故事 1-20.txt", size: 2_000)
+        ]
+
+        let groups = SimilarFileNameDetector.groups(in: items)
+
+        #expect(groups.count == 2)
+        #expect(groups.map(\.size) == [100_000, 90_000])
+        #expect(groups.map { Set($0.items.map(\.name)) } == [
+            ["甲篇故事(全本).txt", "甲篇故事 1-20.txt"],
+            ["乙篇故事(全本).txt", "乙篇故事 1-20.txt"]
+        ])
+        #expect(groups[0].items.map(\.name) == [
+            "甲篇故事(全本).txt",
+            "甲篇故事 1-20.txt"
+        ])
+        #expect(groups[1].items.map(\.name) == [
+            "乙篇故事 1-20.txt",
+            "乙篇故事(全本).txt"
+        ])
+    }
+
+    @Test("falls back to localized names when size and sort keys tie")
+    func fallsBackToNamesWhenSizeAndSortKeysTie() {
+        let items = [
+            file("《同篇故事》b.txt", size: 1_000),
+            file("《同篇故事》a.txt", size: 1_000)
+        ]
+
+        let groups = SimilarFileNameDetector.groups(in: items)
+
+        #expect(groups.count == 1)
+        #expect(groups[0].items.map(\.name) == [
+            "《同篇故事》a.txt",
+            "《同篇故事》b.txt"
         ])
     }
 

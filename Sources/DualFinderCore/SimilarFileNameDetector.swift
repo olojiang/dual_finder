@@ -3,6 +3,9 @@ import Foundation
 public struct SimilarFileNameGroup: Identifiable, Hashable, Sendable {
     public let id: String
     public let items: [FileItem]
+    public var size: Int64? {
+        items.compactMap(\.size).max()
+    }
 
     public init(id: String, items: [FileItem]) {
         self.id = id
@@ -51,7 +54,7 @@ public enum SimilarFileNameDetector {
         return groupedCandidates
             .map { groupCandidates in
                 let orderedCandidates = groupCandidates.sorted { left, right in
-                    nameSortKey(left.item.name).localizedStandardCompare(nameSortKey(right.item.name)) == .orderedAscending
+                    compareBySizeThenName(left.item, right.item)
                 }
                 let groupID = stableGroupID(for: orderedCandidates)
                 return SimilarFileNameGroup(
@@ -60,8 +63,52 @@ public enum SimilarFileNameDetector {
                 )
             }
             .sorted { left, right in
-                nameSortKey(left.items[0].name).localizedStandardCompare(nameSortKey(right.items[0].name)) == .orderedAscending
+                compareGroupsBySizeThenName(left, right)
             }
+    }
+
+    private static func compareGroupsBySizeThenName(_ left: SimilarFileNameGroup, _ right: SimilarFileNameGroup) -> Bool {
+        if let result = compareOptionalSizeDescending(left.size, right.size) {
+            return result
+        }
+
+        let leftName = left.items.first?.name ?? ""
+        let rightName = right.items.first?.name ?? ""
+        return compareNames(leftName, rightName)
+    }
+
+    private static func compareBySizeThenName(_ left: FileItem, _ right: FileItem) -> Bool {
+        if let result = compareOptionalSizeDescending(left.size, right.size) {
+            return result
+        }
+        return compareNames(left.name, right.name)
+    }
+
+    private static func compareOptionalSizeDescending(_ left: Int64?, _ right: Int64?) -> Bool? {
+        switch (left, right) {
+        case let (left?, right?) where left != right:
+            return left > right
+        case (_?, nil):
+            return true
+        case (nil, _?):
+            return false
+        default:
+            return nil
+        }
+    }
+
+    private static func compareNames(_ left: String, _ right: String) -> Bool {
+        let keyComparison = nameSortKey(left).localizedStandardCompare(nameSortKey(right))
+        if keyComparison != .orderedSame {
+            return keyComparison == .orderedAscending
+        }
+
+        let nameComparison = left.localizedStandardCompare(right)
+        if nameComparison != .orderedSame {
+            return nameComparison == .orderedAscending
+        }
+
+        return left < right
     }
 
     private static func comparisonBucket(for candidate: Candidate) -> String {

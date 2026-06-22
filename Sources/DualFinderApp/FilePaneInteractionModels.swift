@@ -187,3 +187,30 @@ enum FileKeyboardSelectionNavigator {
         return [nextURL]
     }
 }
+
+enum FileListKeyDownFallbackPolicy {
+    static func ignoreReasonForSimilarReviewArrowFallback(
+        keyCode: UInt16,
+        isSimilarFileNavigatorEnabled: Bool,
+        isFileListFocused: Bool,
+        activePaneSide: PaneSide,
+        side: PaneSide,
+        relevantModifiers: NSEvent.ModifierFlags,
+        isPathFieldFocused: Bool,
+        isFileSearchFocused: Bool,
+        hasTextResponderFocused: Bool,
+        isEmbeddedTerminalFocused: Bool
+    ) -> String? {
+        guard isSimilarFileNavigatorEnabled, keyCode == 126 || keyCode == 125 else {
+            return "not-similar-review-arrow"
+        }
+        guard !isFileListFocused else { return nil }
+        guard activePaneSide == side else { return "inactive-pane" }
+        guard relevantModifiers.isEmpty else { return "modifiers" }
+        guard !isPathFieldFocused else { return "path-field" }
+        guard !isFileSearchFocused else { return "file-search-input" }
+        guard !hasTextResponderFocused else { return "text-responder" }
+        guard !isEmbeddedTerminalFocused else { return "embedded-terminal" }
+        return nil
+    }
+}

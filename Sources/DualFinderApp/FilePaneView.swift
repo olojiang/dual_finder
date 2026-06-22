@@ -692,7 +692,7 @@ struct FilePaneView: View {
                     }
                     .background {
                         LocalKeyDownMonitor(
-                            isEnabled: isFileListFocused,
+                            isEnabled: isFileListFocused || isSimilarFileNavigatorEnabled,
                             handle: handleFileListKeyDown
                         )
                         .frame(width: 0, height: 0)
@@ -860,12 +860,12 @@ struct FilePaneView: View {
         let allItems = model.items(for: side)
         guard isFileSearchPresented else { return allItems }
 
-        let query = fileSearchAppliedQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return allItems }
+        let matcher = FileNameSearch.Matcher(query: fileSearchAppliedQuery)
+        guard !matcher.isEmpty else { return allItems }
 
         return allItems.filter { item in
-            FileNameSearch.matches(item.name, query: query)
-                || FileNameSearch.matches(displayName(for: item), query: query)
+            matcher.matches(item.name)
+                || matcher.matches(displayName(for: item))
         }
     }
 
@@ -1458,12 +1458,26 @@ struct FilePaneView: View {
                 "side": side.rawValue,
                 "delta": "\(delta)",
                 "anchorPath": fileListKeyboardAnchorURL?.path ?? "",
-                "selectionCount": "\(currentSelection.count)"
-            ])
+                "anchorInReview": "\(fileListKeyboardAnchorURL.map { orderedURLs.contains($0) } ?? false)",
+                "selectionCount": "\(currentSelection.count)",
+                "orderedCount": "\(orderedURLs.count)",
+                "unavailableCount": "\(visuallyDeletedSimilarFileURLs.count)",
+                "focused": "\(isFileListFocused)",
+                "activePane": model.activePaneSide.rawValue
+            ].merging(selectionSampleMetadata(currentSelection), uniquingKeysWith: { current, _ in current }))
             return
         }
 
-        guard let nextURL = replacementSelection.first else { return }
+        guard let nextURL = replacementSelection.first else {
+            model.logSimilarFileReviewEvent("keyboard-move.ignored", metadata: [
+                "side": side.rawValue,
+                "delta": "\(delta)",
+                "reason": "empty-replacement",
+                "focused": "\(isFileListFocused)",
+                "activePane": model.activePaneSide.rawValue
+            ])
+            return
+        }
         fileListKeyboardAnchorURL = nextURL
         updateSimilarFileGroupIndex(containing: nextURL)
         pendingRevealURL = nextURL
@@ -1471,7 +1485,9 @@ struct FilePaneView: View {
         model.logSimilarFileReviewEvent("keyboard-move.applied", metadata: [
             "side": side.rawValue,
             "delta": "\(delta)",
-            "path": nextURL.path
+            "path": nextURL.path,
+            "focused": "\(isFileListFocused)",
+            "activePane": model.activePaneSide.rawValue
         ])
         restoreFileListFocus()
     }
@@ -1505,13 +1521,39 @@ struct FilePaneView: View {
     }
 
     private func handleFileListKeyDown(_ event: NSEvent) -> Bool {
-        guard isFileListFocused,
-              renamingURL == nil,
-              !isFileSearchPresented else {
+        guard renamingURL == nil else {
+            logSimilarFileKeyDownIgnoredIfNeeded(event, reason: "renaming")
+            return false
+        }
+        guard !isFileSearchPresented else {
+            logSimilarFileKeyDownIgnoredIfNeeded(event, reason: "file-search")
+            return false
+        }
+
+        let isSimilarReviewArrowKey = isSimilarFileNavigatorEnabled && (event.keyCode == 126 || event.keyCode == 125)
+        guard isFileListFocused || isSimilarReviewArrowKey else {
             return false
         }
 
         let relevantModifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        if !isFileListFocused {
+            if let reason = FileListKeyDownFallbackPolicy.ignoreReasonForSimilarReviewArrowFallback(
+                keyCode: event.keyCode,
+                isSimilarFileNavigatorEnabled: isSimilarFileNavigatorEnabled,
+                isFileListFocused: isFileListFocused,
+                activePaneSide: model.activePaneSide,
+                side: side,
+                relevantModifiers: relevantModifiers,
+                isPathFieldFocused: isPathFieldFocused,
+                isFileSearchFocused: isFileSearchFocused,
+                hasTextResponderFocused: TextEditingCommandRouter.hasFocusedTextView(in: event.window),
+                isEmbeddedTerminalFocused: isEmbeddedTerminalFocused(in: event.window)
+            ) {
+                logSimilarFileKeyDownIgnoredIfNeeded(event, reason: reason)
+                return false
+            }
+        }
+
         switch event.keyCode {
         case 126:
             if relevantModifiers.isEmpty {
@@ -1532,6 +1574,40 @@ struct FilePaneView: View {
         default:
             return false
         }
+    }
+
+    private func logSimilarFileKeyDownIgnoredIfNeeded(_ event: NSEvent, reason: String) {
+        guard isSimilarFileNavigatorEnabled, event.keyCode == 126 || event.keyCode == 125 else { return }
+        let relevantModifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        model.logSimilarFileReviewEvent("keyboard-event.ignored", metadata: [
+            "side": side.rawValue,
+            "reason": reason,
+            "keyCode": "\(event.keyCode)",
+            "focused": "\(isFileListFocused)",
+            "activePane": model.activePaneSide.rawValue,
+            "renaming": "\(renamingURL != nil)",
+            "fileSearch": "\(isFileSearchPresented)",
+            "modifiers": "\(relevantModifiers.rawValue)",
+            "anchorPath": fileListKeyboardAnchorURL?.path ?? "",
+            "selectionCount": "\(model.pane(for: side).selectedItemURLs.count)"
+        ])
+    }
+
+    private func isEmbeddedTerminalFocused(in window: NSWindow?) -> Bool {
+        guard let responder = window?.firstResponder else { return false }
+        return terminalModel.tabs.contains { $0.terminalView === responder }
+    }
+
+    private func selectionSampleMetadata(_ selection: Set<URL>) -> [String: String] {
+        if selection.count > 20 {
+            return [
+                "samplePaths": selection.lazy.prefix(5).map(\.path).joined(separator: "|"),
+                "pathsTruncated": "true"
+            ]
+        }
+        return [
+            "selectionPaths": selection.map(\.path).sorted().joined(separator: "|")
+        ]
     }
 
     private func moveFocusedFileListSelection(_ delta: Int) {
@@ -1850,6 +1926,7 @@ struct FilePaneView: View {
             "replacementCount": "\(replacementSelection.count)",
             "replacement": replacementSelection.map(\.path).joined(separator: "|")
         ])
+        restoreFileListFocus(reason: "similar-file-review.visual-delete")
     }
 
     private func dragURLs(startingWith url: URL) -> [URL] {

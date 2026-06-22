@@ -27,6 +27,15 @@ struct FileNameSearchTests {
         #expect(FileNameSearch.matches(name, query: "wangheye"))
     }
 
+    @Test("matcher reuses normalized query while preserving matching semantics")
+    func matcherPreservesMatchingSemantics() {
+        let matcher = FileNameSearch.Matcher(query: " p z ")
+
+        #expect(matcher.matches("篇章-王赫野#2F6Jni-original-pitch-up-3.mp3"))
+        #expect(!matcher.matches("unrelated.txt"))
+        #expect(FileNameSearch.Matcher(query: "   ").matches("anything.txt"))
+    }
+
     @Test("rejects unrelated pinyin initials")
     func rejectsUnrelatedInitials() {
         #expect(!FileNameSearch.matches("篇章-王赫野.mp3", query: "zz"))

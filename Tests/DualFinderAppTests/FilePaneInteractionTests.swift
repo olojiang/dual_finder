@@ -637,6 +637,107 @@ struct FilePaneInteractionTests {
         #expect(nextSelection == [urls[3]])
     }
 
+    @Test("similar review arrow fallback ignores text and terminal focus")
+    func similarReviewArrowFallbackIgnoresTextAndTerminalFocus() {
+        let baseReason = FileListKeyDownFallbackPolicy.ignoreReasonForSimilarReviewArrowFallback(
+            keyCode: 125,
+            isSimilarFileNavigatorEnabled: true,
+            isFileListFocused: false,
+            activePaneSide: .left,
+            side: .left,
+            relevantModifiers: [],
+            isPathFieldFocused: false,
+            isFileSearchFocused: false,
+            hasTextResponderFocused: false,
+            isEmbeddedTerminalFocused: false
+        )
+        let pathReason = FileListKeyDownFallbackPolicy.ignoreReasonForSimilarReviewArrowFallback(
+            keyCode: 125,
+            isSimilarFileNavigatorEnabled: true,
+            isFileListFocused: false,
+            activePaneSide: .left,
+            side: .left,
+            relevantModifiers: [],
+            isPathFieldFocused: true,
+            isFileSearchFocused: false,
+            hasTextResponderFocused: false,
+            isEmbeddedTerminalFocused: false
+        )
+        let textReason = FileListKeyDownFallbackPolicy.ignoreReasonForSimilarReviewArrowFallback(
+            keyCode: 125,
+            isSimilarFileNavigatorEnabled: true,
+            isFileListFocused: false,
+            activePaneSide: .left,
+            side: .left,
+            relevantModifiers: [],
+            isPathFieldFocused: false,
+            isFileSearchFocused: false,
+            hasTextResponderFocused: true,
+            isEmbeddedTerminalFocused: false
+        )
+        let terminalReason = FileListKeyDownFallbackPolicy.ignoreReasonForSimilarReviewArrowFallback(
+            keyCode: 125,
+            isSimilarFileNavigatorEnabled: true,
+            isFileListFocused: false,
+            activePaneSide: .left,
+            side: .left,
+            relevantModifiers: [],
+            isPathFieldFocused: false,
+            isFileSearchFocused: false,
+            hasTextResponderFocused: false,
+            isEmbeddedTerminalFocused: true
+        )
+
+        #expect(baseReason == nil)
+        #expect(pathReason == "path-field")
+        #expect(textReason == "text-responder")
+        #expect(terminalReason == "embedded-terminal")
+    }
+
+    @Test("similar review arrow fallback requires active pane and plain arrows")
+    func similarReviewArrowFallbackRequiresActivePaneAndPlainArrows() {
+        let inactiveReason = FileListKeyDownFallbackPolicy.ignoreReasonForSimilarReviewArrowFallback(
+            keyCode: 125,
+            isSimilarFileNavigatorEnabled: true,
+            isFileListFocused: false,
+            activePaneSide: .right,
+            side: .left,
+            relevantModifiers: [],
+            isPathFieldFocused: false,
+            isFileSearchFocused: false,
+            hasTextResponderFocused: false,
+            isEmbeddedTerminalFocused: false
+        )
+        let modifierReason = FileListKeyDownFallbackPolicy.ignoreReasonForSimilarReviewArrowFallback(
+            keyCode: 125,
+            isSimilarFileNavigatorEnabled: true,
+            isFileListFocused: false,
+            activePaneSide: .left,
+            side: .left,
+            relevantModifiers: [.shift],
+            isPathFieldFocused: false,
+            isFileSearchFocused: false,
+            hasTextResponderFocused: false,
+            isEmbeddedTerminalFocused: false
+        )
+        let unrelatedReason = FileListKeyDownFallbackPolicy.ignoreReasonForSimilarReviewArrowFallback(
+            keyCode: 36,
+            isSimilarFileNavigatorEnabled: true,
+            isFileListFocused: false,
+            activePaneSide: .left,
+            side: .left,
+            relevantModifiers: [],
+            isPathFieldFocused: false,
+            isFileSearchFocused: false,
+            hasTextResponderFocused: false,
+            isEmbeddedTerminalFocused: false
+        )
+
+        #expect(inactiveReason == "inactive-pane")
+        #expect(modifierReason == "modifiers")
+        #expect(unrelatedReason == "not-similar-review-arrow")
+    }
+
     @MainActor
     @Test("merge keeps explicit order and focuses the merged file")
     func mergeKeepsExplicitOrderAndFocusesMergedFile() throws {
