@@ -17,7 +17,8 @@ public enum SimilarFileNameDetector {
     public static func groups(in items: [FileItem]) -> [SimilarFileNameGroup] {
         let candidates = items.enumerated().compactMap { index, item -> Candidate? in
             guard !item.isDirectoryLike else { return nil }
-            let stem = canonicalStem(for: item.name)
+            let stemAnalysis = canonicalStem(for: item.name)
+            let stem = stemAnalysis.stem
             let stemLength = stem.count
             guard stemLength >= 2 else { return nil }
             return Candidate(
@@ -25,6 +26,7 @@ public enum SimilarFileNameDetector {
                 item: item,
                 stem: stem,
                 stemLength: stemLength,
+                distinctiveCJKTokens: stemAnalysis.distinctiveCJKTokens,
                 fileExtension: fileExtension(for: item.name)
             )
         }
@@ -121,11 +123,15 @@ public enum SimilarFileNameDetector {
 
         let leftStem = left.stem
         let rightStem = right.stem
-        if leftStem == rightStem { return true }
+        if leftStem == rightStem {
+            return !hasConflictingDistinctiveCJKTokens(left, right)
+        }
 
         let shorterCount = min(left.stemLength, right.stemLength)
         let longerCount = max(left.stemLength, right.stemLength)
         guard shorterCount >= 4 else { return false }
+
+        guard !hasConflictingDistinctiveCJKTokens(left, right) else { return false }
 
         if leftStem.hasPrefix(rightStem) || rightStem.hasPrefix(leftStem) {
             return Double(shorterCount) / Double(longerCount) >= 0.5
@@ -139,6 +145,10 @@ public enum SimilarFileNameDetector {
         return prefixCount >= 2 && diceCoefficient(leftStem, rightStem) >= 0.78
     }
 
+    private static func hasConflictingDistinctiveCJKTokens(_ left: Candidate, _ right: Candidate) -> Bool {
+        left.distinctiveCJKTokens != right.distinctiveCJKTokens
+    }
+
     private static func stableGroupID(for candidates: [Candidate]) -> String {
         let shortestStem = candidates.map(\.stem).min { left, right in
             if left.count == right.count {
@@ -150,7 +160,7 @@ public enum SimilarFileNameDetector {
         return "\(fileExtension)|\(shortestStem)"
     }
 
-    private static func canonicalStem(for name: String) -> String {
+    private static func canonicalStem(for name: String) -> StemAnalysis {
         let rawStem = (name as NSString).deletingPathExtension
         let halfWidth = rawStem.applyingTransform(.fullwidthToHalfwidth, reverse: false) ?? rawStem
         let stripped = halfWidth.applyingTransform(.stripDiacritics, reverse: false) ?? halfWidth
@@ -175,16 +185,19 @@ public enum SimilarFileNameDetector {
 
         let meaningfulTokens = tokens.compactMap(normalizedToken)
         guard !meaningfulTokens.isEmpty else {
-            return ""
+            return StemAnalysis(stem: "", distinctiveCJKTokens: [])
         }
 
         let minimumCJKTokenLength = titleScoped == nil ? 4 : 2
         let cjkTokens = meaningfulTokens.filter(containsCJK)
         if let longestCJKToken = longestToken(in: cjkTokens),
            longestCJKToken.count >= minimumCJKTokenLength {
-            return longestCJKToken
+            return StemAnalysis(
+                stem: longestCJKToken,
+                distinctiveCJKTokens: distinctiveCJKTokens(in: cjkTokens, excluding: longestCJKToken)
+            )
         }
-        return meaningfulTokens.joined()
+        return StemAnalysis(stem: meaningfulTokens.joined(), distinctiveCJKTokens: [])
     }
 
     private static func firstBookTitleContent(in text: String) -> String? {
@@ -303,6 +316,13 @@ public enum SimilarFileNameDetector {
             }
             return left.count < right.count
         }
+    }
+
+    private static func distinctiveCJKTokens(in tokens: [String], excluding primary: String) -> Set<String> {
+        // Extra title-like fragments usually mean an excerpt or segment, not a duplicate of the whole work.
+        Set(tokens.filter { token in
+            token != primary && token.count >= 2
+        })
     }
 
     private static func fileExtension(for name: String) -> String {
@@ -426,7 +446,13 @@ public enum SimilarFileNameDetector {
         let item: FileItem
         let stem: String
         let stemLength: Int
+        let distinctiveCJKTokens: Set<String>
         let fileExtension: String
+    }
+
+    private struct StemAnalysis {
+        let stem: String
+        let distinctiveCJKTokens: Set<String>
     }
 }
 

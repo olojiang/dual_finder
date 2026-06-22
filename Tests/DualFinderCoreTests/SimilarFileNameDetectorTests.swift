@@ -182,6 +182,16 @@ struct SimilarFileNameDetectorTests {
         #expect(SimilarFileNameDetector.groups(in: items).isEmpty)
     }
 
+    @Test("does not group title with a distinct excerpt segment")
+    func rejectsTitleWithDistinctExcerptSegment() {
+        let items = [
+            file("叶辰风流（幻辰风流） 未完结 135...可卿那段.....】 作者： 英雄联盟.txt"),
+            file("《叶辰风流（幻辰风流）》 作者： 英雄联盟 [1354章] [已完结].txt")
+        ]
+
+        #expect(SimilarFileNameDetector.groups(in: items).isEmpty)
+    }
+
     @Test("keeps different file extensions in separate groups")
     func separatesExtensions() {
         let items = [
