@@ -77,8 +77,18 @@ public struct TextEncodingBatchConversionResult: Sendable, Equatable {
     }
 }
 
+public struct TextEncodingCacheLookup: Sendable, Equatable {
+    public let encoding: String
+    public let needsMigration: Bool
+
+    public init(encoding: String, needsMigration: Bool) {
+        self.encoding = encoding
+        self.needsMigration = needsMigration
+    }
+}
+
 public final class TextEncodingConversionCache: @unchecked Sendable {
-    private struct Entry: Codable {
+    private struct Entry: Codable, Equatable {
         var size: Int64
         var modifiedAt: Date
         var encoding: String
@@ -88,6 +98,8 @@ public final class TextEncodingConversionCache: @unchecked Sendable {
     private let fileManager: FileManager
     private let lock = NSLock()
     private var entries: [String: Entry]
+    private var batchDepth = 0
+    private var isDirty = false
 
     public init(
         storageURL: URL = TextEncodingConversionCache.defaultStorageURL(),
@@ -96,6 +108,26 @@ public final class TextEncodingConversionCache: @unchecked Sendable {
         self.storageURL = storageURL
         self.fileManager = fileManager
         entries = Self.load(from: storageURL)
+    }
+
+    public func beginBatch() {
+        lock.lock()
+        batchDepth += 1
+        lock.unlock()
+    }
+
+    public func endBatch() throws {
+        lock.lock()
+        batchDepth = max(0, batchDepth - 1)
+        let shouldFlush = batchDepth == 0 && isDirty
+        let snapshot = shouldFlush ? entries : nil
+        if shouldFlush {
+            isDirty = false
+        }
+        lock.unlock()
+        if let snapshot {
+            try save(snapshot)
+        }
     }
 
     public func cachedEncoding(for file: URL, size: Int64?, modifiedAt: Date?) -> String? {
@@ -115,24 +147,49 @@ public final class TextEncodingConversionCache: @unchecked Sendable {
     }
 
     public func cachedUTF8Encoding(for file: URL, size: Int64?, modifiedAt: Date?) -> String? {
-        guard let encoding = cachedEncoding(for: file, size: size, modifiedAt: modifiedAt),
-              encoding == "utf-8" else {
-            return nil
+        lookupEncoding(for: file, size: size, modifiedAt: modifiedAt)
+            .flatMap { $0.encoding == "utf-8" ? $0.encoding : nil }
+    }
+
+    public func lookupEncoding(for file: URL, size: Int64?, modifiedAt: Date?) -> TextEncodingCacheLookup? {
+        guard let size, let modifiedAt else { return nil }
+        lock.lock()
+        defer { lock.unlock() }
+        let fingerprintKey = cacheKey(for: file, size: size, modifiedAt: modifiedAt)
+        if let entry = entries[fingerprintKey],
+           entry.size == size,
+           Self.matchesStoredModificationDate(entry.modifiedAt, modifiedAt) {
+            return TextEncodingCacheLookup(encoding: entry.encoding, needsMigration: false)
         }
-        return encoding
+        let legacyKey = legacyPathCacheKey(for: file)
+        if let entry = entries[legacyKey],
+           entry.size == size,
+           Self.matchesStoredModificationDate(entry.modifiedAt, modifiedAt) {
+            return TextEncodingCacheLookup(encoding: entry.encoding, needsMigration: true)
+        }
+        return nil
     }
 
     public func markEncoding(_ encoding: String, for file: URL, size: Int64?, modifiedAt: Date?) throws {
         guard let size, let modifiedAt else { return }
+        let key = cacheKey(for: file, size: size, modifiedAt: modifiedAt)
+        let entry = Entry(size: size, modifiedAt: modifiedAt, encoding: encoding)
         lock.lock()
-        entries[cacheKey(for: file, size: size, modifiedAt: modifiedAt)] = Entry(
-            size: size,
-            modifiedAt: modifiedAt,
-            encoding: encoding
-        )
-        let snapshot = entries
+        if entries[key] == entry {
+            lock.unlock()
+            return
+        }
+        entries[key] = entry
+        isDirty = true
+        let shouldSaveNow = batchDepth == 0
+        let snapshot = shouldSaveNow ? entries : nil
+        if shouldSaveNow {
+            isDirty = false
+        }
         lock.unlock()
-        try save(snapshot)
+        if let snapshot {
+            try save(snapshot)
+        }
     }
 
     public func markUTF8(_ encoding: String = "utf-8", for file: URL, size: Int64?, modifiedAt: Date?) throws {
@@ -186,6 +243,19 @@ public final class TextEncodingConversionCache: @unchecked Sendable {
 public struct TextEncodingConversionService {
     public typealias ProgressHandler = (_ completedCount: Int, _ totalCount: Int, _ result: TextEncodingConversionResult) -> Void
 
+    public static let defaultCacheHitProgressStride = 64
+
+    public static func shouldReportBatchProgress(
+        result: TextEncodingConversionResult,
+        completedCount: Int,
+        totalCount: Int,
+        cacheHitStride: Int = defaultCacheHitProgressStride
+    ) -> Bool {
+        if completedCount == totalCount { return true }
+        if !result.usedCache { return true }
+        return completedCount.isMultiple(of: cacheHitStride)
+    }
+
     private static let supportedTextFileExtensions: Set<String> = [
         "adoc", "asc", "bash", "bat", "c", "cc", "cfg", "conf", "cpp", "cs",
         "css", "csv", "cxx", "diff", "env", "go", "h", "hpp", "htm", "html",
@@ -213,7 +283,13 @@ public struct TextEncodingConversionService {
         _ urls: [URL],
         progress: ProgressHandler? = nil
     ) throws -> TextEncodingBatchConversionResult {
+        cache?.beginBatch()
+        defer {
+            try? cache?.endBatch()
+        }
+
         var results: [TextEncodingConversionResult] = []
+        results.reserveCapacity(urls.count)
         for (index, url) in urls.enumerated() {
             let result: TextEncodingConversionResult
             do {
@@ -234,23 +310,27 @@ public struct TextEncodingConversionService {
                 )
             }
             results.append(result)
-            progress?(index + 1, urls.count, result)
+            if Self.shouldReportBatchProgress(
+                result: result,
+                completedCount: index + 1,
+                totalCount: urls.count
+            ) {
+                progress?(index + 1, urls.count, result)
+            }
         }
-        return TextEncodingBatchConversionResult(results: results)
+
+        let batchResult = TextEncodingBatchConversionResult(results: results)
+        if batchResult.cachedUTF8Count > 0 {
+            logger?.info("text-encoding", "batch.cache-hits", metadata: [
+                "count": "\(batchResult.cachedUTF8Count)",
+                "total": "\(urls.count)"
+            ])
+        }
+        return batchResult
     }
 
     public func convertFileToUTF8(_ url: URL) throws -> TextEncodingConversionResult {
         let standardizedURL = url.standardizedFileURL
-        let initialFingerprint = fileFingerprint(for: standardizedURL)
-        guard initialFingerprint?.isRegularFile == true else {
-            logger?.info("text-encoding", "file.skipped", metadata: ["path": standardizedURL.path])
-            return TextEncodingConversionResult(
-                originalURL: standardizedURL,
-                finalURL: standardizedURL,
-                detectedEncoding: nil,
-                status: .skipped
-            )
-        }
 
         guard isSupportedTextFileCandidate(standardizedURL) else {
             logger?.info("text-encoding", "file.skipped", metadata: [
@@ -265,22 +345,51 @@ public struct TextEncodingConversionService {
             )
         }
 
-        if let cachedEncoding = cache?.cachedUTF8Encoding(
+        let initialFingerprint = fileFingerprint(for: standardizedURL)
+        guard initialFingerprint?.isRegularFile == true else {
+            logger?.info("text-encoding", "file.skipped", metadata: ["path": standardizedURL.path])
+            return TextEncodingConversionResult(
+                originalURL: standardizedURL,
+                finalURL: standardizedURL,
+                detectedEncoding: nil,
+                status: .skipped
+            )
+        }
+
+        if let lookup = cache?.lookupEncoding(
             for: standardizedURL,
             size: initialFingerprint?.size,
             modifiedAt: initialFingerprint?.modifiedAt
-        ) {
-            let finalURL = try restoreUnknownEncodingNameIfNeeded(standardizedURL)
-            let finalFingerprint = fileFingerprint(for: finalURL)
-            try cache?.markUTF8(for: finalURL, size: finalFingerprint?.size, modifiedAt: finalFingerprint?.modifiedAt)
-            logger?.info("text-encoding", "file.cache-hit", metadata: [
-                "path": finalURL.path,
-                "encoding": cachedEncoding
-            ])
+        ), lookup.encoding == "utf-8" {
+            if needsUnknownEncodingNameRestore(standardizedURL) {
+                let finalURL = try restoreUnknownEncodingNameIfNeeded(standardizedURL)
+                let finalFingerprint = fileFingerprint(for: finalURL)
+                try cache?.markUTF8(for: finalURL, size: finalFingerprint?.size, modifiedAt: finalFingerprint?.modifiedAt)
+                logger?.debug("text-encoding", "file.cache-hit", metadata: [
+                    "path": finalURL.path,
+                    "encoding": lookup.encoding,
+                    "restoredName": "true"
+                ])
+                return TextEncodingConversionResult(
+                    originalURL: standardizedURL,
+                    finalURL: finalURL,
+                    detectedEncoding: lookup.encoding,
+                    status: .alreadyUTF8,
+                    usedCache: true
+                )
+            }
+
+            if lookup.needsMigration {
+                try cache?.markUTF8(
+                    for: standardizedURL,
+                    size: initialFingerprint?.size,
+                    modifiedAt: initialFingerprint?.modifiedAt
+                )
+            }
             return TextEncodingConversionResult(
                 originalURL: standardizedURL,
-                finalURL: finalURL,
-                detectedEncoding: cachedEncoding,
+                finalURL: standardizedURL,
+                detectedEncoding: lookup.encoding,
                 status: .alreadyUTF8,
                 usedCache: true
             )
@@ -336,11 +445,18 @@ public struct TextEncodingConversionService {
         let finalURL = try restoreUnknownEncodingNameIfNeeded(standardizedURL)
         let updatedFingerprint = fileFingerprint(for: finalURL)
         try cache?.markUTF8(for: finalURL, size: updatedFingerprint?.size, modifiedAt: updatedFingerprint?.modifiedAt)
-        logger?.info("text-encoding", "file.converted", metadata: [
+        var metadata = [
             "path": finalURL.path,
             "sourceEncoding": detected.label,
             "destinationEncoding": "utf-8"
-        ])
+        ]
+        if detected.label.contains("repaired-nul") {
+            metadata["removedNULBytes"] = "\(data.filter { $0 == 0 }.count)"
+        }
+        if detected.label.contains("lossy") {
+            metadata["lossyByteCount"] = "\(detected.lossyByteCount ?? 0)"
+        }
+        logger?.info("text-encoding", "file.converted", metadata: metadata)
         return TextEncodingConversionResult(
             originalURL: standardizedURL,
             finalURL: finalURL,
@@ -374,6 +490,10 @@ public struct TextEncodingConversionService {
            let cleaned = cleanedTextIfLikelyText(text),
            textLooksReadable(cleaned) {
             return DetectedTextEncoding(label: "utf-8", text: cleaned)
+        }
+
+        if let repaired = repairedUTF8TextWithNULPadding(for: data) {
+            return repaired
         }
 
         if hasUTF16SignatureOrPattern(data) {
@@ -457,17 +577,26 @@ public struct TextEncodingConversionService {
         decodedLines.reserveCapacity(lines.count)
         var labels: Set<String> = []
         var nonASCIIByteLineCount = 0
+        var lossyByteCount = 0
+        let lossyLimit = max(data.count / 100, 8)
 
         for line in lines {
             if line.contains(where: { $0 >= 0x80 }) {
                 nonASCIIByteLineCount += 1
             }
 
-            guard let decoded = decodeLikelyTextLine(line) else {
+            if let decoded = decodeLikelyTextLine(line) {
+                decodedLines.append(decoded.text)
+                labels.insert(decoded.label)
+                continue
+            }
+
+            guard lossyByteCount + line.count <= lossyLimit else {
                 return nil
             }
-            decodedLines.append(decoded.text)
-            labels.insert(decoded.label)
+            lossyByteCount += line.count
+            decodedLines.append(String(decoding: line, as: UTF8.self))
+            labels.insert("utf-8-lossy")
         }
 
         guard labels.count > 1,
@@ -477,13 +606,17 @@ public struct TextEncodingConversionService {
 
         let text = decodedLines.joined()
         guard let cleaned = cleanedTextIfLikelyText(text),
-              textLooksReadable(cleaned) else {
+              textLooksReadable(cleaned, replacementThreshold: lossyByteCount > 0 ? 0.02 : 0.001) else {
             return nil
         }
 
-        let orderedLabels = ["utf-8", "gbk", "gb2312", "gb18030", "big5", "shift_jis", "euc-kr", "windows-1252", "iso-8859-1"]
+        let orderedLabels = ["utf-8", "gbk", "gb2312", "gb18030", "big5", "shift_jis", "euc-kr", "utf-8-lossy"]
             .filter { labels.contains($0) }
-        return DetectedTextEncoding(label: "mixed:\(orderedLabels.joined(separator: "+"))", text: cleaned)
+        return DetectedTextEncoding(
+            label: "mixed:\(orderedLabels.joined(separator: "+"))",
+            text: cleaned,
+            lossyByteCount: lossyByteCount == 0 ? nil : lossyByteCount
+        )
     }
 
     private func splitDataByNewline(_ data: Data) -> [Data] {
@@ -511,7 +644,7 @@ public struct TextEncodingConversionService {
             return DetectedTextEncoding(label: "utf-8", text: cleaned)
         }
 
-        for candidate in EncodingCandidate.legacyCandidates {
+        for candidate in EncodingCandidate.mixedLineCandidates {
             guard let text = String(data: data, encoding: candidate.encoding),
                   let cleaned = cleanedTextIfLikelyText(text),
                   textLooksReadable(cleaned) else {
@@ -523,7 +656,7 @@ public struct TextEncodingConversionService {
         return nil
     }
 
-    private func textLooksReadable(_ text: String) -> Bool {
+    private func textLooksReadable(_ text: String, replacementThreshold: Double = 0.001) -> Bool {
         guard !text.isEmpty else { return true }
         var replacementScalars = 0
         var privateUseScalars = 0
@@ -540,8 +673,32 @@ public struct TextEncodingConversionService {
         }
 
         guard totalScalars > 0 else { return true }
-        return Double(replacementScalars) / Double(totalScalars) <= 0.001
-            && Double(privateUseScalars) / Double(totalScalars) <= 0.001
+        return Double(replacementScalars) / Double(totalScalars) <= replacementThreshold
+            && Double(privateUseScalars) / Double(totalScalars) <= 0.15
+    }
+
+    private func repairedUTF8TextWithNULPadding(for data: Data) -> DetectedTextEncoding? {
+        guard data.contains(0),
+              let text = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+
+        let result = cleanScalars(text)
+
+        guard result.totalCount > 0,
+              result.nulCount > 0,
+              Double(result.suspiciousControlCount) / Double(result.totalCount) <= 0.02 else {
+            return nil
+        }
+
+        guard !result.cleaned.isEmpty,
+              textLooksReadable(result.cleaned) else {
+            return nil
+        }
+
+        let nulRatio = Double(result.nulCount) / Double(result.totalCount)
+        let label = nulRatio > 0.05 ? "utf-8-repaired-nul-padding" : "utf-8-repaired-nul"
+        return DetectedTextEncoding(label: label, text: result.cleaned)
     }
 
     private func detectEncodingWithFoundation(for data: Data) -> DetectedTextEncoding? {
@@ -558,15 +715,58 @@ public struct TextEncodingConversionService {
         }
 
         let text = convertedString as String
+        let replacementThreshold = usedLossyConversion.boolValue ? 0.06 : 0.001
         guard let cleaned = cleanedTextIfLikelyText(text),
-              textLooksReadable(cleaned),
+              textLooksReadable(cleaned, replacementThreshold: replacementThreshold),
               let label = label(forFoundationEncoding: rawEncoding, decodedText: text, data: data) else {
             return nil
         }
+
+        guard !usedLossyConversion.boolValue || textHasCJKContent(cleaned) else {
+            return nil
+        }
+
+        if ["windows-1252", "iso-8859-1"].contains(label),
+           let cjkDetected = detectCJKEncoding(for: data) {
+            return cjkDetected
+        }
+
         return DetectedTextEncoding(
             label: usedLossyConversion.boolValue ? "\(label)-lossy" : label,
-            text: cleaned
+            text: cleaned,
+            lossyByteCount: usedLossyConversion.boolValue ? data.count : nil
         )
+    }
+
+    private func detectCJKEncoding(for data: Data) -> DetectedTextEncoding? {
+        for candidate in EncodingCandidate.cjkCandidates {
+            guard let text = String(data: data, encoding: candidate.encoding),
+                  let cleaned = cleanedTextIfLikelyText(text),
+                  textLooksReadable(cleaned),
+                  textHasCJKContent(cleaned) else {
+                continue
+            }
+            return DetectedTextEncoding(label: candidate.label, text: cleaned)
+        }
+        return nil
+    }
+
+    private func textHasCJKContent(_ text: String) -> Bool {
+        var cjkScalars = 0
+        var letterScalars = 0
+        for scalar in text.unicodeScalars {
+            guard scalar.properties.isAlphabetic else { continue }
+            letterScalars += 1
+            let v = Int(scalar.value)
+            if (0x4e00...0x9fff).contains(v)
+                || (0x3400...0x4dbf).contains(v)
+                || (0x3040...0x30ff).contains(v)
+                || (0xac00...0xd7af).contains(v) {
+                cjkScalars += 1
+            }
+        }
+        guard letterScalars > 0 else { return false }
+        return Double(cjkScalars) / Double(letterScalars) >= 0.20
     }
 
     private func label(forFoundationEncoding rawEncoding: UInt, decodedText: String, data: Data) -> String? {
@@ -611,17 +811,17 @@ public struct TextEncodingConversionService {
     }
 
     private func fileFingerprint(for url: URL) -> TextEncodingFileFingerprint? {
-        var isDirectory = ObjCBool(false)
-        guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
+        guard let values = try? url.resourceValues(forKeys: [
+            .isRegularFileKey,
+            .fileSizeKey,
+            .contentModificationDateKey
+        ]) else {
             return nil
         }
-        let attributes = try? fileManager.attributesOfItem(atPath: url.path)
-        let size = (attributes?[.size] as? NSNumber)?.int64Value
-        let modifiedAt = attributes?[.modificationDate] as? Date
         return TextEncodingFileFingerprint(
-            isRegularFile: !isDirectory.boolValue,
-            size: size,
-            modifiedAt: modifiedAt
+            isRegularFile: values.isRegularFile == true,
+            size: values.fileSize.map(Int64.init),
+            modifiedAt: values.contentModificationDate
         )
     }
 
@@ -646,33 +846,48 @@ public struct TextEncodingConversionService {
             || Double(oddZeroes) / Double(pairCount) > 0.20
     }
 
-    private func cleanedTextIfLikelyText(_ text: String) -> String? {
-        guard !text.isEmpty else { return "" }
-        var suspiciousScalars = 0
-        var nulScalars = 0
-        var totalScalars = 0
-        var cleanedScalars = String.UnicodeScalarView()
+    private struct ScalarCleaningResult {
+        let cleaned: String
+        let nulCount: Int
+        let suspiciousControlCount: Int
+        let totalCount: Int
+    }
+
+    private func cleanScalars(_ text: String) -> ScalarCleaningResult {
+        var nulCount = 0
+        var suspiciousCount = 0
+        var totalCount = 0
+        var buffer = String.UnicodeScalarView()
         for scalar in text.unicodeScalars {
-            totalScalars += 1
+            totalCount += 1
             if scalar.value == 0 {
-                nulScalars += 1
+                nulCount += 1
                 continue
             }
             if scalar.properties.generalCategory == .control,
-               scalar != "\n",
-               scalar != "\r",
-               scalar != "\t" {
-                suspiciousScalars += 1
+               scalar != "\n", scalar != "\r", scalar != "\t" {
+                suspiciousCount += 1
                 continue
             }
-            cleanedScalars.append(scalar)
+            buffer.append(scalar)
         }
-        guard totalScalars > 0 else { return "" }
-        guard Double(nulScalars) / Double(totalScalars) <= 0.001,
-              Double(suspiciousScalars) / Double(totalScalars) <= 0.02 else {
+        return ScalarCleaningResult(
+            cleaned: String(buffer),
+            nulCount: nulCount,
+            suspiciousControlCount: suspiciousCount,
+            totalCount: totalCount
+        )
+    }
+
+    private func cleanedTextIfLikelyText(_ text: String) -> String? {
+        guard !text.isEmpty else { return "" }
+        let result = cleanScalars(text)
+        guard result.totalCount > 0 else { return "" }
+        guard Double(result.nulCount) / Double(result.totalCount) <= 0.001,
+              Double(result.suspiciousControlCount) / Double(result.totalCount) <= 0.02 else {
             return nil
         }
-        return String(cleanedScalars)
+        return result.cleaned
     }
 
     private func repairedUTF16Text(for data: Data) -> DetectedTextEncoding? {
@@ -738,6 +953,12 @@ public struct TextEncodingConversionService {
         return destination.standardizedFileURL
     }
 
+    private func needsUnknownEncodingNameRestore(_ url: URL) -> Bool {
+        let hasMarker = removingUnknownEncodingMarkers(from: url.lastPathComponent) != url.lastPathComponent
+        let isInUnknownDirectory = url.deletingLastPathComponent().lastPathComponent == "unknown_encode"
+        return hasMarker || isInUnknownDirectory
+    }
+
     private func restoreUnknownEncodingNameIfNeeded(_ url: URL) throws -> URL {
         let restoredName = removingUnknownEncodingMarkers(from: url.lastPathComponent)
         let isInUnknownDirectory = url.deletingLastPathComponent().lastPathComponent == "unknown_encode"
@@ -794,6 +1015,12 @@ public struct TextEncodingConversionService {
     }
 
     private func unknownEncodingDiagnostic(for data: Data) -> String {
+        if data.starts(with: [0x50, 0x4b, 0x03, 0x04]) {
+            return "looks like a ZIP archive, not a text file"
+        }
+        if data.starts(with: [0x52, 0x61, 0x72, 0x21, 0x1a, 0x07]) {
+            return "looks like a RAR archive, not a text file"
+        }
         if data.contains(0) {
             if hasUTF16SignatureOrPattern(data) {
                 return "contains NUL bytes but did not decode as supported UTF-16 text"
@@ -819,6 +1046,13 @@ private struct TextEncodingFileFingerprint {
 private struct DetectedTextEncoding {
     let label: String
     let text: String
+    var lossyByteCount: Int?
+
+    init(label: String, text: String, lossyByteCount: Int? = nil) {
+        self.label = label
+        self.text = text
+        self.lossyByteCount = lossyByteCount
+    }
 }
 
 private struct EncodingCandidate {
@@ -841,6 +1075,14 @@ private struct EncodingCandidate {
         EncodingCandidate(label: "windows-1252", encoding: .windowsCP1252),
         EncodingCandidate(label: "iso-8859-1", encoding: .isoLatin1)
     ].compactMap { $0 }
+
+    static let cjkCandidates: [EncodingCandidate] = legacyCandidates.filter {
+        ["gbk", "gb2312", "gb18030", "big5", "shift_jis", "euc-kr"].contains($0.label)
+    }
+
+    static let mixedLineCandidates: [EncodingCandidate] = legacyCandidates.filter {
+        !["windows-1252", "iso-8859-1"].contains($0.label)
+    }
 
     private static func candidate(label: String, ianaName: String) -> EncodingCandidate? {
         let cfEncoding = CFStringConvertIANACharSetNameToEncoding(ianaName as CFString)

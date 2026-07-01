@@ -18,6 +18,20 @@ struct TextEncodingConversionServiceTests {
         #expect(try String(contentsOf: file, encoding: .utf8) == "plain utf-8 中文")
     }
 
+    @Test("keeps UTF-8 files with private-use glyphs unchanged")
+    func keepsUTF8FilesWithPrivateUseGlyphsUnchanged() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("utf8-private-use.txt")
+        let sourceText = "请各位记住地址\n" + String(repeating: "\u{e4c6}", count: 6) + "\n正文继续，章节内容保持原样，人物对话和段落排版都应该保留。"
+        try sourceText.write(to: file, atomically: true, encoding: .utf8)
+
+        let result = try TextEncodingConversionService(logger: CapturingLogger()).convertFileToUTF8(file)
+
+        #expect(result.status == .alreadyUTF8)
+        #expect(result.detectedEncoding == "utf-8")
+        #expect(try String(contentsOf: file, encoding: .utf8) == sourceText)
+    }
+
     @Test("converts GBK files to UTF-8 in place")
     func convertsGBKFilesToUTF8InPlace() throws {
         let root = try TemporaryDirectory()
@@ -49,6 +63,38 @@ struct TextEncodingConversionServiceTests {
         #expect(try String(contentsOf: file, encoding: .utf8) == sourceText)
     }
 
+    @Test("repairs UTF-8 text with NUL padding")
+    func repairsUTF8TextWithNULPadding() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("utf8-padded.txt")
+        let sourceText = "请各位记住永久地址\n正文继续\n"
+        var data = Data(sourceText.utf8)
+        data.append(Data(repeating: 0, count: 2048))
+        let logger = CapturingLogger()
+        try data.write(to: file)
+
+        let result = try TextEncodingConversionService(logger: logger).convertFileToUTF8(file)
+
+        #expect(result.status == .converted)
+        #expect(result.detectedEncoding == "utf-8-repaired-nul-padding")
+        #expect(try String(contentsOf: file, encoding: .utf8) == sourceText)
+        #expect(logger.messages.contains { $0.contains("removedNULBytes") })
+    }
+
+    @Test("converts GBK text that contains common private-use glyphs")
+    func convertsGBKTextThatContainsCommonPrivateUseGlyphs() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("gbk-private-use.txt")
+        let sourceText = "爱\u{e4c6}\u{e4c6}我今年十六歲是一個遺腹子，父親和母親結婚一個月後便去歐洲出差，在回程的時候卻不幸發生空難。"
+        try #require(sourceText.data(using: encoding(named: "GBK"))).write(to: file)
+
+        let result = try TextEncodingConversionService(logger: CapturingLogger()).convertFileToUTF8(file)
+
+        #expect(result.status == .converted)
+        #expect(result.detectedEncoding == "gbk")
+        #expect(try String(contentsOf: file, encoding: .utf8) == sourceText)
+    }
+
     @Test("repairs mixed GBK and UTF-8 line encoded text")
     func repairsMixedGBKAndUTF8LineEncodedText() throws {
         let root = try TemporaryDirectory()
@@ -64,6 +110,31 @@ struct TextEncodingConversionServiceTests {
         #expect(result.status == .converted)
         #expect(result.detectedEncoding == "mixed:utf-8+gbk")
         #expect(try String(contentsOf: file, encoding: .utf8) == "请各位记住地址\n这是南部一个村子里的故事。\n")
+    }
+
+    @Test("repairs mostly decodable mixed text with sparse corrupt bytes")
+    func repairsMostlyDecodableMixedTextWithSparseCorruptBytes() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("mixed-sparse-corrupt.txt")
+        var data = Data()
+        var expected = ""
+        for _ in 0..<40 {
+            data.append(try #require("看更多上电报加入免费小说频道\n".data(using: .utf8)))
+            data.append(try #require("序章家族成员\n".data(using: encoding(named: "GB18030"))))
+            expected += "看更多上电报加入免费小说频道\n序章家族成员\n"
+        }
+        data.append(Data([0xff, 0xfe, 0xfd, 0x0a]))
+        data.append(try #require("正文继续\n".data(using: .utf8)))
+        expected += "���\n正文继续\n"
+        let logger = CapturingLogger()
+        try data.write(to: file)
+
+        let result = try TextEncodingConversionService(logger: logger).convertFileToUTF8(file)
+
+        #expect(result.status == .converted)
+        #expect(result.detectedEncoding == "mixed:utf-8+gbk+utf-8-lossy")
+        #expect(try String(contentsOf: file, encoding: .utf8) == expected)
+        #expect(logger.messages.contains { $0.contains("lossyByteCount") })
     }
 
     @Test("restores original name when marked unknown files are recovered")
@@ -115,6 +186,24 @@ struct TextEncodingConversionServiceTests {
         #expect(try String(contentsOf: file, encoding: .utf8) == sourceText)
     }
 
+    @Test("converts lossy GB18030 files when most text is readable")
+    func convertsLossyGB18030FilesWhenMostTextIsReadable() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("gb18030-lossy.txt")
+        var data = try #require("<风流花少>\n作者：星雨寻找\n我叫花睿龙，今年10岁。\n".data(using: encoding(named: "GB18030")))
+        data.append(contentsOf: [0xff, 0xfe, 0xfd])
+        data.append(try #require("\n正文继续。".data(using: encoding(named: "GB18030"))))
+        let logger = CapturingLogger()
+        try data.write(to: file)
+
+        let result = try TextEncodingConversionService(logger: logger).convertFileToUTF8(file)
+
+        #expect(result.status == .converted)
+        #expect(result.detectedEncoding == "gb18030-lossy")
+        #expect(try String(contentsOf: file, encoding: .utf8).contains("我叫花睿龙"))
+        #expect(logger.messages.contains { $0.contains("lossyByteCount") })
+    }
+
     @Test("converts UTF-16 files to UTF-8 in place")
     func convertsUTF16FilesToUTF8InPlace() throws {
         let root = try TemporaryDirectory()
@@ -147,6 +236,57 @@ struct TextEncodingConversionServiceTests {
         #expect(!FileManager.default.fileExists(atPath: file.path))
         #expect(FileManager.default.fileExists(atPath: result.finalURL.path))
         #expect(logger.messages.contains { $0.contains("sampleHex") && $0.contains("reason") })
+    }
+
+    @Test("rejects pure NUL files as unknown")
+    func rejectsPureNULFilesAsUnknown() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("pure-nul.txt")
+        try Data(repeating: 0, count: 4096).write(to: file)
+
+        let result = try TextEncodingConversionService(logger: CapturingLogger()).convertFileToUTF8(file)
+
+        #expect(result.status == .renamedUnknown)
+    }
+
+    @Test("converts UTF-16 BE files to UTF-8")
+    func convertsUTF16BEFilesToUTF8() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("utf16be.txt")
+        let sourceText = "UTF-16 BE 繁體中文"
+        var data = Data([0xfe, 0xff])
+        data.append(try #require(sourceText.data(using: .utf16BigEndian)))
+        try data.write(to: file)
+
+        let result = try TextEncodingConversionService(logger: CapturingLogger()).convertFileToUTF8(file)
+
+        #expect(result.status == .converted)
+        #expect(result.detectedEncoding?.contains("utf-16") == true)
+        #expect(try String(contentsOf: file, encoding: .utf8) == sourceText)
+    }
+
+    @Test("diagnoses RAR archive files with text extensions")
+    func diagnosesRARArchiveFilesWithTextExtensions() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("archive.txt")
+        try Data([0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00, 0x00]).write(to: file)
+
+        let result = try TextEncodingConversionService(logger: CapturingLogger()).convertFileToUTF8(file)
+
+        #expect(result.status == .renamedUnknown)
+        #expect(result.diagnostic == "looks like a RAR archive, not a text file")
+    }
+
+    @Test("diagnoses archive files with text extensions")
+    func diagnosesArchiveFilesWithTextExtensions() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("archive.txt")
+        try Data([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x00, 0x00]).write(to: file)
+
+        let result = try TextEncodingConversionService(logger: CapturingLogger()).convertFileToUTF8(file)
+
+        #expect(result.status == .renamedUnknown)
+        #expect(result.diagnostic == "looks like a ZIP archive, not a text file")
     }
 
     @Test("uses a unique unknown directory destination")
@@ -355,6 +495,155 @@ struct TextEncodingConversionServiceTests {
         #expect(result.detectedEncoding == "utf-8")
     }
 
+    @Test("markEncoding skips redundant disk writes")
+    func markEncodingSkipsRedundantDiskWrites() throws {
+        let root = try TemporaryDirectory()
+        let cacheURL = root.url.appendingPathComponent("encoding-cache.json")
+        let cache = TextEncodingConversionCache(storageURL: cacheURL)
+        let file = root.url.appendingPathComponent("utf8.txt")
+        try "abcd".write(to: file, atomically: true, encoding: .utf8)
+        let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
+        let size = try #require((attributes[.size] as? NSNumber)?.int64Value)
+        let modifiedAt = try #require(attributes[.modificationDate] as? Date)
+
+        try cache.markUTF8(for: file, size: size, modifiedAt: modifiedAt)
+        let firstWrite = try FileManager.default.attributesOfItem(atPath: cacheURL.path)[.modificationDate] as? Date
+        try cache.markUTF8(for: file, size: size, modifiedAt: modifiedAt)
+        let secondWrite = try FileManager.default.attributesOfItem(atPath: cacheURL.path)[.modificationDate] as? Date
+
+        #expect(firstWrite != nil)
+        #expect(secondWrite == firstWrite)
+    }
+
+    @Test("batch conversion defers cache persistence until completion")
+    func batchConversionDefersCachePersistenceUntilCompletion() throws {
+        let root = try TemporaryDirectory()
+        let cacheURL = root.url.appendingPathComponent("encoding-cache.json")
+        let cache = TextEncodingConversionCache(storageURL: cacheURL)
+        let files = (0..<8).map { root.url.appendingPathComponent("file-\($0).txt") }
+        for file in files {
+            try "content".write(to: file, atomically: true, encoding: .utf8)
+        }
+
+        let service = TextEncodingConversionService(logger: CapturingLogger(), cache: cache)
+        _ = try service.convertFilesToUTF8(files)
+
+        #expect(FileManager.default.fileExists(atPath: cacheURL.path))
+        let persisted = try JSONDecoder().decode([String: CacheProbeEntry].self, from: Data(contentsOf: cacheURL))
+        #expect(persisted.count == files.count)
+    }
+
+    @Test("batch progress throttles cached UTF-8 hits")
+    func batchProgressThrottlesCachedUTF8Hits() throws {
+        let root = try TemporaryDirectory()
+        let cacheURL = root.url.appendingPathComponent("encoding-cache.json")
+        let cache = TextEncodingConversionCache(storageURL: cacheURL)
+        let files = (0..<130).map { root.url.appendingPathComponent("cached-\($0).txt") }
+        for file in files {
+            try "cached".write(to: file, atomically: true, encoding: .utf8)
+        }
+
+        let warmUpService = TextEncodingConversionService(logger: CapturingLogger(), cache: cache)
+        _ = try warmUpService.convertFilesToUTF8(files)
+
+        var progressCount = 0
+        _ = try TextEncodingConversionService(logger: CapturingLogger(), cache: cache).convertFilesToUTF8(files) { _, _, _ in
+            progressCount += 1
+        }
+
+        #expect(progressCount == 3)
+        #expect(TextEncodingConversionService.shouldReportBatchProgress(
+            result: TextEncodingConversionResult(
+                originalURL: files[0],
+                finalURL: files[0],
+                detectedEncoding: "utf-8",
+                status: .alreadyUTF8,
+                usedCache: true
+            ),
+            completedCount: 64,
+            totalCount: 130
+        ))
+        #expect(!TextEncodingConversionService.shouldReportBatchProgress(
+            result: TextEncodingConversionResult(
+                originalURL: files[0],
+                finalURL: files[0],
+                detectedEncoding: "utf-8",
+                status: .alreadyUTF8,
+                usedCache: true
+            ),
+            completedCount: 63,
+            totalCount: 130
+        ))
+    }
+
+    @Test("fingerprint cache hit does not require migration mark")
+    func fingerprintCacheHitDoesNotRequireMigrationMark() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("utf8.txt")
+        let cacheURL = root.url.appendingPathComponent("encoding-cache.json")
+        let cache = TextEncodingConversionCache(storageURL: cacheURL)
+        try "abcd".write(to: file, atomically: true, encoding: .utf8)
+
+        _ = try TextEncodingConversionService(logger: CapturingLogger(), cache: cache).convertFileToUTF8(file)
+        let firstWrite = try FileManager.default.attributesOfItem(atPath: cacheURL.path)[.modificationDate] as? Date
+
+        _ = try TextEncodingConversionService(logger: CapturingLogger(), cache: cache).convertFileToUTF8(file)
+        let secondWrite = try FileManager.default.attributesOfItem(atPath: cacheURL.path)[.modificationDate] as? Date
+
+        #expect(firstWrite != nil)
+        #expect(secondWrite == firstWrite)
+    }
+
+    @Test("legacy cache hit migrates fingerprint entry once")
+    func legacyCacheHitMigratesFingerprintEntryOnce() throws {
+        struct LegacyEntry: Codable {
+            var size: Int64
+            var modifiedAt: Date
+            var encoding: String
+        }
+
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("legacy.txt")
+        let cacheURL = root.url.appendingPathComponent("encoding-cache.json")
+        try "legacy".write(to: file, atomically: true, encoding: .utf8)
+        let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
+        let size = try #require((attributes[.size] as? NSNumber)?.int64Value)
+        let modifiedAt = try #require(attributes[.modificationDate] as? Date)
+        let legacy = [file.standardizedFileURL.path: LegacyEntry(size: size, modifiedAt: modifiedAt, encoding: "utf-8")]
+        try JSONEncoder().encode(legacy).write(to: cacheURL)
+
+        let cache = TextEncodingConversionCache(storageURL: cacheURL)
+        let lookup = try #require(cache.lookupEncoding(for: file, size: size, modifiedAt: modifiedAt))
+        #expect(lookup.encoding == "utf-8")
+        #expect(lookup.needsMigration)
+
+        _ = try TextEncodingConversionService(logger: CapturingLogger(), cache: cache).convertFileToUTF8(file)
+        let migratedLookup = try #require(cache.lookupEncoding(for: file, size: size, modifiedAt: modifiedAt))
+        #expect(migratedLookup.encoding == "utf-8")
+        #expect(!migratedLookup.needsMigration)
+    }
+
+    @Test("cached UTF-8 files skip per-file info logging")
+    func cachedUTF8FilesSkipPerFileInfoLogging() throws {
+        let root = try TemporaryDirectory()
+        let cacheURL = root.url.appendingPathComponent("encoding-cache.json")
+        let cache = TextEncodingConversionCache(storageURL: cacheURL)
+        let files = (0..<4).map { root.url.appendingPathComponent("cached-\($0).txt") }
+        for file in files {
+            try "cached".write(to: file, atomically: true, encoding: .utf8)
+        }
+
+        let warmUpService = TextEncodingConversionService(logger: CapturingLogger(), cache: cache)
+        _ = try warmUpService.convertFilesToUTF8(files)
+
+        let logger = CapturingLogger()
+        let result = try TextEncodingConversionService(logger: logger, cache: cache).convertFilesToUTF8(files)
+
+        #expect(result.cachedUTF8Count == files.count)
+        #expect(!logger.messages.contains { $0.contains("file.cache-hit") })
+        #expect(logger.messages.contains { $0.contains("batch.cache-hits") })
+    }
+
     @Test("detects and caches file list encoding by size and modification date")
     func detectsAndCachesEncodingForFileList() throws {
         let root = try TemporaryDirectory()
@@ -376,6 +665,12 @@ struct TextEncodingConversionServiceTests {
 
         #expect(detected == "gbk")
         #expect(cached == "gbk")
+    }
+
+    private struct CacheProbeEntry: Codable {
+        var size: Int64
+        var modifiedAt: Date
+        var encoding: String
     }
 
     private func encoding(named name: String) -> String.Encoding {

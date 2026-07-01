@@ -3833,9 +3833,12 @@ final class DualFinderViewModel: ObservableObject {
         totalCount: Int,
         result: TextEncodingConversionResult
     ) -> String {
+        if result.usedCache {
+            return "Encoding \(completedCount)/\(totalCount): skipping cached UTF-8 files (\(completedCount) checked)"
+        }
         let action = switch result.status {
         case .alreadyUTF8:
-            result.usedCache ? "already UTF-8 (cached)" : "already UTF-8"
+            "already UTF-8"
         case .converted:
             "converted to UTF-8"
         case .renamedUnknown:
