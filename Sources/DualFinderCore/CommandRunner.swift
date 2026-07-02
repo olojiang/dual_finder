@@ -27,7 +27,11 @@ public protocol CancellableCommandRunning: CommandRunning {
 }
 
 public struct ProcessCommandRunner: CommandRunning {
-    public init() {}
+    private let maxCapturedOutputBytes: Int?
+
+    public init(maxCapturedOutputBytes: Int? = nil) {
+        self.maxCapturedOutputBytes = maxCapturedOutputBytes
+    }
 
     public func run(
         executable: String,
@@ -62,8 +66,8 @@ extension ProcessCommandRunner: CancellableCommandRunning {
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
-        let stdout = PipeOutputCapture(pipe: stdoutPipe)
-        let stderr = PipeOutputCapture(pipe: stderrPipe)
+        let stdout = PipeOutputCapture(pipe: stdoutPipe, maxBytes: maxCapturedOutputBytes)
+        let stderr = PipeOutputCapture(pipe: stderrPipe, maxBytes: maxCapturedOutputBytes)
         stdout.start()
         stderr.start()
         defer {
@@ -97,12 +101,14 @@ extension ProcessCommandRunner: CancellableCommandRunning {
 
 private final class PipeOutputCapture: @unchecked Sendable {
     private let pipe: Pipe
+    private let maxBytes: Int?
     private let lock = NSLock()
     private var data = Data()
     private var isStopped = false
 
-    init(pipe: Pipe) {
+    init(pipe: Pipe, maxBytes: Int? = nil) {
         self.pipe = pipe
+        self.maxBytes = maxBytes
     }
 
     func start() {
@@ -134,7 +140,17 @@ private final class PipeOutputCapture: @unchecked Sendable {
     private func append(_ next: Data) {
         guard !next.isEmpty else { return }
         lock.lock()
-        data.append(next)
-        lock.unlock()
+        defer { lock.unlock() }
+        guard let maxBytes else {
+            data.append(next)
+            return
+        }
+        guard data.count < maxBytes else { return }
+        let remaining = maxBytes - data.count
+        if next.count <= remaining {
+            data.append(next)
+        } else {
+            data.append(next.prefix(remaining))
+        }
     }
 }

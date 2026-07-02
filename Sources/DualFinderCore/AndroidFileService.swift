@@ -145,7 +145,7 @@ public struct AndroidFileService: Sendable {
 
     public init(
         adbExecutable: String = AndroidFileService.defaultADBExecutable(),
-        commandRunner: any CommandRunning = ProcessCommandRunner(),
+        commandRunner: any CommandRunning = ProcessCommandRunner(maxCapturedOutputBytes: 1_048_576),
         logger: AppLogging? = nil
     ) {
         self.adbExecutable = adbExecutable

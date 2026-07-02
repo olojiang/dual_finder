@@ -35,6 +35,8 @@ public struct FileTab: Identifiable, Hashable, Codable, Sendable {
 }
 
 public struct PaneState: Sendable {
+    public static let maxNavigationHistoryDepth = 50
+
     public let side: PaneSide
     public private(set) var tabs: [FileTab]
     public var selectedTabID: UUID
@@ -151,6 +153,7 @@ public struct PaneState: Sendable {
         guard let index = tabs.firstIndex(where: { $0.id == selectedTabID }) else { return }
         if tabs[index].url != url {
             tabs[index].backHistory.append(tabs[index].url)
+            tabs[index].backHistory = Self.trimmedHistory(tabs[index].backHistory)
             tabs[index].forwardHistory.removeAll()
         }
         tabs[index].url = url
@@ -180,8 +183,14 @@ public struct PaneState: Sendable {
         }
 
         tabs[index].backHistory.append(tabs[index].url)
+        tabs[index].backHistory = Self.trimmedHistory(tabs[index].backHistory)
         tabs[index].url = nextURL
         selectedItemURLs.removeAll()
         return nextURL
+    }
+
+    private static func trimmedHistory(_ history: [URL]) -> [URL] {
+        guard history.count > maxNavigationHistoryDepth else { return history }
+        return Array(history.suffix(maxNavigationHistoryDepth))
     }
 }

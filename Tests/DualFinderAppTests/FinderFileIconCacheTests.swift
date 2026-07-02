@@ -38,4 +38,17 @@ struct FinderFileIconCacheTests {
 
         #expect(loadCount == 2)
     }
+
+    @Test("clear resets icon load counter")
+    func clearResetsIconLoadCounter() {
+        let cache = FinderFileIconCache(loader: { _ in
+            NSImage(size: NSSize(width: 16, height: 16))
+        })
+        let url = URL(fileURLWithPath: "/tmp/file.md")
+
+        _ = cache.icon(for: url)
+        #expect(cache.iconLoadCount == 1)
+        cache.clear()
+        #expect(cache.iconLoadCount == 0)
+    }
 }

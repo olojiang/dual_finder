@@ -17,6 +17,7 @@ struct DualFinderApplication: App {
                 .onAppear {
                     model.checkFullDiskAccessOnLaunch()
                     model.checkShowWindowHotkeyOnLaunch()
+                    model.startMemoryDiagnosticsMonitoring()
                     model.refreshAll()
                 }
         }

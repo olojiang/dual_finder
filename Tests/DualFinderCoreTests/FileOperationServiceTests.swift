@@ -136,16 +136,21 @@ struct FileOperationServiceTests {
         try FileManager.default.setAttributes([.modificationDate: sharedDate], ofItemAtPath: sharedDestination.path)
 
         let logger = CapturingLogger()
+        var lastProgress: FileOperationProgress?
         try FileOperationService(logger: logger).copy(
             [sourceFolder],
             to: destination,
             options: FileOperationOptions(syncMode: true),
+            progress: { lastProgress = $0 },
             conflictResolver: { _ in .overwrite }
         )
 
         #expect(try String(contentsOf: destinationFolder.appendingPathComponent("missing.txt"), encoding: .utf8) == "missing")
         #expect(try String(contentsOf: destinationFolder.appendingPathComponent("same.txt"), encoding: .utf8) == "shared")
         #expect(logger.messages.contains { $0.contains("sync.skip-identical") })
+        #expect(lastProgress?.skippedItems == 1)
+        #expect(lastProgress?.skippedBytes == Int64(Data("shared".utf8).count))
+        #expect(lastProgress?.copiedItems == 1)
     }
 
     @Test("move into existing folder keeps source when directories are merged")
@@ -640,6 +645,37 @@ struct FileOperationServiceTests {
         #expect(removedCount == 1)
         #expect(!FileManager.default.fileExists(atPath: file.path))
         #expect(FileManager.default.fileExists(atPath: metadata.path))
+    }
+
+    @Test("cancelled copy removes partial destination file")
+    func cancelledCopyRemovesPartialDestination() async throws {
+        let root = try TemporaryDirectory()
+        let source = root.url.appendingPathComponent("large.bin")
+        let destination = root.url.appendingPathComponent("destination", isDirectory: true)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+
+        let payload = Data(repeating: 0xAB, count: 2 * 1024 * 1024)
+        try payload.write(to: source)
+
+        let cancellation = FileOperationCancellation()
+        var progressCallbacks = 0
+
+        await #expect(throws: FileOperationError.cancelled) {
+            try FileOperationService(logger: CapturingLogger()).copy(
+                [source],
+                to: destination,
+                cancellation: cancellation,
+                progress: { _ in
+                    progressCallbacks += 1
+                    if progressCallbacks >= 1 {
+                        cancellation.cancel()
+                    }
+                }
+            )
+        }
+
+        let destinationFile = destination.appendingPathComponent("large.bin")
+        #expect(!FileManager.default.fileExists(atPath: destinationFile.path))
     }
 
     #if os(macOS)

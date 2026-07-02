@@ -49,6 +49,12 @@ public final class FolderSizeCache: @unchecked Sendable {
         try save(snapshot)
     }
 
+    public var entryCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries.count
+    }
+
     public static func defaultStorageURL() -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support", isDirectory: true)

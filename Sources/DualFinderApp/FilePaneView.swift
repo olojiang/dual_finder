@@ -475,6 +475,9 @@ struct FilePaneView: View {
         Button("Sync to Other Pane") {
             model.syncSelection(from: side)
         }
+        Button("Mirror to Other Pane") {
+            model.mirrorSelection(from: side)
+        }
         Button(model.isAndroidPane(side) ? "Delete" : "Move to Trash", role: .destructive) {
             trashSelectionFromPane(selectionHint: selection)
         }

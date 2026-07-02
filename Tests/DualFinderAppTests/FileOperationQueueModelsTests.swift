@@ -38,6 +38,7 @@ struct FileOperationQueueModelsTests {
         #expect(operation.progressDetailText.contains("current"))
         #expect(QueuedFileOperationKind.move.displayName == "Move")
         #expect(QueuedFileOperationKind.sync.displayName == "Sync")
+        #expect(QueuedFileOperationKind.mirror.displayName == "Mirror")
         #expect(QueuedFileOperationKind.trash.displayName == "Trash")
     }
 
@@ -209,6 +210,38 @@ struct FileOperationQueueModelsTests {
 
         #expect(operation.progressDetailText.contains("scanning folder"))
         #expect(!operation.progressDetailText.contains("preparing"))
+    }
+
+    @Test("root progress shows file counts alongside bytes")
+    func rootProgressShowsFileCountsAlongsideBytes() {
+        let operation = QueuedFileOperation(
+            id: UUID(),
+            kind: .sync,
+            sources: [URL(fileURLWithPath: "/tmp/Twitter", isDirectory: true)],
+            destination: URL(fileURLWithPath: "/tmp/out", isDirectory: true),
+            createdAt: Date(),
+            status: .running,
+            progress: FileOperationProgress(
+                completedBytes: 45_770_000_000,
+                totalBytes: 259_960_000_000,
+                completedItems: 45,
+                totalItems: 3_200,
+                currentItem: URL(fileURLWithPath: "/tmp/Twitter/olr0GNjLSEcq_e1z.mp4"),
+                copiedItems: 12,
+                skippedItems: 33,
+                rootCompletedItems: 0,
+                rootTotalItems: 1,
+                elapsedSeconds: 580
+            ),
+            message: "olr0GNjLSEcq_e1z.mp4",
+            finishedAt: nil
+        )
+
+        #expect(operation.progressDetailText.contains("0/1 item(s)"))
+        #expect(operation.progressDetailText.contains("45/3200 files"))
+        #expect(operation.progressDetailText.contains("GB"))
+        #expect(operation.progressDetailText.contains("copied 12 ("))
+        #expect(operation.progressDetailText.contains("skipped 33 ("))
     }
 }
 

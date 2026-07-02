@@ -88,6 +88,8 @@ public struct TextEncodingCacheLookup: Sendable, Equatable {
 }
 
 public final class TextEncodingConversionCache: @unchecked Sendable {
+    public static let defaultMaxEntries = 10_000
+
     private struct Entry: Codable, Equatable {
         var size: Int64
         var modifiedAt: Date
@@ -96,18 +98,67 @@ public final class TextEncodingConversionCache: @unchecked Sendable {
 
     private let storageURL: URL
     private let fileManager: FileManager
+    private let maxEntries: Int
     private let lock = NSLock()
-    private var entries: [String: Entry]
+    private var entries: [String: Entry] = [:]
+    private var accessOrder: [String] = []
+    private var entriesLoaded = false
     private var batchDepth = 0
     private var isDirty = false
 
     public init(
         storageURL: URL = TextEncodingConversionCache.defaultStorageURL(),
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        maxEntries: Int = TextEncodingConversionCache.defaultMaxEntries
     ) {
         self.storageURL = storageURL
         self.fileManager = fileManager
+        self.maxEntries = max(1, maxEntries)
+    }
+
+    public var isLoadedInMemory: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return entriesLoaded
+    }
+
+    public var entryCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        guard entriesLoaded else { return 0 }
+        return entries.count
+    }
+
+    public func releaseLoadedEntries() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard entriesLoaded, batchDepth == 0, !isDirty else { return }
+        entries = [:]
+        accessOrder = []
+        entriesLoaded = false
+    }
+
+    private func ensureEntriesLoaded() {
+        guard !entriesLoaded else { return }
         entries = Self.load(from: storageURL)
+        accessOrder = Array(entries.keys)
+        trimEntriesIfNeeded()
+        entriesLoaded = true
+    }
+
+    private func touchEntry(key: String) {
+        if let index = accessOrder.firstIndex(of: key) {
+            accessOrder.remove(at: index)
+        }
+        accessOrder.append(key)
+    }
+
+    private func trimEntriesIfNeeded() {
+        while entries.count > maxEntries, let oldest = accessOrder.first {
+            accessOrder.removeFirst()
+            entries.removeValue(forKey: oldest)
+            isDirty = true
+        }
     }
 
     public func beginBatch() {
@@ -134,6 +185,7 @@ public final class TextEncodingConversionCache: @unchecked Sendable {
         guard let size, let modifiedAt else { return nil }
         lock.lock()
         defer { lock.unlock() }
+        ensureEntriesLoaded()
         let candidateKeys = [
             cacheKey(for: file, size: size, modifiedAt: modifiedAt),
             legacyPathCacheKey(for: file)
@@ -142,6 +194,9 @@ public final class TextEncodingConversionCache: @unchecked Sendable {
             $0.size == size && Self.matchesStoredModificationDate($0.modifiedAt, modifiedAt)
         }) else {
             return nil
+        }
+        if let hitKey = candidateKeys.first(where: { entries[$0] == entry }) {
+            touchEntry(key: hitKey)
         }
         return entry.encoding
     }
@@ -155,16 +210,19 @@ public final class TextEncodingConversionCache: @unchecked Sendable {
         guard let size, let modifiedAt else { return nil }
         lock.lock()
         defer { lock.unlock() }
+        ensureEntriesLoaded()
         let fingerprintKey = cacheKey(for: file, size: size, modifiedAt: modifiedAt)
         if let entry = entries[fingerprintKey],
            entry.size == size,
            Self.matchesStoredModificationDate(entry.modifiedAt, modifiedAt) {
+            touchEntry(key: fingerprintKey)
             return TextEncodingCacheLookup(encoding: entry.encoding, needsMigration: false)
         }
         let legacyKey = legacyPathCacheKey(for: file)
         if let entry = entries[legacyKey],
            entry.size == size,
            Self.matchesStoredModificationDate(entry.modifiedAt, modifiedAt) {
+            touchEntry(key: legacyKey)
             return TextEncodingCacheLookup(encoding: entry.encoding, needsMigration: true)
         }
         return nil
@@ -175,11 +233,14 @@ public final class TextEncodingConversionCache: @unchecked Sendable {
         let key = cacheKey(for: file, size: size, modifiedAt: modifiedAt)
         let entry = Entry(size: size, modifiedAt: modifiedAt, encoding: encoding)
         lock.lock()
+        ensureEntriesLoaded()
         if entries[key] == entry {
             lock.unlock()
             return
         }
         entries[key] = entry
+        touchEntry(key: key)
+        trimEntriesIfNeeded()
         isDirty = true
         let shouldSaveNow = batchDepth == 0
         let snapshot = shouldSaveNow ? entries : nil

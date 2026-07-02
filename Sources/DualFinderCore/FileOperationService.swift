@@ -95,6 +95,56 @@ public struct FileOperationService {
         logger?.info("file-operation", "copy.completed", metadata: operationMetadata(sources, destinationDirectory))
     }
 
+    public func mirror(
+        _ sources: [URL],
+        to destinationDirectory: URL,
+        cancellation: FileOperationCancellation? = nil,
+        progress: ((FileOperationProgress) -> Void)? = nil,
+        conflictResolver: ((FileOperationConflict) -> FileOperationConflictResolution)? = nil
+    ) throws {
+        logger?.info("file-operation", "mirror.started", metadata: operationMetadata(sources, destinationDirectory))
+        try copy(
+            sources,
+            to: destinationDirectory,
+            options: FileOperationOptions(
+                defaultConflictResolution: .overwrite,
+                syncMode: true
+            ),
+            cancellation: cancellation,
+            progress: progress,
+            conflictResolver: conflictResolver
+        )
+
+        let extras = try MirrorDeletionPlanner.extrasToDelete(
+            sources: sources,
+            destinationDirectory: destinationDirectory,
+            fileManager: fileManager
+        )
+        for url in extras {
+            if cancellation?.isCancelled == true {
+                throw FileOperationError.cancelled
+            }
+            try fileManager.removeItem(at: url)
+            logger?.info("file-operation", "mirror.deleted-extra", metadata: [
+                "path": url.path
+            ])
+        }
+        var completedMetadata = operationMetadata(sources, destinationDirectory)
+        completedMetadata["deletedItems"] = "\(extras.count)"
+        logger?.info("file-operation", "mirror.completed", metadata: completedMetadata)
+    }
+
+    public func mirrorDeletionSummary(
+        sources: [URL],
+        destinationDirectory: URL
+    ) throws -> MirrorDeletionSummary {
+        try MirrorDeletionPlanner.deletionSummary(
+            sources: sources,
+            destinationDirectory: destinationDirectory,
+            fileManager: fileManager
+        )
+    }
+
     public func move(
         _ sources: [URL],
         to destinationDirectory: URL,
@@ -504,6 +554,7 @@ public struct FileOperationService {
                     for: child,
                     requestedDestination: destination.appendingPathComponent(child.lastPathComponent),
                     options: options,
+                    context: context,
                     conflictResolver: conflictResolver
                 )
                 guard let childDestination else { continue }
@@ -522,7 +573,7 @@ public struct FileOperationService {
                 try fileManager.removeItem(at: destination)
             }
             try fileManager.copyItem(at: source, to: destination)
-            try context.finishItem(source)
+            try context.finishItem(source, copied: true)
         }
     }
 
@@ -531,29 +582,40 @@ public struct FileOperationService {
         if fileManager.fileExists(atPath: destination.path) {
             try fileManager.removeItem(at: destination)
         }
-        fileManager.createFile(atPath: destination.path, contents: nil)
 
-        let input = try FileHandle(forReadingFrom: source)
-        let output = try FileHandle(forWritingTo: destination)
-        defer {
-            try? input.close()
-            try? output.close()
-        }
+        do {
+            fileManager.createFile(atPath: destination.path, contents: nil)
 
-        while true {
-            try context.checkCancellation()
-            let data = try input.read(upToCount: 1024 * 1024) ?? Data()
-            guard !data.isEmpty else { break }
-            try output.write(contentsOf: data)
-            context.advance(bytes: Int64(data.count), currentItem: source)
+            let input = try FileHandle(forReadingFrom: source)
+            let output = try FileHandle(forWritingTo: destination)
+            defer {
+                try? input.close()
+                try? output.close()
+            }
+
+            while true {
+                try context.checkCancellation()
+                let shouldContinue: Bool = try autoreleasepool {
+                    let data = try input.read(upToCount: 1024 * 1024) ?? Data()
+                    guard !data.isEmpty else { return false }
+                    try output.write(contentsOf: data)
+                    context.advance(bytes: Int64(data.count), currentItem: source)
+                    return true
+                }
+                if !shouldContinue { break }
+            }
+            try context.finishItem(source, copied: true)
+        } catch {
+            try? fileManager.removeItem(at: destination)
+            throw error
         }
-        try context.finishItem(source)
     }
 
     private func resolvedDestination(
         for source: URL,
         requestedDestination: URL,
         options: FileOperationOptions,
+        context: OperationContext? = nil,
         conflictResolver: ((FileOperationConflict) -> FileOperationConflictResolution)?
     ) throws -> URL? {
         let conflict = FileOperationConflict(source: source, destination: requestedDestination)
@@ -595,6 +657,7 @@ public struct FileOperationService {
                 "source": source.path,
                 "destination": requestedDestination.path
             ])
+            try context?.recordSkipped(source)
             return nil
         }
 
@@ -613,6 +676,7 @@ public struct FileOperationService {
                 "source": source.path,
                 "destination": requestedDestination.path
             ])
+            try context?.recordSkipped(source)
             return nil
         case .keepBoth:
             return uniqueDestination(for: requestedDestination.lastPathComponent, in: requestedDestination.deletingLastPathComponent())
@@ -846,6 +910,13 @@ public struct FileOperationService {
         private let totalItems: Int
         private var completedBytes: Int64 = 0
         private var completedItems: Int = 0
+        private var copiedItems: Int = 0
+        private var copiedBytes: Int64 = 0
+        private var skippedItems: Int = 0
+        private var skippedBytes: Int64 = 0
+        private var skippedUpdatesSincePublish = 0
+        private var lastPublishedBytes: Int64 = 0
+        private var lastPublishedAt = Date()
 
         private let rootCompletedItems: Int
         private let rootTotalItems: Int
@@ -948,13 +1019,52 @@ public struct FileOperationService {
 
         func advance(bytes: Int64, currentItem: URL?) {
             completedBytes += bytes
+            let now = Date()
+            let byteDelta = completedBytes - lastPublishedBytes
+            if byteDelta >= 8 * 1024 * 1024 || now.timeIntervalSince(lastPublishedAt) >= 0.5 {
+                lastPublishedBytes = completedBytes
+                lastPublishedAt = now
+                publish(currentItem: currentItem)
+            }
+        }
+
+        func finishItem(_ currentItem: URL?, copied: Bool = false) throws {
+            try checkCancellation()
+            completedItems += 1
+            if copied, let currentItem {
+                copiedItems += 1
+                copiedBytes += Self.itemByteSize(currentItem)
+            }
+            lastPublishedBytes = completedBytes
+            lastPublishedAt = Date()
             publish(currentItem: currentItem)
         }
 
-        func finishItem(_ currentItem: URL?) throws {
+        func recordSkipped(_ source: URL) throws {
             try checkCancellation()
+            skippedItems += 1
+            skippedUpdatesSincePublish += 1
+            let size = Self.itemByteSize(source)
+            skippedBytes += size
+            completedBytes += size
             completedItems += 1
-            publish(currentItem: currentItem)
+            let now = Date()
+            if skippedUpdatesSincePublish >= 100 || now.timeIntervalSince(lastPublishedAt) >= 0.5 {
+                skippedUpdatesSincePublish = 0
+                lastPublishedBytes = completedBytes
+                lastPublishedAt = now
+                publish(currentItem: source)
+            }
+        }
+
+        private static func itemByteSize(_ url: URL) -> Int64 {
+            guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey, .fileSizeKey]) else {
+                return 0
+            }
+            if values.isDirectory == true {
+                return 0
+            }
+            return Int64(values.fileSize ?? 0)
         }
 
         private func publish(currentItem: URL?) {
@@ -964,6 +1074,10 @@ public struct FileOperationService {
                 completedItems: completedItems,
                 totalItems: totalItems,
                 currentItem: currentItem,
+                copiedItems: copiedItems,
+                copiedBytes: copiedBytes,
+                skippedItems: skippedItems,
+                skippedBytes: skippedBytes,
                 rootCompletedItems: rootCompletedItems,
                 rootTotalItems: rootTotalItems,
                 elapsedSeconds: Date().timeIntervalSince(operationStart)

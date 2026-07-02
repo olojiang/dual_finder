@@ -5,6 +5,7 @@ enum QueuedFileOperationKind: String, Sendable {
     case copy
     case move
     case sync
+    case mirror
     case trash
 
     var displayName: String {
@@ -12,6 +13,7 @@ enum QueuedFileOperationKind: String, Sendable {
         case .copy: "Copy"
         case .move: "Move"
         case .sync: "Sync"
+        case .mirror: "Mirror"
         case .trash: "Trash"
         }
     }
@@ -90,15 +92,24 @@ struct QueuedFileOperation: Identifiable, Equatable {
 
         if progress.rootTotalItems > 0 {
             var parts = ["\(progress.rootCompletedItems)/\(progress.rootTotalItems) item(s)"]
+            if progress.totalItems > 0 {
+                parts.append("\(progress.completedItems)/\(progress.totalItems) files")
+            } else if progress.scannedItems > 0, progress.totalBytes == 0, progress.completedItems == 0 {
+                parts.append("scanning \(progress.scannedItems) entries")
+            }
             if let currentItem = progress.currentItem {
                 parts.append(currentItem.lastPathComponent)
             }
-            if progress.scannedItems > 0, progress.totalBytes == 0, progress.completedItems == 0 {
-                parts.append("scanning \(progress.scannedItems) entries")
-            } else if progress.totalBytes > 0 {
+            if progress.totalBytes > 0 {
                 parts.append("\(Self.formatBytes(progress.completedBytes)) / \(Self.formatBytes(progress.totalBytes))")
-            } else if status == .running {
+            } else if status == .running, progress.scannedItems == 0 {
                 parts.append("scanning folder")
+            }
+            if progress.copiedItems > 0 || progress.copiedBytes > 0 {
+                parts.append("copied \(progress.copiedItems) (\(Self.formatBytes(progress.copiedBytes)))")
+            }
+            if progress.skippedItems > 0 || progress.skippedBytes > 0 {
+                parts.append("skipped \(progress.skippedItems) (\(Self.formatBytes(progress.skippedBytes)))")
             }
             if let elapsed = displayElapsedSeconds, elapsed > 0 {
                 parts.append(Self.formatDuration(elapsed))

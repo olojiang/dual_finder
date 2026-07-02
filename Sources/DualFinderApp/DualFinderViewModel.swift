@@ -67,6 +67,18 @@ struct EmptyTrashConfirmationRequest: Identifiable, Equatable {
     }
 }
 
+struct MirrorConfirmationRequest: Identifiable, Equatable {
+    let id = UUID()
+    let sourceSide: PaneSide
+    let sources: [URL]
+    let destination: URL
+    let deletionSummary: MirrorDeletionSummary
+
+    var formattedDeletionSize: String {
+        ByteCountFormatter.string(fromByteCount: deletionSummary.totalByteCount, countStyle: .file)
+    }
+}
+
 struct InlineRenameRequest: Equatable {
     let id = UUID()
     let side: PaneSide
@@ -135,6 +147,7 @@ final class DualFinderViewModel: ObservableObject {
     @Published var mergeFilesDialogRequest: MergeFilesDialogRequest?
     @Published var splitFileDialogRequest: SplitFileDialogRequest?
     @Published var emptyTrashConfirmationRequest: EmptyTrashConfirmationRequest?
+    @Published var mirrorConfirmationRequest: MirrorConfirmationRequest?
     @Published var inlineRenameRequest: InlineRenameRequest?
     @Published private(set) var pasteboardRevision = 0
     @Published private(set) var fileOperationQueue: [QueuedFileOperation] = []
@@ -190,6 +203,9 @@ final class DualFinderViewModel: ObservableObject {
     private var globalSearchCancellation: FileOperationCancellation?
     private var archiveCancellation: FileOperationCancellation?
     private var textEncodingScanCancellations: [PaneSide: TextEncodingScanCancellation] = [:]
+    private var coalescedFileOperationProgress: [UUID: FileOperationProgress] = [:]
+    private var scheduledFileOperationProgressFlush: Set<UUID> = []
+    private var memoryDiagnosticsTimer: Timer?
     private var isArchiveOperationRunning = false
     private var activeTabDrag: (tabID: UUID, sourceSide: PaneSide)?
     @Published private var isTextEncodingConversionRunning = false
@@ -235,6 +251,52 @@ final class DualFinderViewModel: ObservableObject {
             "rightURL": rightPane.selectedURL.path
         ])
         setupPasteboardObservation()
+    }
+
+    func startMemoryDiagnosticsMonitoring() {
+        memoryDiagnosticsTimer?.invalidate()
+        logMemoryDiagnostics(trigger: "monitor.start")
+        memoryDiagnosticsTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.logMemoryDiagnostics(trigger: "timer")
+            }
+        }
+    }
+
+    func logMemoryDiagnostics(
+        trigger: String,
+        side: PaneSide? = nil,
+        extra: [String: String] = [:]
+    ) {
+        var context = extra
+        context["trigger"] = trigger
+        if let side {
+            context["side"] = side.rawValue
+            context["path"] = pane(for: side).selectedURL.path
+        }
+        context["leftItems"] = "\(leftItems.count)"
+        context["rightItems"] = "\(rightItems.count)"
+        context["leftBackHistory"] = "\(leftPane.selectedTab?.backHistory.count ?? 0)"
+        context["rightBackHistory"] = "\(rightPane.selectedTab?.backHistory.count ?? 0)"
+        context["leftTabs"] = "\(leftPane.tabs.count)"
+        context["rightTabs"] = "\(rightPane.tabs.count)"
+        context["encodingColumn"] = "\(uiLayoutPreferences.isEncodingColumnVisible)"
+        context["encodingScanLeft"] = "\(textEncodingScanCancellations[.left] != nil)"
+        context["encodingScanRight"] = "\(textEncodingScanCancellations[.right] != nil)"
+        context["iconLoads"] = "\(FinderFileIconCache.shared.iconLoadCount)"
+        context["folderSizeCacheEntries"] = "\(folderSizeCache.entryCount)"
+        context["textEncodingCacheLoaded"] = "\(textEncodingCache.isLoadedInMemory)"
+        context["textEncodingCacheEntries"] = "\(textEncodingCache.entryCount)"
+        context["textEncodingCacheMaxEntries"] = "\(TextEncodingConversionCache.defaultMaxEntries)"
+        context["operationScanCacheEntries"] = "\(operationScanCache.entryCount)"
+        context["queuedOperations"] = "\(fileOperationQueue.count)"
+        context["flatViewLeft"] = "\(leftFlatViewRootURL != nil)"
+        context["flatViewRight"] = "\(rightFlatViewRootURL != nil)"
+        let metadata = MemoryDiagnostics.metadata(
+            snapshot: ProcessMemorySampler.currentSnapshot(),
+            context: context
+        )
+        logger.info("memory", "diagnostics", metadata: metadata)
     }
 
     func items(for side: PaneSide) -> [FileItem] {
@@ -289,6 +351,7 @@ final class DualFinderViewModel: ObservableObject {
             refreshAll()
         } else {
             cancelTextEncodingScans()
+            textEncodingCache.releaseLoadedEntries()
         }
     }
 
@@ -1229,6 +1292,9 @@ final class DualFinderViewModel: ObservableObject {
                 "showHidden": "\(showHiddenFiles)",
                 "sort": "\(rule.field.rawValue).\(rule.direction.rawValue)"
             ])
+            logMemoryDiagnostics(trigger: "refresh", side: side, extra: [
+                "itemCount": "\(nextItems.count)"
+            ])
         } catch {
             statusMessage = "Failed to read \(currentURL.path): \(error.localizedDescription)"
             logger.error("navigation", "directory.refresh.failed", metadata: [
@@ -1321,6 +1387,7 @@ final class DualFinderViewModel: ObservableObject {
             "side": side.rawValue,
             "path": url.path
         ])
+        logMemoryDiagnostics(trigger: "navigate", side: side)
         refresh(side)
     }
 
@@ -2361,6 +2428,77 @@ final class DualFinderViewModel: ObservableObject {
         performSelectionOperation(from: sourceSide, operation: .sync)
     }
 
+    func mirrorSelection(from sourceSide: PaneSide) {
+        guard !isAndroidPane(sourceSide), !isAndroidPane(opposite(sourceSide)) else {
+            reportOperationFailure(
+                "mirror.unsupported",
+                error: NSError(
+                    domain: "DualFinder",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "Mirror is only supported between local folders."]
+                )
+            )
+            return
+        }
+
+        let sources = orderedSelection(pane(for: sourceSide).selectedItemURLs, on: sourceSide)
+        guard !sources.isEmpty else {
+            logger.debug("file-operation", "mirror.ignored.empty-selection", metadata: [
+                "side": sourceSide.rawValue
+            ])
+            return
+        }
+
+        let destination = pane(for: opposite(sourceSide)).selectedURL
+        logger.info("file-operation", "mirror.preview.requested", metadata: [
+            "count": "\(sources.count)",
+            "destination": destination.path,
+            "side": sourceSide.rawValue
+        ])
+
+        let service = operationService
+        Task {
+            do {
+                let summary = try await Task.detached(priority: .userInitiated) {
+                    try service.mirrorDeletionSummary(
+                        sources: sources,
+                        destinationDirectory: destination
+                    )
+                }.value
+                mirrorConfirmationRequest = MirrorConfirmationRequest(
+                    sourceSide: sourceSide,
+                    sources: sources,
+                    destination: destination,
+                    deletionSummary: summary
+                )
+            } catch {
+                reportOperationFailure("mirror.preview.failed", error: error)
+            }
+        }
+    }
+
+    func confirmMirror() {
+        guard let request = mirrorConfirmationRequest else { return }
+        mirrorConfirmationRequest = nil
+        logger.warning("file-operation", "mirror.confirmed", metadata: [
+            "count": "\(request.sources.count)",
+            "destination": request.destination.path,
+            "deleteItems": "\(request.deletionSummary.itemCount)",
+            "deleteBytes": "\(request.deletionSummary.totalByteCount)"
+        ])
+        clearSelection(request.sourceSide)
+        enqueueFileOperation(.mirror, sources: request.sources, destination: request.destination)
+    }
+
+    func cancelMirror() {
+        guard let request = mirrorConfirmationRequest else { return }
+        mirrorConfirmationRequest = nil
+        logger.info("file-operation", "mirror.cancelled", metadata: [
+            "count": "\(request.sources.count)",
+            "destination": request.destination.path
+        ])
+    }
+
     func trashSelection(
         from sourceSide: PaneSide,
         refreshPolicy: FileOperationRefreshPolicy = .refreshWhenFinished
@@ -2721,13 +2859,23 @@ final class DualFinderViewModel: ObservableObject {
     func cancelFileOperation(_ id: UUID) {
         guard let request = pendingOperationRequests.first(where: { $0.id == id }) else { return }
         request.cancellation.cancel()
+        let wasQueued = fileOperationQueue.first(where: { $0.id == id })?.status == .queued
         updateQueuedOperation(id) { operation in
             if operation.status == .queued {
                 operation.status = .cancelled
                 operation.message = "Cancelled"
             }
         }
-        pendingOperationRequests.removeAll { $0.id == id && fileOperationQueue.first(where: { $0.id == id })?.status == .cancelled }
+        if wasQueued {
+            pendingOperationRequests.removeAll { $0.id == id }
+            fileOperationQueue.removeAll { $0.id == id }
+            coalescedFileOperationProgress.removeValue(forKey: id)
+            scheduledFileOperationProgressFlush.remove(id)
+            isProcessingFileOperations = false
+            statusMessage = "Cancelled"
+            processNextFileOperationIfNeeded()
+            return
+        }
         statusMessage = "Cancelling operation..."
     }
 
@@ -2986,6 +3134,19 @@ final class DualFinderViewModel: ObservableObject {
                             sources,
                             to: destination,
                             options: FileOperationOptions(syncMode: true),
+                            cancellation: cancellation,
+                            progress: { progress in
+                                Task { @MainActor [weak self] in
+                                    self?.recordFileOperationProgress(progress, for: id)
+                                }
+                            },
+                            conflictResolver: resolveConflict
+                        )
+                    case .mirror:
+                        guard let destination else { throw FileOperationError.invalidDestination }
+                        try service.mirror(
+                            sources,
+                            to: destination,
                             cancellation: cancellation,
                             progress: { progress in
                                 Task { @MainActor [weak self] in
@@ -3460,12 +3621,22 @@ final class DualFinderViewModel: ObservableObject {
         }
 
         private func publishCurrentSize() {
-            guard var size = DualFinderViewModel.localByteSize(at: targetURL) else { return }
+            guard var size = DualFinderViewModel.partialFileByteSize(at: targetURL) else { return }
             if let expectedBytes {
                 size = min(size, expectedBytes)
             }
             onProgress(size)
         }
+    }
+
+    private nonisolated static func partialFileByteSize(at url: URL) -> Int64? {
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: url.path) else { return 0 }
+        guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+              values.isRegularFile == true else {
+            return nil
+        }
+        return Int64(values.fileSize ?? 0)
     }
 
     private nonisolated static func nextItem(after index: Int, in urls: [URL]) -> URL? {
@@ -3475,6 +3646,21 @@ final class DualFinderViewModel: ObservableObject {
     }
 
     private func recordFileOperationProgress(_ progress: FileOperationProgress, for id: UUID) {
+        coalescedFileOperationProgress[id] = progress
+        guard !scheduledFileOperationProgressFlush.contains(id) else { return }
+        scheduledFileOperationProgressFlush.insert(id)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            self?.flushFileOperationProgress(for: id)
+        }
+    }
+
+    private func flushFileOperationProgress(for id: UUID) {
+        scheduledFileOperationProgressFlush.remove(id)
+        guard let progress = coalescedFileOperationProgress.removeValue(forKey: id) else { return }
+        applyFileOperationProgress(progress, for: id)
+    }
+
+    private func applyFileOperationProgress(_ progress: FileOperationProgress, for id: UUID) {
         updateQueuedOperation(id) {
             $0.progress = progress
             if let currentItem = progress.currentItem {
@@ -3492,6 +3678,10 @@ final class DualFinderViewModel: ObservableObject {
         message: String,
         refreshPolicy: FileOperationRefreshPolicy
     ) {
+        if let pendingProgress = coalescedFileOperationProgress.removeValue(forKey: id) {
+            applyFileOperationProgress(pendingProgress, for: id)
+        }
+        scheduledFileOperationProgressFlush.remove(id)
         updateQueuedOperation(id) {
             $0.status = status
             $0.message = message
@@ -3511,7 +3701,40 @@ final class DualFinderViewModel: ObservableObject {
             refreshAll()
         }
         statusMessage = message
+        if status == .cancelled {
+            fileOperationQueue.removeAll { $0.id == id }
+        }
+        logMemoryDiagnostics(
+            trigger: "file-operation.\(status.rawValue)",
+            extra: ["operationId": id.uuidString]
+        )
+        pruneFinishedFileOperationsIfNeeded()
         processNextFileOperationIfNeeded()
+    }
+
+    private static let maxFinishedFileOperations = 100
+
+    private func pruneFinishedFileOperationsIfNeeded() {
+        let activeIDs = Set(pendingOperationRequests.map(\.id))
+        let finishedOperations = fileOperationQueue.filter { operation in
+            !activeIDs.contains(operation.id)
+                && (operation.status == .completed || operation.status == .failed || operation.status == .cancelled)
+        }
+        guard finishedOperations.count > Self.maxFinishedFileOperations else { return }
+
+        let removableIDs = Set(
+            finishedOperations
+                .sorted { ($0.finishedAt ?? $0.createdAt) > ($1.finishedAt ?? $1.createdAt) }
+                .dropFirst(Self.maxFinishedFileOperations)
+                .map(\.id)
+        )
+        guard !removableIDs.isEmpty else { return }
+
+        fileOperationQueue.removeAll { removableIDs.contains($0.id) }
+        logger.debug("file-operation", "history.pruned", metadata: [
+            "removed": "\(removableIDs.count)",
+            "remainingFinished": "\(finishedOperations.count - removableIDs.count)"
+        ])
     }
 
     func clearFinishedFileOperations() {

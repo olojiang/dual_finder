@@ -667,6 +667,74 @@ struct TextEncodingConversionServiceTests {
         #expect(cached == "gbk")
     }
 
+    @Test("encoding cache stays unloaded until first lookup")
+    func encodingCacheStaysUnloadedUntilFirstLookup() throws {
+        let root = try TemporaryDirectory()
+        let cacheURL = root.url.appendingPathComponent("encoding-cache.json")
+        let file = root.url.appendingPathComponent("sample.txt")
+        try "hello".write(to: file, atomically: true, encoding: .utf8)
+        let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
+        let modifiedAt = try #require(attributes[.modificationDate] as? Date)
+        let size = Int64(try #require(attributes[.size] as? NSNumber).intValue)
+
+        let payload = [
+            file.standardizedFileURL.path: CacheProbeEntry(
+                size: size,
+                modifiedAt: modifiedAt,
+                encoding: "utf-8"
+            )
+        ]
+        try JSONEncoder().encode(payload).write(to: cacheURL)
+
+        let cache = TextEncodingConversionCache(storageURL: cacheURL)
+        #expect(cache.isLoadedInMemory == false)
+        #expect(cache.entryCount == 0)
+
+        let encoding = cache.cachedEncoding(for: file, size: size, modifiedAt: modifiedAt)
+        #expect(encoding == "utf-8")
+        #expect(cache.isLoadedInMemory == true)
+        #expect(cache.entryCount == 1)
+    }
+
+    @Test("encoding cache can release loaded entries when idle")
+    func encodingCacheCanReleaseLoadedEntriesWhenIdle() throws {
+        let root = try TemporaryDirectory()
+        let cacheURL = root.url.appendingPathComponent("encoding-cache.json")
+        let file = root.url.appendingPathComponent("sample.txt")
+        try "hello".write(to: file, atomically: true, encoding: .utf8)
+        let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
+        let modifiedAt = try #require(attributes[.modificationDate] as? Date)
+        let size = Int64(try #require(attributes[.size] as? NSNumber).intValue)
+
+        let cache = TextEncodingConversionCache(storageURL: cacheURL)
+        try cache.markEncoding("utf-8", for: file, size: size, modifiedAt: modifiedAt)
+        #expect(cache.isLoadedInMemory == true)
+
+        cache.releaseLoadedEntries()
+        #expect(cache.isLoadedInMemory == false)
+        #expect(cache.entryCount == 0)
+    }
+
+    @Test("encoding cache trims to max entries")
+    func encodingCacheTrimsToMaxEntries() throws {
+        let root = try TemporaryDirectory()
+        let cacheURL = root.url.appendingPathComponent("encoding-cache.json")
+        let cache = TextEncodingConversionCache(storageURL: cacheURL, maxEntries: 3)
+        let modifiedAt = Date()
+
+        for index in 0..<5 {
+            let file = root.url.appendingPathComponent("file-\(index).txt")
+            try "sample".write(to: file, atomically: true, encoding: .utf8)
+            try cache.markEncoding("utf-8", for: file, size: 6, modifiedAt: modifiedAt)
+        }
+
+        #expect(cache.entryCount == 3)
+        let newest = root.url.appendingPathComponent("file-4.txt")
+        #expect(cache.cachedEncoding(for: newest, size: 6, modifiedAt: modifiedAt) == "utf-8")
+        let oldest = root.url.appendingPathComponent("file-0.txt")
+        #expect(cache.cachedEncoding(for: oldest, size: 6, modifiedAt: modifiedAt) == nil)
+    }
+
     private struct CacheProbeEntry: Codable {
         var size: Int64
         var modifiedAt: Date

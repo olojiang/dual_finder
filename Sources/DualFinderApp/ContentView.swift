@@ -92,6 +92,10 @@ struct ContentView: View {
             EmptyTrashConfirmationDialog(model: model, request: request)
                 .interactiveDismissDisabled(true)
         }
+        .sheet(item: $model.mirrorConfirmationRequest) { request in
+            MirrorConfirmationDialog(model: model, request: request)
+                .interactiveDismissDisabled(true)
+        }
         .alert(item: $model.diskAccessPrompt) { prompt in
             Alert(
                 title: Text("Full Disk Access Required"),
@@ -568,7 +572,7 @@ private struct OperationQueueBar: View {
                                     Text(operation.progressDetailText)
                                         .font(.caption2)
                                         .foregroundStyle(.secondary)
-                                        .lineLimit(1)
+                                        .lineLimit(2)
                                         .truncationMode(.middle)
                                 }
                                 if operation.progress?.scannedItems ?? 0 > 0, operation.fractionCompleted == nil {
@@ -598,6 +602,7 @@ private struct OperationQueueBar: View {
         case .copy: "doc.on.doc"
         case .move: "arrow.right.doc.on.clipboard"
         case .sync: "arrow.triangle.2.circlepath"
+        case .mirror: "arrow.left.arrow.right.square"
         case .trash: "trash"
         }
     }
@@ -1678,6 +1683,78 @@ private struct EmptyTrashConfirmationDialog: View {
     }
 }
 
+private struct MirrorConfirmationDialog: View {
+    @ObservedObject var model: DualFinderViewModel
+    let request: MirrorConfirmationRequest
+    @FocusState private var focusedAction: MirrorConfirmationAction?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) {
+                Image(systemName: "arrow.left.arrow.right.square")
+                    .font(.title2)
+                    .foregroundStyle(.orange)
+                Text("Mirror to Other Pane?")
+                    .font(.headline)
+                Spacer()
+            }
+
+            Text("This will sync selected items to the other pane, then permanently delete destination files that do not exist in the source.")
+                .foregroundStyle(.secondary)
+
+            VStack(alignment: .leading, spacing: 8) {
+                LabeledContent("Selected items") {
+                    Text("\(request.sources.count)")
+                }
+                LabeledContent("Files/folders to delete") {
+                    Text("\(request.deletionSummary.itemCount)")
+                }
+                LabeledContent("Size to delete") {
+                    Text(request.formattedDeletionSize)
+                }
+            }
+            .monospacedDigit()
+
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) {
+                    model.cancelMirror()
+                }
+                .keyboardShortcut(.cancelAction)
+                .focused($focusedAction, equals: .cancel)
+                Button("Mirror", role: .destructive) {
+                    model.confirmMirror()
+                }
+                .keyboardShortcut(.defaultAction)
+                .focused($focusedAction, equals: .confirm)
+            }
+        }
+        .padding(20)
+        .frame(width: 460)
+        .onAppear {
+            focusedAction = .cancel
+        }
+        .onKeyPress(.escape, phases: .down) { _ in
+            model.cancelMirror()
+            return .handled
+        }
+        .onKeyPress(.return, phases: .down) { _ in
+            switch focusedAction {
+            case .confirm:
+                model.confirmMirror()
+            case .cancel, .none:
+                model.cancelMirror()
+            }
+            return .handled
+        }
+    }
+
+    private enum MirrorConfirmationAction: Hashable {
+        case cancel
+        case confirm
+    }
+}
+
 private struct FolderBookmarkDialog: View {
     @ObservedObject var model: DualFinderViewModel
     @Environment(\.dismiss) private var dismiss
@@ -2314,14 +2391,22 @@ private struct StatusBar: View {
     let message: String
 
     var body: some View {
-        HStack {
-            Text(message.isEmpty ? "Ready" : message)
-                .lineLimit(1)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Spacer()
+        TimelineView(.periodic(from: .now, by: 5)) { _ in
+            let memoryLabel = ProcessMemorySampler.displayLabel(for: ProcessMemorySampler.currentSnapshot())
+            HStack(spacing: 8) {
+                Text(message.isEmpty ? "Ready" : message)
+                    .lineLimit(1)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text(memoryLabel)
+                    .lineLimit(1)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .help("Process memory footprint (phys_footprint). Shows RSS when it is much higher, refreshed every 5 seconds")
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 26)
         }
-        .padding(.horizontal, 10)
-        .frame(height: 26)
     }
 }

@@ -54,6 +54,22 @@ struct ProcessCommandRunnerTests {
         #expect(result.stderr.count == stderrBytes)
     }
 
+    @Test("caps captured output when maxCapturedOutputBytes is set")
+    func capsCapturedOutputWhenMaxIsSet() throws {
+        let stdoutBytes = 1024 * 1024
+        let result = try ProcessCommandRunner(maxCapturedOutputBytes: 64 * 1024).run(
+            executable: "/usr/bin/perl",
+            arguments: [
+                "-e",
+                "print 'o' x \(stdoutBytes);"
+            ],
+            workingDirectory: nil
+        )
+
+        #expect(result.succeeded)
+        #expect(result.stdout.count == 64 * 1024)
+    }
+
     @Test("terminates running process when cancelled")
     func terminatesRunningProcessWhenCancelled() throws {
         let cancellation = FileOperationCancellation()
