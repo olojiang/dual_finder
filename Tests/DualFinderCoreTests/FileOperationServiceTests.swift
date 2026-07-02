@@ -147,13 +147,47 @@ struct FileOperationServiceTests {
 
         #expect(try String(contentsOf: destinationFolder.appendingPathComponent("missing.txt"), encoding: .utf8) == "missing")
         #expect(try String(contentsOf: destinationFolder.appendingPathComponent("same.txt"), encoding: .utf8) == "shared")
-        #expect(logger.messages.contains { $0.contains("sync.skip-identical") })
+        #expect(logger.messages.contains { $0.contains("sync.skip-progress") && $0.contains("skippedItems") && $0.contains("\"1\"") })
         #expect(lastProgress?.skippedItems == 1)
         #expect(lastProgress?.skippedBytes == Int64(Data("shared".utf8).count))
         #expect(lastProgress?.copiedItems == 1)
     }
 
-    @Test("move into existing folder keeps source when directories are merged")
+    @Test("sync mode flushes trailing skipped summary on completion")
+    func syncModeFlushesTrailingSkippedSummary() throws {
+        let root = try TemporaryDirectory()
+        let destination = root.url.appendingPathComponent("destination", isDirectory: true)
+        let sourceFolder = root.url.appendingPathComponent("source", isDirectory: true)
+        let destinationFolder = destination.appendingPathComponent("source", isDirectory: true)
+        try FileManager.default.createDirectory(at: sourceFolder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destinationFolder, withIntermediateDirectories: true)
+
+        let sharedDate = Date(timeIntervalSince1970: 1_700_000_000)
+        for index in 0..<3 {
+            let name = "same-\(index).txt"
+            let source = sourceFolder.appendingPathComponent(name)
+            let target = destinationFolder.appendingPathComponent(name)
+            try "shared-\(index)".write(to: source, atomically: true, encoding: .utf8)
+            try Data("shared-\(index)".utf8).write(to: target)
+            try FileManager.default.setAttributes([.modificationDate: sharedDate], ofItemAtPath: source.path)
+            try FileManager.default.setAttributes([.modificationDate: sharedDate], ofItemAtPath: target.path)
+        }
+
+        let logger = CapturingLogger()
+        var lastProgress: FileOperationProgress?
+        try FileOperationService(logger: logger).copy(
+            [sourceFolder],
+            to: destination,
+            options: FileOperationOptions(syncMode: true),
+            progress: { lastProgress = $0 },
+            conflictResolver: { _ in .overwrite }
+        )
+
+        #expect(lastProgress?.skippedItems == 3)
+        #expect(logger.messages.contains { $0.contains("sync.skip-progress") && $0.contains("\"3\"") })
+    }
+
+    @Test("moves files into destination directory")
     func moveIntoExistingFolderKeepsSource() throws {
         let root = try TemporaryDirectory()
         let destination = root.url.appendingPathComponent("destination", isDirectory: true)

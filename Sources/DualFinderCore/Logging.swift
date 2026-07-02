@@ -125,9 +125,14 @@ public final class RotatingLogStore: @unchecked Sendable {
 public final class AppLogger: AppLogging, @unchecked Sendable {
     private let store: RotatingLogStore
     private let queue = DispatchQueue(label: "com.dualfinder.app-logger", qos: .utility)
+    private let pendingLock = NSLock()
+    private let maxPendingLogs: Int
+    private var pendingLogs = 0
+    private var droppedDebugLogs = 0
 
-    public init(store: RotatingLogStore = RotatingLogStore()) {
+    public init(store: RotatingLogStore = RotatingLogStore(), maxPendingLogs: Int = 2_000) {
         self.store = store
+        self.maxPendingLogs = max(1, maxPendingLogs)
     }
 
     public var logDirectory: URL {
@@ -135,8 +140,18 @@ public final class AppLogger: AppLogging, @unchecked Sendable {
     }
 
     public func log(_ level: LogLevel, _ category: String, _ message: String, metadata: [String: String] = [:]) {
+        guard reservePendingLog(level: level) else { return }
         queue.async { [store] in
+            defer { self.completePendingLog() }
             do {
+                if let dropped = self.takeDroppedDebugLogCount() {
+                    try store.append(
+                        level: .warning,
+                        category: "logging",
+                        message: "debug.logs.dropped",
+                        metadata: ["count": "\(dropped)"]
+                    )
+                }
                 try store.append(level: level, category: category, message: message, metadata: metadata)
             } catch {
                 fputs("DualFinder log write failed: \(error)\n", stderr)
@@ -151,5 +166,34 @@ public final class AppLogger: AppLogging, @unchecked Sendable {
         } catch {
             fputs("DualFinder log write failed: \(error)\n", stderr)
         }
+    }
+
+    private func reservePendingLog(level: LogLevel) -> Bool {
+        pendingLock.lock()
+        defer { pendingLock.unlock() }
+
+        if pendingLogs >= maxPendingLogs, level == .debug {
+            droppedDebugLogs += 1
+            return false
+        }
+
+        pendingLogs += 1
+        return true
+    }
+
+    private func completePendingLog() {
+        pendingLock.lock()
+        pendingLogs = max(0, pendingLogs - 1)
+        pendingLock.unlock()
+    }
+
+    private func takeDroppedDebugLogCount() -> Int? {
+        pendingLock.lock()
+        defer { pendingLock.unlock() }
+
+        guard droppedDebugLogs > 0 else { return nil }
+        let count = droppedDebugLogs
+        droppedDebugLogs = 0
+        return count
     }
 }

@@ -715,6 +715,32 @@ struct TextEncodingConversionServiceTests {
         #expect(cache.entryCount == 0)
     }
 
+    @Test("encoding cache compacts oversized on-disk storage")
+    func encodingCacheCompactsOversizedOnDiskStorage() throws {
+        let root = try TemporaryDirectory()
+        let cacheURL = root.url.appendingPathComponent("encoding-cache.json")
+        var oversized: [String: CacheProbeEntry] = [:]
+        for index in 0..<12 {
+            oversized["key-\(index)"] = CacheProbeEntry(size: 1, modifiedAt: Date(), encoding: "utf-8")
+        }
+        try JSONEncoder().encode(oversized).write(to: cacheURL)
+
+        let cache = TextEncodingConversionCache(storageURL: cacheURL, maxEntries: 5)
+        let result = try #require(try cache.compactStorageIfNeeded())
+        #expect(result.before == 12)
+        #expect(result.after == 5)
+        #expect(cache.isLoadedInMemory == false)
+        #expect(cache.entryCount == 0)
+
+        let reloaded = TextEncodingConversionCache(storageURL: cacheURL, maxEntries: 5)
+        _ = reloaded.cachedEncoding(
+            for: URL(fileURLWithPath: "/tmp/file.txt"),
+            size: 1,
+            modifiedAt: Date()
+        )
+        #expect(reloaded.entryCount <= 5)
+    }
+
     @Test("encoding cache trims to max entries")
     func encodingCacheTrimsToMaxEntries() throws {
         let root = try TemporaryDirectory()

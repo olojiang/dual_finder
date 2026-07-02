@@ -5,28 +5,39 @@ struct PathBreadcrumbBar: View {
     let onSelect: (URL) -> Void
     let onEditPath: () -> Void
 
+    private var visibleComponents: ArraySlice<PathBreadcrumbComponent> {
+        components.suffix(4)
+    }
+
     var body: some View {
         HStack(spacing: 0) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 2) {
-                    ForEach(Array(components.enumerated()), id: \.element.id) { index, component in
-                        if index > 0 {
-                            Text(">")
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                                .padding(.horizontal, 2)
-                        }
-                        Button(component.title) {
-                            onSelect(component.url)
-                        }
-                        .buttonStyle(.plain)
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(index == components.count - 1 ? .primary : .secondary)
-                        .lineLimit(1)
-                        .help(component.url.path)
+            HStack(spacing: 2) {
+                if components.count > visibleComponents.count {
+                    Text("...")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .padding(.horizontal, 2)
+                }
+                ForEach(Array(visibleComponents.enumerated()), id: \.element.id) { index, component in
+                    if index > 0 || components.count > visibleComponents.count {
+                        Text(">")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .padding(.horizontal, 2)
                     }
+                    Button(component.title) {
+                        onSelect(component.url)
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(component == components.last ? .primary : .secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(component.url.path)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .clipped()
             Button(action: onEditPath) {
                 Image(systemName: "pencil")
                     .font(.caption2)
@@ -51,17 +62,22 @@ enum PathBreadcrumbBuilder {
         let standardized = url.standardizedFileURL
         var parts: [PathBreadcrumbComponent] = []
         var current = standardized
+        var depth = 0
 
-        while true {
+        while depth < 64 {
             let title = displayTitle(for: current)
-            parts.insert(PathBreadcrumbComponent(url: current, title: title), at: 0)
+            parts.append(PathBreadcrumbComponent(url: current, title: title))
+            if current.path == "/" {
+                break
+            }
             let parent = current.deletingLastPathComponent()
-            if parent.path == current.path || parent.path.isEmpty {
+            if parent.path == current.path || parent.path.isEmpty || parent.path == ".." {
                 break
             }
             current = parent
+            depth += 1
         }
-        return parts
+        return parts.reversed()
     }
 
     private static func displayTitle(for url: URL) -> String {

@@ -188,6 +188,25 @@ enum FileKeyboardSelectionNavigator {
     }
 }
 
+enum FileListFocusRestorePolicy {
+    static func shouldRestoreAfterPaneContentsChange(
+        isActivePane: Bool,
+        isFileListFocused: Bool,
+        isEditingPath: Bool,
+        isInlineRenaming: Bool,
+        isPathFieldFocused: Bool,
+        isFileSearchFocused: Bool,
+        isEmbeddedTerminalFocused: Bool
+    ) -> Bool {
+        guard isActivePane else { return false }
+        guard !isFileListFocused else { return false }
+        guard !isEditingPath, !isInlineRenaming else { return false }
+        guard !isPathFieldFocused, !isFileSearchFocused else { return false }
+        guard !isEmbeddedTerminalFocused else { return false }
+        return true
+    }
+}
+
 enum FileListKeyDownFallbackPolicy {
     static func ignoreReasonForSimilarReviewArrowFallback(
         keyCode: UInt16,

@@ -498,6 +498,7 @@ public struct FileOperationService {
         conflictResolver: ((FileOperationConflict) -> FileOperationConflictResolution)?
     ) throws -> [CopiedRoot] {
         var copiedRoots: [CopiedRoot] = []
+        defer { context.flushSkippedSummary() }
         for source in sources {
             try context.checkCancellation()
             let requestedDestination = destinationDirectory.appendingPathComponent(source.lastPathComponent)
@@ -653,10 +654,6 @@ public struct FileOperationService {
         }
 
         if options.syncMode, isSameFileContent(source: source, destination: requestedDestination) {
-            logger?.debug("file-operation", "sync.skip-identical", metadata: [
-                "source": source.path,
-                "destination": requestedDestination.path
-            ])
             try context?.recordSkipped(source)
             return nil
         }
@@ -1049,12 +1046,30 @@ public struct FileOperationService {
             completedBytes += size
             completedItems += 1
             let now = Date()
-            if skippedUpdatesSincePublish >= 100 || now.timeIntervalSince(lastPublishedAt) >= 0.5 {
+            if skippedUpdatesSincePublish >= 1_000 || now.timeIntervalSince(lastPublishedAt) >= 2 {
                 skippedUpdatesSincePublish = 0
                 lastPublishedBytes = completedBytes
                 lastPublishedAt = now
                 publish(currentItem: source)
+                logger?.info("file-operation", "sync.skip-progress", metadata: [
+                    "skippedItems": "\(skippedItems)",
+                    "skippedBytes": "\(skippedBytes)",
+                    "completedItems": "\(completedItems)"
+                ])
             }
+        }
+
+        func flushSkippedSummary() {
+            guard skippedUpdatesSincePublish > 0 else { return }
+            skippedUpdatesSincePublish = 0
+            lastPublishedBytes = completedBytes
+            lastPublishedAt = Date()
+            publish(currentItem: nil)
+            logger?.info("file-operation", "sync.skip-progress", metadata: [
+                "skippedItems": "\(skippedItems)",
+                "skippedBytes": "\(skippedBytes)",
+                "completedItems": "\(completedItems)"
+            ])
         }
 
         private static func itemByteSize(_ url: URL) -> Int64 {

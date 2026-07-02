@@ -203,9 +203,13 @@ final class DualFinderViewModel: ObservableObject {
     private var globalSearchCancellation: FileOperationCancellation?
     private var archiveCancellation: FileOperationCancellation?
     private var textEncodingScanCancellations: [PaneSide: TextEncodingScanCancellation] = [:]
-    private var coalescedFileOperationProgress: [UUID: FileOperationProgress] = [:]
-    private var scheduledFileOperationProgressFlush: Set<UUID> = []
+    private lazy var fileOperationProgressCoalescer = FileOperationProgressCoalescer { [weak self] id in
+        Task { @MainActor [weak self] in
+            self?.flushFileOperationProgress(for: id)
+        }
+    }
     private var memoryDiagnosticsTimer: Timer?
+    private var refreshGeneration: [PaneSide: UInt64] = [:]
     private var isArchiveOperationRunning = false
     private var activeTabDrag: (tabID: UUID, sourceSide: PaneSide)?
     @Published private var isTextEncodingConversionRunning = false
@@ -256,9 +260,29 @@ final class DualFinderViewModel: ObservableObject {
     func startMemoryDiagnosticsMonitoring() {
         memoryDiagnosticsTimer?.invalidate()
         logMemoryDiagnostics(trigger: "monitor.start")
+        scheduleTextEncodingCacheMaintenance()
         memoryDiagnosticsTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.logMemoryDiagnostics(trigger: "timer")
+            }
+        }
+    }
+
+    private func scheduleTextEncodingCacheMaintenance() {
+        let cache = textEncodingCache
+        let logger = logger
+        DispatchQueue.global(qos: .utility).async {
+            do {
+                if let result = try cache.compactStorageIfNeeded() {
+                    logger.info("text-encoding", "cache.compacted", metadata: [
+                        "before": "\(result.before)",
+                        "after": "\(result.after)"
+                    ])
+                }
+            } catch {
+                logger.warning("text-encoding", "cache.compact.failed", metadata: [
+                    "error": error.localizedDescription
+                ])
             }
         }
     }
@@ -287,6 +311,7 @@ final class DualFinderViewModel: ObservableObject {
         context["folderSizeCacheEntries"] = "\(folderSizeCache.entryCount)"
         context["textEncodingCacheLoaded"] = "\(textEncodingCache.isLoadedInMemory)"
         context["textEncodingCacheEntries"] = "\(textEncodingCache.entryCount)"
+        context["textEncodingCacheFileBytes"] = "\(textEncodingCache.onDiskFileBytes() ?? 0)"
         context["textEncodingCacheMaxEntries"] = "\(TextEncodingConversionCache.defaultMaxEntries)"
         context["operationScanCacheEntries"] = "\(operationScanCache.entryCount)"
         context["queuedOperations"] = "\(fileOperationQueue.count)"
@@ -1309,59 +1334,108 @@ final class DualFinderViewModel: ObservableObject {
         showWindowHotkeyPrompt = nil
     }
 
-    func refresh(_ side: PaneSide) {
+    func refresh(_ side: PaneSide, completion: (@MainActor () -> Void)? = nil) {
         if isAndroidPane(side) {
             refreshAndroidDirectory(on: side)
+            completion?()
             return
         }
 
         if let flatRoot = flatViewRoot(for: side) {
             refreshFlatView(root: flatRoot, on: side)
+            completion?()
             return
         }
 
         let currentURL = pane(for: side).selectedURL.standardizedFileURL
         if let existingDirectory = fileSystem.existingDirectoryAncestor(startingAt: currentURL),
            existingDirectory != currentURL {
-            navigateToExistingLocalDirectory(
-                side,
-                to: existingDirectory,
-                source: "refresh.recovered-missing-directory"
-            )
+            let directory = existingDirectory.standardizedFileURL
+            clearFlatViewState(on: side)
+            mutatePane(side) { $0.navigateSelectedTab(to: directory, selecting: nil) }
+            folderBookmarkStore.recordRecentFolder(directory)
+            persistPaneSession()
+            logger.info("navigation", "refresh.recovered-missing-directory", metadata: [
+                "side": side.rawValue,
+                "path": directory.path
+            ])
+            refresh(side, completion: completion)
             return
         }
 
-        do {
-            let rule = sortRuleStore.rule(for: currentURL)
-            let nextItems = try fileSystem.contents(
-                of: currentURL,
-                includeHidden: showHiddenFiles,
-                sortRule: rule,
-                folderSizeCache: folderSizeCache,
-                textEncodingCache: textEncodingCache,
-                includeTextEncoding: uiLayoutPreferences.isEncodingColumnVisible
-            )
-            setItems(nextItems, for: side)
-            startTextEncodingScanIfNeeded(for: side, items: nextItems)
-            statusMessage = "\(currentURL.path) - \(nextItems.count) items"
-            logger.info("navigation", "directory.refreshed", metadata: [
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: currentURL.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            statusMessage = "Directory unavailable: \(currentURL.path)"
+            logger.warning("navigation", "directory.unavailable", metadata: [
                 "side": side.rawValue,
-                "path": currentURL.path,
-                "count": "\(nextItems.count)",
-                "showHidden": "\(showHiddenFiles)",
-                "sort": "\(rule.field.rawValue).\(rule.direction.rawValue)"
+                "path": currentURL.path
             ])
-            logMemoryDiagnostics(trigger: "refresh", side: side, extra: [
-                "itemCount": "\(nextItems.count)"
-            ])
-        } catch {
-            statusMessage = "Failed to read \(currentURL.path): \(error.localizedDescription)"
-            logger.error("navigation", "directory.refresh.failed", metadata: [
-                "side": side.rawValue,
-                "path": currentURL.path,
-                "error": error.localizedDescription
-            ])
-            handlePossiblePermissionFailure(error, path: currentURL.path)
+            completion?()
+            return
+        }
+
+        refreshGeneration[side, default: 0] += 1
+        let generation = refreshGeneration[side] ?? 0
+        let rule = sortRuleStore.rule(for: currentURL)
+        let includeHidden = showHiddenFiles
+        let includeTextEncoding = uiLayoutPreferences.isEncodingColumnVisible
+        let folderSizeCache = folderSizeCache
+        let textEncodingCache = textEncodingCache
+        let logger = logger
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let service = FileSystemService()
+            do {
+                let nextItems = try service.contents(
+                    of: currentURL,
+                    includeHidden: includeHidden,
+                    sortRule: rule,
+                    folderSizeCache: folderSizeCache,
+                    textEncodingCache: textEncodingCache,
+                    includeTextEncoding: includeTextEncoding
+                )
+                DispatchQueue.main.async { [weak self] in
+                    defer { completion?() }
+                    guard let self else { return }
+                    guard self.refreshGeneration[side] == generation else { return }
+                    guard self.pane(for: side).selectedURL.standardizedFileURL == currentURL else { return }
+                    self.setItems(nextItems, for: side)
+                    self.startTextEncodingScanIfNeeded(for: side, items: nextItems)
+                    self.statusMessage = "\(currentURL.path) - \(nextItems.count) items"
+                    logger.info("navigation", "directory.refreshed", metadata: [
+                        "side": side.rawValue,
+                        "path": currentURL.path,
+                        "count": "\(nextItems.count)",
+                        "showHidden": "\(includeHidden)",
+                        "sort": "\(rule.field.rawValue).\(rule.direction.rawValue)"
+                    ])
+                    self.logMemoryDiagnostics(trigger: "refresh", side: side, extra: [
+                        "itemCount": "\(nextItems.count)"
+                    ])
+                }
+            } catch {
+                DispatchQueue.main.async { [weak self] in
+                    defer { completion?() }
+                    guard let self else { return }
+                    guard self.refreshGeneration[side] == generation else { return }
+                    self.statusMessage = "Failed to read \(currentURL.path): \(error.localizedDescription)"
+                    logger.error("navigation", "directory.refresh.failed", metadata: [
+                        "side": side.rawValue,
+                        "path": currentURL.path,
+                        "error": error.localizedDescription
+                    ])
+                    self.handlePossiblePermissionFailure(error, path: currentURL.path)
+                }
+            }
+        }
+    }
+
+    func refreshAndWait(_ side: PaneSide) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            refresh(side) {
+                continuation.resume()
+            }
         }
     }
 
@@ -2348,10 +2422,12 @@ final class DualFinderViewModel: ObservableObject {
                 in: pane(for: side).selectedURL,
                 trashSourcesAfterMerge: true
             )
-            refresh(side)
-            setSelection([created], for: side)
-            requestPaneFocus(side, requestID: UUID().uuidString, source: "merge.completed")
-            statusMessage = "Merged \(mergeSources.count) files into \(created.lastPathComponent) and moved originals to Trash"
+            refresh(side) { [weak self] in
+                guard let self else { return }
+                self.setSelection(Set([created]), for: side)
+                self.requestPaneFocus(side, requestID: UUID().uuidString, source: "merge.completed")
+                self.statusMessage = "Merged \(mergeSources.count) files into \(created.lastPathComponent) and moved originals to Trash"
+            }
             logger.info("file-operation", "merge.applied", metadata: [
                 "side": side.rawValue,
                 "count": "\(mergeSources.count)",
@@ -2366,10 +2442,12 @@ final class DualFinderViewModel: ObservableObject {
         guard !isAndroidPane(side), !isInlineRenaming else { return }
         do {
             let created = try TextFileSplitService().split(preview, deleteOriginal: true)
-            refresh(side)
-            setSelection(Set(created), for: side)
-            requestPaneFocus(side, requestID: UUID().uuidString, source: "split-file.completed")
-            statusMessage = "Split \(preview.sourceURL.lastPathComponent) into \(created.count) file(s)"
+            refresh(side) { [weak self] in
+                guard let self else { return }
+                self.setSelection(Set(created), for: side)
+                self.requestPaneFocus(side, requestID: UUID().uuidString, source: "split-file.completed")
+                self.statusMessage = "Split \(preview.sourceURL.lastPathComponent) into \(created.count) file(s)"
+            }
             logger.info("file-operation", "split-file.completed", metadata: [
                 "side": side.rawValue,
                 "source": preview.sourceURL.path,
@@ -2928,8 +3006,7 @@ final class DualFinderViewModel: ObservableObject {
         if wasQueued {
             pendingOperationRequests.removeAll { $0.id == id }
             fileOperationQueue.removeAll { $0.id == id }
-            coalescedFileOperationProgress.removeValue(forKey: id)
-            scheduledFileOperationProgressFlush.remove(id)
+            fileOperationProgressCoalescer.cancel(id)
             isProcessingFileOperations = false
             statusMessage = "Cancelled"
             processNextFileOperationIfNeeded()
@@ -3147,6 +3224,7 @@ final class DualFinderViewModel: ObservableObject {
         let androidFileService = androidFileService
         let operationLogger = logger
         let scanCache = operationScanCache
+        let progressCoalescer = fileOperationProgressCoalescer
 
         Task.detached(priority: .userInitiated) { [weak self] in
             let service = FileOperationService(logger: operationLogger, operationScanCache: scanCache)
@@ -3181,9 +3259,7 @@ final class DualFinderViewModel: ObservableObject {
                             to: destination,
                             cancellation: cancellation,
                             progress: { progress in
-                                Task { @MainActor [weak self] in
-                                    self?.recordFileOperationProgress(progress, for: id)
-                                }
+                                progressCoalescer.record(progress, for: id)
                             },
                             conflictResolver: resolveConflict
                         )
@@ -3195,9 +3271,7 @@ final class DualFinderViewModel: ObservableObject {
                             options: FileOperationOptions(syncMode: true),
                             cancellation: cancellation,
                             progress: { progress in
-                                Task { @MainActor [weak self] in
-                                    self?.recordFileOperationProgress(progress, for: id)
-                                }
+                                progressCoalescer.record(progress, for: id)
                             },
                             conflictResolver: resolveConflict
                         )
@@ -3208,9 +3282,7 @@ final class DualFinderViewModel: ObservableObject {
                             to: destination,
                             cancellation: cancellation,
                             progress: { progress in
-                                Task { @MainActor [weak self] in
-                                    self?.recordFileOperationProgress(progress, for: id)
-                                }
+                                progressCoalescer.record(progress, for: id)
                             },
                             conflictResolver: resolveConflict
                         )
@@ -3221,9 +3293,7 @@ final class DualFinderViewModel: ObservableObject {
                             to: destination,
                             cancellation: cancellation,
                             progress: { progress in
-                                Task { @MainActor [weak self] in
-                                    self?.recordFileOperationProgress(progress, for: id)
-                                }
+                                progressCoalescer.record(progress, for: id)
                             },
                             conflictResolver: resolveConflict
                         )
@@ -3232,9 +3302,7 @@ final class DualFinderViewModel: ObservableObject {
                             sources,
                             cancellation: cancellation,
                             progress: { progress in
-                                Task { @MainActor [weak self] in
-                                    self?.recordFileOperationProgress(progress, for: id)
-                                }
+                                progressCoalescer.record(progress, for: id)
                             }
                         )
                     }
@@ -3244,9 +3312,7 @@ final class DualFinderViewModel: ObservableObject {
                         service: androidFileService,
                         cancellation: cancellation,
                         progress: { progress in
-                            Task { @MainActor [weak self] in
-                                self?.recordFileOperationProgress(progress, for: id)
-                            }
+                            progressCoalescer.record(progress, for: id)
                         }
                     )
                 }
@@ -3705,17 +3771,11 @@ final class DualFinderViewModel: ObservableObject {
     }
 
     private func recordFileOperationProgress(_ progress: FileOperationProgress, for id: UUID) {
-        coalescedFileOperationProgress[id] = progress
-        guard !scheduledFileOperationProgressFlush.contains(id) else { return }
-        scheduledFileOperationProgressFlush.insert(id)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-            self?.flushFileOperationProgress(for: id)
-        }
+        fileOperationProgressCoalescer.record(progress, for: id)
     }
 
     private func flushFileOperationProgress(for id: UUID) {
-        scheduledFileOperationProgressFlush.remove(id)
-        guard let progress = coalescedFileOperationProgress.removeValue(forKey: id) else { return }
+        guard let progress = fileOperationProgressCoalescer.take(for: id) else { return }
         applyFileOperationProgress(progress, for: id)
     }
 
@@ -3737,10 +3797,10 @@ final class DualFinderViewModel: ObservableObject {
         message: String,
         refreshPolicy: FileOperationRefreshPolicy
     ) {
-        if let pendingProgress = coalescedFileOperationProgress.removeValue(forKey: id) {
+        let pendingProgress = fileOperationProgressCoalescer.take(for: id)
+        if let pendingProgress {
             applyFileOperationProgress(pendingProgress, for: id)
         }
-        scheduledFileOperationProgressFlush.remove(id)
         updateQueuedOperation(id) {
             $0.status = status
             $0.message = message

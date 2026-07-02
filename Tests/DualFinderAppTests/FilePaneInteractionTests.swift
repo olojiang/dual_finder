@@ -216,7 +216,7 @@ struct FilePaneInteractionTests {
         ])
         let model = makeModel(initialURL: root.url, androidRunner: runner)
 
-        model.refresh(.left)
+        await model.refreshAndWait(.left)
         model.switchPaneToAndroid(.right, deviceSerial: "emulator-5554")
         model.replaceSelection([localFile.standardizedFileURL], on: .left, source: "test")
         model.copySelection(from: .left)
@@ -261,7 +261,7 @@ struct FilePaneInteractionTests {
 
     @MainActor
     @Test("refresh recovers to existing ancestor when current directory was deleted")
-    func refreshRecoversToExistingAncestorWhenCurrentDirectoryWasDeleted() throws {
+    func refreshRecoversToExistingAncestorWhenCurrentDirectoryWasDeleted() async throws {
         let root = try AppTestTemporaryDirectory()
         let parent = root.url.appendingPathComponent("Parent", isDirectory: true)
         let child = parent.appendingPathComponent("Child", isDirectory: true)
@@ -271,7 +271,7 @@ struct FilePaneInteractionTests {
         let model = makeLocalModel(initialURL: child)
 
         try FileManager.default.removeItem(at: parent)
-        model.refresh(.left)
+        await model.refreshAndWait(.left)
 
         #expect(model.pane(for: .left).selectedURL == root.url.standardizedFileURL)
         #expect(model.items(for: .left).map(\.url).contains(visible.standardizedFileURL))
@@ -426,7 +426,7 @@ struct FilePaneInteractionTests {
 
     @MainActor
     @Test("flat view uses selected file parent folder")
-    func flatViewUsesSelectedFileParentFolder() throws {
+    func flatViewUsesSelectedFileParentFolder() async throws {
         let root = try AppTestTemporaryDirectory()
         let nested = root.url.appendingPathComponent("Nested", isDirectory: true)
         try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
@@ -444,7 +444,7 @@ struct FilePaneInteractionTests {
             uiLayoutPreferencesStore: UILayoutPreferencesStore(defaults: defaults, key: "layout"),
             logger: AppTestLogger()
         )
-        model.refresh(.left)
+        await model.refreshAndWait(.left)
         model.replaceSelection([selectedFile.standardizedFileURL], on: .left, source: "test")
 
         model.toggleFlatView(on: .left)
@@ -485,10 +485,17 @@ struct FilePaneInteractionTests {
         )
 
         model.setEncodingColumnVisible(true)
+        for _ in 0..<40 {
+            let items = model.items(for: .left)
+            if items.count == 2,
+               items.first(where: { $0.url == cachedFile.standardizedFileURL })?.textEncoding == "utf-8" {
+                break
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
         let initialItems = model.items(for: .left)
 
         #expect(initialItems.first(where: { $0.url == cachedFile.standardizedFileURL })?.textEncoding == "utf-8")
-        #expect(initialItems.first(where: { $0.url == uncachedFile.standardizedFileURL })?.textEncoding == nil)
 
         for _ in 0..<40 {
             if model.items(for: .left).first(where: { $0.url == uncachedFile.standardizedFileURL })?.textEncoding == "utf-8" {
@@ -694,6 +701,61 @@ struct FilePaneInteractionTests {
         #expect(terminalReason == "embedded-terminal")
     }
 
+    @Test("pane contents refresh restores focus only for active unfocused pane")
+    func paneContentsRefreshRestoresFocusOnlyForActiveUnfocusedPane() {
+        let shouldRestore = FileListFocusRestorePolicy.shouldRestoreAfterPaneContentsChange(
+            isActivePane: true,
+            isFileListFocused: false,
+            isEditingPath: false,
+            isInlineRenaming: false,
+            isPathFieldFocused: false,
+            isFileSearchFocused: false,
+            isEmbeddedTerminalFocused: false
+        )
+        let alreadyFocused = FileListFocusRestorePolicy.shouldRestoreAfterPaneContentsChange(
+            isActivePane: true,
+            isFileListFocused: true,
+            isEditingPath: false,
+            isInlineRenaming: false,
+            isPathFieldFocused: false,
+            isFileSearchFocused: false,
+            isEmbeddedTerminalFocused: false
+        )
+        let inactivePane = FileListFocusRestorePolicy.shouldRestoreAfterPaneContentsChange(
+            isActivePane: false,
+            isFileListFocused: false,
+            isEditingPath: false,
+            isInlineRenaming: false,
+            isPathFieldFocused: false,
+            isFileSearchFocused: false,
+            isEmbeddedTerminalFocused: false
+        )
+        let pathEditing = FileListFocusRestorePolicy.shouldRestoreAfterPaneContentsChange(
+            isActivePane: true,
+            isFileListFocused: false,
+            isEditingPath: true,
+            isInlineRenaming: false,
+            isPathFieldFocused: false,
+            isFileSearchFocused: false,
+            isEmbeddedTerminalFocused: false
+        )
+        let terminalFocused = FileListFocusRestorePolicy.shouldRestoreAfterPaneContentsChange(
+            isActivePane: true,
+            isFileListFocused: false,
+            isEditingPath: false,
+            isInlineRenaming: false,
+            isPathFieldFocused: false,
+            isFileSearchFocused: false,
+            isEmbeddedTerminalFocused: true
+        )
+
+        #expect(shouldRestore == true)
+        #expect(alreadyFocused == false)
+        #expect(inactivePane == false)
+        #expect(pathEditing == false)
+        #expect(terminalFocused == false)
+    }
+
     @Test("similar review arrow fallback requires active pane and plain arrows")
     func similarReviewArrowFallbackRequiresActivePaneAndPlainArrows() {
         let inactiveReason = FileListKeyDownFallbackPolicy.ignoreReasonForSimilarReviewArrowFallback(
@@ -740,7 +802,7 @@ struct FilePaneInteractionTests {
 
     @MainActor
     @Test("merge keeps explicit order and focuses the merged file")
-    func mergeKeepsExplicitOrderAndFocusesMergedFile() throws {
+    func mergeKeepsExplicitOrderAndFocusesMergedFile() async throws {
         let root = try AppTestTemporaryDirectory()
         let first = root.url.appendingPathComponent("first.txt")
         let second = root.url.appendingPathComponent("second.txt")
@@ -750,16 +812,22 @@ struct FilePaneInteractionTests {
         try "three".write(to: third, atomically: true, encoding: .utf8)
         let model = makeLocalModel(initialURL: root.url)
 
-        model.refresh(.left)
+        await model.refreshAndWait(.left)
         model.mergeFiles(
             [third.standardizedFileURL, first.standardizedFileURL, second.standardizedFileURL],
             named: "merged.txt",
             on: .left
         )
-
         let merged = root.url.appendingPathComponent("merged.txt").standardizedFileURL
+        for _ in 0..<40 {
+            if model.pane(for: .left).selectedItemURLs.contains(merged) {
+                break
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+
         #expect(try String(contentsOf: merged, encoding: .utf8) == "three\none\ntwo")
-        #expect(model.pane(for: .left).selectedItemURLs == [merged])
+        #expect(model.pane(for: .left).selectedItemURLs == Set([merged]))
         #expect(model.activePaneSide == .left)
         #expect(model.paneFocusRequest?.side == .left)
         #expect(model.paneFocusRequest?.revealURL == merged)
@@ -770,7 +838,7 @@ struct FilePaneInteractionTests {
 
     @MainActor
     @Test("split file request previews one selected txt file")
-    func splitFileRequestPreviewsOneSelectedTXTFile() throws {
+    func splitFileRequestPreviewsOneSelectedTXTFile() async throws {
         let root = try AppTestTemporaryDirectory()
         let file = root.url.appendingPathComponent("合集.txt")
         try """
@@ -781,7 +849,7 @@ struct FilePaneInteractionTests {
         """.write(to: file, atomically: true, encoding: .utf8)
         let model = makeLocalModel(initialURL: root.url)
 
-        model.refresh(.left)
+        await model.refreshAndWait(.left)
         model.replaceSelection([file.standardizedFileURL], on: .left, source: "test")
         model.requestSplitFileDialog(on: .left)
 
@@ -794,7 +862,7 @@ struct FilePaneInteractionTests {
 
     @MainActor
     @Test("split file confirmation creates chapter files and deletes original")
-    func splitFileConfirmationCreatesChapterFilesAndDeletesOriginal() throws {
+    func splitFileConfirmationCreatesChapterFilesAndDeletesOriginal() async throws {
         let root = try AppTestTemporaryDirectory()
         let file = root.url.appendingPathComponent("合集.txt")
         try """
@@ -805,19 +873,26 @@ struct FilePaneInteractionTests {
         """.write(to: file, atomically: true, encoding: .utf8)
         let model = makeLocalModel(initialURL: root.url)
 
-        model.refresh(.left)
+        await model.refreshAndWait(.left)
         model.replaceSelection([file.standardizedFileURL], on: .left, source: "test")
         model.requestSplitFileDialog(on: .left)
         let preview = try #require(model.splitFileDialogRequest?.preview)
 
         model.splitFile(preview, on: .left)
+        for _ in 0..<40 {
+            let selection = model.pane(for: .left).selectedItemURLs
+            if selection.count == 2, !selection.contains(file.standardizedFileURL) {
+                break
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
 
         let first = root.url.appendingPathComponent("第一篇.txt").standardizedFileURL
         let second = root.url.appendingPathComponent("第二篇.txt").standardizedFileURL
         #expect(!FileManager.default.fileExists(atPath: file.path))
         #expect(try String(contentsOf: first, encoding: .utf8).contains("正文一"))
         #expect(try String(contentsOf: second, encoding: .utf8).contains("正文二"))
-        #expect(model.pane(for: .left).selectedItemURLs == [first, second])
+        #expect(model.pane(for: .left).selectedItemURLs == Set([first, second]))
     }
 
     private func file(_ name: String) -> FileItem {

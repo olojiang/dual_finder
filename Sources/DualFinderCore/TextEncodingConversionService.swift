@@ -129,6 +129,47 @@ public final class TextEncodingConversionCache: @unchecked Sendable {
         return entries.count
     }
 
+    public func onDiskFileBytes() -> Int64? {
+        guard fileManager.fileExists(atPath: storageURL.path),
+              let attributes = try? fileManager.attributesOfItem(atPath: storageURL.path),
+              let size = attributes[.size] as? NSNumber else {
+            return nil
+        }
+        return size.int64Value
+    }
+
+    /// Shrinks an oversized on-disk cache without keeping it loaded in memory.
+    @discardableResult
+    public func compactStorageIfNeeded() throws -> (before: Int, after: Int)? {
+        lock.lock()
+        if entriesLoaded {
+            let before = entries.count
+            trimEntriesIfNeeded()
+            if isDirty {
+                let snapshot = entries
+                isDirty = false
+                lock.unlock()
+                try save(snapshot)
+                let after = snapshot.count
+                return before > after ? (before, after) : nil
+            }
+            lock.unlock()
+            return nil
+        }
+        lock.unlock()
+
+        var loaded = Self.load(from: storageURL)
+        let before = loaded.count
+        guard before > maxEntries else { return nil }
+
+        let keysToRemove = Array(loaded.keys.prefix(before - maxEntries))
+        for key in keysToRemove {
+            loaded.removeValue(forKey: key)
+        }
+        try save(loaded)
+        return (before, loaded.count)
+    }
+
     public func releaseLoadedEntries() {
         lock.lock()
         defer { lock.unlock() }
@@ -143,6 +184,11 @@ public final class TextEncodingConversionCache: @unchecked Sendable {
         entries = Self.load(from: storageURL)
         accessOrder = Array(entries.keys)
         trimEntriesIfNeeded()
+        if isDirty {
+            let snapshot = entries
+            isDirty = false
+            try? save(snapshot)
+        }
         entriesLoaded = true
     }
 

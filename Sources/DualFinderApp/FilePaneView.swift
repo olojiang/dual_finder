@@ -640,9 +640,6 @@ struct FilePaneView: View {
                                 }
                                 .padding(.horizontal, 16)
                                 .padding(.vertical, 8)
-                                .onAppear {
-                                    fileListRenderLimit += 2_000
-                                }
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -820,6 +817,7 @@ struct FilePaneView: View {
                         revealPendingItemIfReady(with: scrollProxy)
                         synchronizeFileSearchSelection()
                         synchronizeSimilarFileNavigator(with: scrollProxy)
+                        restoreFileListFocusAfterPaneContentsChangeIfNeeded(reason: "pane-contents.refreshed")
                     }
                     .onChange(of: fileSearchQuery) { _, _ in
                         scheduleFileSearchSynchronization()
@@ -1611,6 +1609,7 @@ struct FilePaneView: View {
 
         let isSimilarReviewArrowKey = isSimilarFileNavigatorEnabled && (event.keyCode == 126 || event.keyCode == 125)
         guard isFileListFocused || isSimilarReviewArrowKey else {
+            logFileListArrowKeyIgnoredIfNeeded(event, reason: "file-list-not-focused")
             return false
         }
 
@@ -1656,9 +1655,17 @@ struct FilePaneView: View {
     }
 
     private func logSimilarFileKeyDownIgnoredIfNeeded(_ event: NSEvent, reason: String) {
-        guard isSimilarFileNavigatorEnabled, event.keyCode == 126 || event.keyCode == 125 else { return }
+        logFileListArrowKeyIgnoredIfNeeded(event, reason: reason, channel: "similar-file-review")
+    }
+
+    private func logFileListArrowKeyIgnoredIfNeeded(
+        _ event: NSEvent,
+        reason: String,
+        channel: String = "pane-focus"
+    ) {
+        guard event.keyCode == 126 || event.keyCode == 125 else { return }
         let relevantModifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
-        model.logSimilarFileReviewEvent("keyboard-event.ignored", metadata: [
+        let metadata = [
             "side": side.rawValue,
             "reason": reason,
             "keyCode": "\(event.keyCode)",
@@ -1669,7 +1676,29 @@ struct FilePaneView: View {
             "modifiers": "\(relevantModifiers.rawValue)",
             "anchorPath": fileListKeyboardAnchorURL?.path ?? "",
             "selectionCount": "\(model.pane(for: side).selectedItemURLs.count)"
-        ])
+        ]
+        if channel == "similar-file-review" {
+            guard isSimilarFileNavigatorEnabled else { return }
+            model.logSimilarFileReviewEvent("keyboard-event.ignored", metadata: metadata)
+        } else {
+            model.logPaneFocusEvent("keyboard-event.ignored", metadata: metadata)
+        }
+    }
+
+    private func restoreFileListFocusAfterPaneContentsChangeIfNeeded(reason: String) {
+        guard FileListFocusRestorePolicy.shouldRestoreAfterPaneContentsChange(
+            isActivePane: model.activePaneSide == side,
+            isFileListFocused: isFileListFocused,
+            isEditingPath: isEditingPath,
+            isInlineRenaming: model.isInlineRenaming,
+            isPathFieldFocused: isPathFieldFocused,
+            isFileSearchFocused: isFileSearchFocused,
+            isEmbeddedTerminalFocused: isEmbeddedTerminalFocused(in: NSApp.keyWindow)
+        ) else {
+            return
+        }
+
+        restoreFileListFocus(reason: reason)
     }
 
     private func isEmbeddedTerminalFocused(in window: NSWindow?) -> Bool {
