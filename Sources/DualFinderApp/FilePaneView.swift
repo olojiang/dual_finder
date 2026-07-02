@@ -451,6 +451,12 @@ struct FilePaneView: View {
             }
             model.copyAbsolutePaths(urls, on: side)
         }
+        Button("Copy Path with Size") {
+            if let selectTabID {
+                model.selectTab(selectTabID, on: side)
+            }
+            model.copyPathsWithSizes(urls, on: side)
+        }
         if !model.isAndroidPane(side) {
             Button("Open in Ghostty or Terminal") {
                 if let selectTabID {

@@ -161,6 +161,12 @@ struct AppMenuCommands: Commands {
         }
         .keyboardShortcut("c", modifiers: [.command, .option])
         .disabled(!model.canCopyAbsolutePathActiveSelection)
+
+        Button("Copy Path with Size") {
+            let side = model.activePaneSide
+            model.copyPathsWithSizes(model.pane(for: side).selectedItemURLs, on: side)
+        }
+        .disabled(!model.canCopyAbsolutePathActiveSelection)
     }
 
     @ViewBuilder

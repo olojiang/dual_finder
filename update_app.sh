@@ -3,8 +3,8 @@ set -euo pipefail
 
 APP_NAME="Dual Finder 纪"
 BUNDLE_ID="com.local.dualfinder"
-APP_VERSION="0.1.10"
-APP_BUILD="10"
+APP_VERSION="0.1.11"
+APP_BUILD="11"
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RELEASE_DIR="$ROOT_DIR/release"
 APP_BUNDLE="$RELEASE_DIR/$APP_NAME.app"

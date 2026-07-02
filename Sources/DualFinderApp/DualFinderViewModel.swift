@@ -1475,12 +1475,7 @@ final class DualFinderViewModel: ObservableObject {
         let orderedURLs = orderedSelection(urls, on: side)
         guard !orderedURLs.isEmpty else { return }
 
-        let paths = orderedURLs.map { url in
-            if let android = AndroidFileURL.parse(url) {
-                return "\(android.deviceSerial):\(android.path)"
-            }
-            return url.standardizedFileURL.path
-        }
+        let paths = orderedURLs.map { PathWithSizeClipboardFormat.absolutePath(for: $0) }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(paths.joined(separator: "\n"), forType: .string)
         statusMessage = paths.count == 1 ? "Copied path: \(paths[0])" : "Copied \(paths.count) paths"
@@ -1488,6 +1483,71 @@ final class DualFinderViewModel: ObservableObject {
             "side": side.rawValue,
             "count": "\(paths.count)"
         ])
+    }
+
+    func copyPathsWithSizes(_ urls: Set<URL>, on side: PaneSide) {
+        let orderedURLs = orderedSelection(urls, on: side)
+        guard !orderedURLs.isEmpty else { return }
+
+        statusMessage = "Copying paths with sizes..."
+        let itemsByURL = Dictionary(uniqueKeysWithValues: items(for: side).map { ($0.url, $0) })
+        let cache = folderSizeCache
+        let isAndroid = isAndroidPane(side)
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let service = FileSystemService()
+            var lines: [String] = []
+            var needsRefresh = false
+
+            for url in orderedURLs {
+                let path = PathWithSizeClipboardFormat.absolutePath(for: url)
+                let item = itemsByURL[url]
+                var size = item?.size
+
+                if size == nil, !isAndroid {
+                    do {
+                        let resolved = try PathWithSizeClipboardFormat.resolveByteSize(
+                            for: url,
+                            cachedItemSize: item?.size,
+                            isDirectoryLike: item?.isDirectoryLike,
+                            fileSystemService: service,
+                            folderSizeCache: cache
+                        )
+                        if resolved != nil, item?.size == nil {
+                            needsRefresh = true
+                        }
+                        size = resolved
+                    } catch {
+                        let errorDescription = error.localizedDescription
+                        DispatchQueue.main.async {
+                            self.logger.error("clipboard", "path-with-size.resolve-failed", metadata: [
+                                "side": side.rawValue,
+                                "path": path,
+                                "error": errorDescription
+                            ])
+                        }
+                    }
+                }
+
+                lines.append(PathWithSizeClipboardFormat.line(path: path, size: size))
+            }
+
+            DispatchQueue.main.async {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(lines.joined(separator: "\n"), forType: .string)
+                if needsRefresh {
+                    self.refresh(side)
+                }
+                self.statusMessage = lines.count == 1
+                    ? "Copied path with size: \(lines[0])"
+                    : "Copied \(lines.count) paths with sizes"
+                self.logger.info("clipboard", "paths-with-size.copied", metadata: [
+                    "side": side.rawValue,
+                    "count": "\(lines.count)"
+                ])
+            }
+        }
     }
 
     func copySelectionToFileClipboard(on side: PaneSide, requestID: String? = nil) {
