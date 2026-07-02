@@ -7,6 +7,7 @@ struct FileOperationTypesTests {
     @Test("defaults to keeping both files on conflicts")
     func defaultsToKeepBothConflictResolution() {
         #expect(FileOperationOptions().defaultConflictResolution == .keepBoth)
+        #expect(FileOperationOptions().syncMode == false)
     }
 
     @Test("exposes largerWins as a conflict resolution option")

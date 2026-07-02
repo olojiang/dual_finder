@@ -9,9 +9,14 @@ public enum FileOperationConflictResolution: String, Sendable, CaseIterable {
 
 public struct FileOperationOptions: Sendable {
     public var defaultConflictResolution: FileOperationConflictResolution
+    public var syncMode: Bool
 
-    public init(defaultConflictResolution: FileOperationConflictResolution = .keepBoth) {
+    public init(
+        defaultConflictResolution: FileOperationConflictResolution = .keepBoth,
+        syncMode: Bool = false
+    ) {
         self.defaultConflictResolution = defaultConflictResolution
+        self.syncMode = syncMode
     }
 }
 

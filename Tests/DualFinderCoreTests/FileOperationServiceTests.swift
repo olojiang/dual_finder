@@ -96,6 +96,76 @@ struct FileOperationServiceTests {
         #expect(copied == "new")
     }
 
+    @Test("merges same-named folders instead of treating them as a top-level conflict")
+    func mergesSameNamedFolders() throws {
+        let root = try TemporaryDirectory()
+        let destination = root.url.appendingPathComponent("destination", isDirectory: true)
+        let sourceFolder = root.url.appendingPathComponent("source", isDirectory: true)
+        let destinationFolder = destination.appendingPathComponent("source", isDirectory: true)
+        try FileManager.default.createDirectory(at: sourceFolder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destinationFolder, withIntermediateDirectories: true)
+        try "only-source".write(to: sourceFolder.appendingPathComponent("new.txt"), atomically: true, encoding: .utf8)
+        try "only-destination".write(to: destinationFolder.appendingPathComponent("existing.txt"), atomically: true, encoding: .utf8)
+        let logger = CapturingLogger()
+
+        try FileOperationService(logger: logger).copy([sourceFolder], to: destination)
+
+        #expect(FileManager.default.fileExists(atPath: destinationFolder.appendingPathComponent("new.txt").path))
+        #expect(FileManager.default.fileExists(atPath: destinationFolder.appendingPathComponent("existing.txt").path))
+        #expect(!FileManager.default.fileExists(atPath: destination.appendingPathComponent("source 2", isDirectory: true).path))
+        #expect(logger.messages.contains { $0.contains("conflict.merge-directories") })
+    }
+
+    @Test("sync mode skips identical files and copies missing files")
+    func syncModeSkipsIdenticalFiles() throws {
+        let root = try TemporaryDirectory()
+        let destination = root.url.appendingPathComponent("destination", isDirectory: true)
+        let sourceFolder = root.url.appendingPathComponent("source", isDirectory: true)
+        let destinationFolder = destination.appendingPathComponent("source", isDirectory: true)
+        try FileManager.default.createDirectory(at: sourceFolder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destinationFolder, withIntermediateDirectories: true)
+
+        let shared = sourceFolder.appendingPathComponent("same.txt")
+        let sourceOnly = sourceFolder.appendingPathComponent("missing.txt")
+        let sharedDestination = destinationFolder.appendingPathComponent("same.txt")
+        try "shared".write(to: shared, atomically: true, encoding: .utf8)
+        try Data("shared".utf8).write(to: sharedDestination)
+        try "missing".write(to: sourceOnly, atomically: true, encoding: .utf8)
+        let sharedDate = Date(timeIntervalSince1970: 1_700_000_000)
+        try FileManager.default.setAttributes([.modificationDate: sharedDate], ofItemAtPath: shared.path)
+        try FileManager.default.setAttributes([.modificationDate: sharedDate], ofItemAtPath: sharedDestination.path)
+
+        let logger = CapturingLogger()
+        try FileOperationService(logger: logger).copy(
+            [sourceFolder],
+            to: destination,
+            options: FileOperationOptions(syncMode: true),
+            conflictResolver: { _ in .overwrite }
+        )
+
+        #expect(try String(contentsOf: destinationFolder.appendingPathComponent("missing.txt"), encoding: .utf8) == "missing")
+        #expect(try String(contentsOf: destinationFolder.appendingPathComponent("same.txt"), encoding: .utf8) == "shared")
+        #expect(logger.messages.contains { $0.contains("sync.skip-identical") })
+    }
+
+    @Test("move into existing folder keeps source when directories are merged")
+    func moveIntoExistingFolderKeepsSource() throws {
+        let root = try TemporaryDirectory()
+        let destination = root.url.appendingPathComponent("destination", isDirectory: true)
+        let sourceFolder = root.url.appendingPathComponent("source", isDirectory: true)
+        let destinationFolder = destination.appendingPathComponent("source", isDirectory: true)
+        try FileManager.default.createDirectory(at: sourceFolder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destinationFolder, withIntermediateDirectories: true)
+        try "payload".write(to: sourceFolder.appendingPathComponent("new.txt"), atomically: true, encoding: .utf8)
+        let logger = CapturingLogger()
+
+        try FileOperationService(logger: logger).move([sourceFolder], to: destination)
+
+        #expect(FileManager.default.fileExists(atPath: sourceFolder.path))
+        #expect(FileManager.default.fileExists(atPath: destinationFolder.appendingPathComponent("new.txt").path))
+        #expect(logger.messages.contains { $0.contains("move.merge.source-kept") })
+    }
+
     @Test("copies files with overwrite conflict resolution")
     func copiesWithOverwriteConflictResolution() throws {
         let root = try TemporaryDirectory()

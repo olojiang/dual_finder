@@ -159,6 +159,14 @@ public struct FileOperationService {
                 copiedRoots.append(contentsOf: copied)
                 for copiedRoot in copied {
                     try context.checkCancellation()
+                    if copiedRoot.mergedIntoExistingDirectory {
+                        logger?.info("file-operation", "move.merge.source-kept", metadata: [
+                            "source": copiedRoot.source.path,
+                            "destination": copiedRoot.destination.path,
+                            "reason": "merged-into-existing-directory"
+                        ])
+                        continue
+                    }
                     if fileManager.fileExists(atPath: copiedRoot.source.path) {
                         try fileManager.removeItem(at: copiedRoot.source)
                     }
@@ -442,9 +450,13 @@ public struct FileOperationService {
         var copiedRoots: [CopiedRoot] = []
         for source in sources {
             try context.checkCancellation()
+            let requestedDestination = destinationDirectory.appendingPathComponent(source.lastPathComponent)
+            let mergedIntoExistingDirectory = fileManager.fileExists(atPath: requestedDestination.path)
+                && isMergeableDirectory(source)
+                && isMergeableDirectory(requestedDestination)
             let destination = try resolvedDestination(
                 for: source,
-                requestedDestination: destinationDirectory.appendingPathComponent(source.lastPathComponent),
+                requestedDestination: requestedDestination,
                 options: options,
                 conflictResolver: conflictResolver
             )
@@ -457,7 +469,11 @@ public struct FileOperationService {
                 context: context,
                 conflictResolver: conflictResolver
             )
-            copiedRoots.append(CopiedRoot(source: source, destination: destination))
+            copiedRoots.append(CopiedRoot(
+                source: source,
+                destination: destination,
+                mergedIntoExistingDirectory: mergedIntoExistingDirectory
+            ))
             logger?.info("file-operation", "copy.item.completed", metadata: [
                 "source": source.path,
                 "destination": destination.path
@@ -566,6 +582,22 @@ public struct FileOperationService {
             return requestedDestination
         }
 
+        if shouldMergeDirectories(source: source, into: requestedDestination) {
+            logger?.info("file-operation", "conflict.merge-directories", metadata: [
+                "source": source.path,
+                "destination": requestedDestination.path
+            ])
+            return requestedDestination
+        }
+
+        if options.syncMode, isSameFileContent(source: source, destination: requestedDestination) {
+            logger?.debug("file-operation", "sync.skip-identical", metadata: [
+                "source": source.path,
+                "destination": requestedDestination.path
+            ])
+            return nil
+        }
+
         let resolution = Self.resolvedStrategy(
             for: conflict,
             options: options,
@@ -577,6 +609,10 @@ public struct FileOperationService {
             try fileManager.removeItem(at: requestedDestination)
             return requestedDestination
         case .skip:
+            logger?.info("file-operation", "conflict.skip", metadata: [
+                "source": source.path,
+                "destination": requestedDestination.path
+            ])
             return nil
         case .keepBoth:
             return uniqueDestination(for: requestedDestination.lastPathComponent, in: requestedDestination.deletingLastPathComponent())
@@ -968,6 +1004,7 @@ public struct FileOperationService {
     private struct CopiedRoot {
         let source: URL
         let destination: URL
+        let mergedIntoExistingDirectory: Bool
     }
 
     private struct MoveRenameFallbackError: Error {
@@ -987,5 +1024,26 @@ public struct FileOperationService {
         let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
         guard values?.isRegularFile == true else { return nil }
         return values?.fileSize.map(Int64.init)
+    }
+
+    private func shouldMergeDirectories(source: URL, into destination: URL) -> Bool {
+        isMergeableDirectory(source) && isMergeableDirectory(destination)
+    }
+
+    private func isMergeableDirectory(_ url: URL) -> Bool {
+        let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        return values?.isDirectory == true && values?.isSymbolicLink != true
+    }
+
+    private func isSameFileContent(source: URL, destination: URL) -> Bool {
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
+        guard let sourceValues = try? source.resourceValues(forKeys: keys),
+              let destinationValues = try? destination.resourceValues(forKeys: keys),
+              sourceValues.isRegularFile == true,
+              destinationValues.isRegularFile == true else {
+            return false
+        }
+        return sourceValues.fileSize == destinationValues.fileSize
+            && sourceValues.contentModificationDate == destinationValues.contentModificationDate
     }
 }

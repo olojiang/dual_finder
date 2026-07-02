@@ -2967,11 +2967,25 @@ final class DualFinderViewModel: ObservableObject {
                 switch execution {
                 case .local:
                     switch kind {
-                    case .copy, .sync:
+                    case .copy:
                         guard let destination else { throw FileOperationError.invalidDestination }
                         try service.copy(
                             sources,
                             to: destination,
+                            cancellation: cancellation,
+                            progress: { progress in
+                                Task { @MainActor [weak self] in
+                                    self?.recordFileOperationProgress(progress, for: id)
+                                }
+                            },
+                            conflictResolver: resolveConflict
+                        )
+                    case .sync:
+                        guard let destination else { throw FileOperationError.invalidDestination }
+                        try service.copy(
+                            sources,
+                            to: destination,
+                            options: FileOperationOptions(syncMode: true),
                             cancellation: cancellation,
                             progress: { progress in
                                 Task { @MainActor [weak self] in
