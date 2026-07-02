@@ -37,6 +37,8 @@ public struct FileOperationProgress: Sendable, Equatable {
     public let skippedItems: Int
     public let skippedBytes: Int64
     public let scannedItems: Int
+    public let rootCompletedItems: Int
+    public let rootTotalItems: Int
     public let elapsedSeconds: TimeInterval?
 
     public init(
@@ -51,6 +53,8 @@ public struct FileOperationProgress: Sendable, Equatable {
         skippedItems: Int = 0,
         skippedBytes: Int64 = 0,
         scannedItems: Int = 0,
+        rootCompletedItems: Int = 0,
+        rootTotalItems: Int = 0,
         elapsedSeconds: TimeInterval? = nil
     ) {
         self.completedBytes = completedBytes
@@ -64,10 +68,20 @@ public struct FileOperationProgress: Sendable, Equatable {
         self.skippedItems = skippedItems
         self.skippedBytes = skippedBytes
         self.scannedItems = scannedItems
+        self.rootCompletedItems = rootCompletedItems
+        self.rootTotalItems = rootTotalItems
         self.elapsedSeconds = elapsedSeconds
     }
 
     public var fractionCompleted: Double? {
+        if rootTotalItems > 0 {
+            if totalBytes > 0 {
+                let rootFraction = Double(rootCompletedItems) / Double(rootTotalItems)
+                let innerFraction = min(max(Double(completedBytes) / Double(totalBytes), 0), 1) / Double(rootTotalItems)
+                return min(max(rootFraction + innerFraction, 0), 1)
+            }
+            return min(max(Double(rootCompletedItems) / Double(rootTotalItems), 0), 1)
+        }
         if totalBytes > 0 {
             return min(max(Double(completedBytes) / Double(totalBytes), 0), 1)
         }

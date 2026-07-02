@@ -150,6 +150,39 @@ struct FileOperationQueueModelsTests {
         #expect(operation.progressDetailText.contains("Scanning 250 item(s)"))
         #expect(operation.progressDetailText.contains("nested.bin"))
     }
+
+    @Test("root progress shows selected item counts")
+    func rootProgressShowsSelectedItemCounts() {
+        let operation = QueuedFileOperation(
+            id: UUID(),
+            kind: .move,
+            sources: [
+                URL(fileURLWithPath: "/tmp/a"),
+                URL(fileURLWithPath: "/tmp/b"),
+                URL(fileURLWithPath: "/tmp/c")
+            ],
+            destination: URL(fileURLWithPath: "/tmp/out", isDirectory: true),
+            createdAt: Date(),
+            status: .running,
+            progress: FileOperationProgress(
+                completedBytes: 0,
+                totalBytes: 0,
+                completedItems: 0,
+                totalItems: 0,
+                currentItem: URL(fileURLWithPath: "/tmp/b"),
+                scannedItems: 1200,
+                rootCompletedItems: 1,
+                rootTotalItems: 3,
+                elapsedSeconds: 2
+            ),
+            message: "b",
+            finishedAt: nil
+        )
+
+        #expect(operation.progressDetailText.contains("1/3 item(s)"))
+        #expect(operation.progressDetailText.contains("b"))
+        #expect(operation.progressDetailText.contains("scanning 1200 entries"))
+    }
 }
 
 private final class AppTemporaryDirectory {

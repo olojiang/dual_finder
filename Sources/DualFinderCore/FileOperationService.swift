@@ -63,20 +63,27 @@ public struct FileOperationService {
         conflictResolver: ((FileOperationConflict) -> FileOperationConflictResolution)? = nil
     ) throws {
         logger?.info("file-operation", "copy.started", metadata: operationMetadata(sources, destinationDirectory))
-        let context = try OperationContext(
-            sources: sources,
-            destinationDirectory: destinationDirectory,
-            fileManager: fileManager,
+        try processRootSources(
+            sources,
             cancellation: cancellation,
             progress: progress
-        )
-        try copySources(
-            sources,
-            to: destinationDirectory,
-            options: options,
-            context: context,
-            conflictResolver: conflictResolver
-        )
+        ) { source, index, total in
+            let context = try OperationContext(
+                sources: [source],
+                fileManager: fileManager,
+                cancellation: cancellation,
+                progress: progress,
+                rootCompletedItems: index,
+                rootTotalItems: total
+            )
+            try copySources(
+                [source],
+                to: destinationDirectory,
+                options: options,
+                context: context,
+                conflictResolver: conflictResolver
+            )
+        }
         logger?.info("file-operation", "copy.completed", metadata: operationMetadata(sources, destinationDirectory))
     }
 
@@ -108,26 +115,34 @@ public struct FileOperationService {
             throw error
         }
 
-        let context = try OperationContext(
-            sources: sources,
-            destinationDirectory: destinationDirectory,
-            fileManager: fileManager,
-            cancellation: cancellation,
-            progress: progress
-        )
         var copiedRoots: [CopiedRoot] = []
         do {
-            copiedRoots = try copySources(
+            try processRootSources(
                 sources,
-                to: destinationDirectory,
-                options: options,
-                context: context,
-                conflictResolver: conflictResolver
-            )
-            for copiedRoot in copiedRoots {
-                try context.checkCancellation()
-                if fileManager.fileExists(atPath: copiedRoot.source.path) {
-                    try fileManager.removeItem(at: copiedRoot.source)
+                cancellation: cancellation,
+                progress: progress
+            ) { source, index, total in
+                let context = try OperationContext(
+                    sources: [source],
+                    fileManager: fileManager,
+                    cancellation: cancellation,
+                    progress: progress,
+                    rootCompletedItems: index,
+                    rootTotalItems: total
+                )
+                let copied = try copySources(
+                    [source],
+                    to: destinationDirectory,
+                    options: options,
+                    context: context,
+                    conflictResolver: conflictResolver
+                )
+                copiedRoots.append(contentsOf: copied)
+                for copiedRoot in copied {
+                    try context.checkCancellation()
+                    if fileManager.fileExists(atPath: copiedRoot.source.path) {
+                        try fileManager.removeItem(at: copiedRoot.source)
+                    }
                 }
             }
         } catch {
@@ -297,6 +312,8 @@ public struct FileOperationService {
                 completedItems: completedItems,
                 totalItems: sources.count,
                 currentItem: source,
+                rootCompletedItems: completedItems,
+                rootTotalItems: sources.count,
                 elapsedSeconds: Date().timeIntervalSince(operationStart)
             ))
             logger?.warning("file-operation", "trash.item.completed", metadata: ["source": source.path])
@@ -320,6 +337,8 @@ public struct FileOperationService {
             completedItems: 0,
             totalItems: sources.count,
             currentItem: sources.first,
+            rootCompletedItems: 0,
+            rootTotalItems: sources.count,
             elapsedSeconds: 0
         ))
 
@@ -350,12 +369,40 @@ public struct FileOperationService {
                 completedItems: completedItems,
                 totalItems: sources.count,
                 currentItem: source,
+                rootCompletedItems: completedItems,
+                rootTotalItems: sources.count,
                 elapsedSeconds: Date().timeIntervalSince(operationStart)
             ))
             logger?.info("file-operation", "move.item.renamed", metadata: [
                 "source": source.path,
                 "destination": destination.path
             ])
+        }
+    }
+
+
+    private func processRootSources(
+        _ sources: [URL],
+        cancellation: FileOperationCancellation?,
+        progress: ((FileOperationProgress) -> Void)?,
+        handler: (_ source: URL, _ index: Int, _ total: Int) throws -> Void
+    ) throws {
+        let total = sources.count
+        for (index, source) in sources.enumerated() {
+            if cancellation?.isCancelled == true {
+                throw FileOperationError.cancelled
+            }
+            progress?(FileOperationProgress(
+                completedBytes: 0,
+                totalBytes: 0,
+                completedItems: 0,
+                totalItems: 0,
+                currentItem: source,
+                rootCompletedItems: index,
+                rootTotalItems: total,
+                elapsedSeconds: 0
+            ))
+            try handler(source, index, total)
         }
     }
 
@@ -739,15 +786,21 @@ public struct FileOperationService {
         private var completedBytes: Int64 = 0
         private var completedItems: Int = 0
 
+        private let rootCompletedItems: Int
+        private let rootTotalItems: Int
+
         init(
             sources: [URL],
-            destinationDirectory: URL,
             fileManager: FileManager,
             cancellation: FileOperationCancellation?,
-            progress: ((FileOperationProgress) -> Void)?
+            progress: ((FileOperationProgress) -> Void)?,
+            rootCompletedItems: Int = 0,
+            rootTotalItems: Int = 0
         ) throws {
             self.cancellation = cancellation
             self.progress = progress
+            self.rootCompletedItems = rootCompletedItems
+            self.rootTotalItems = rootTotalItems
             var plan = OperationPlan()
             var scannedItems = 0
             let startedAt = Date()
@@ -759,6 +812,8 @@ public struct FileOperationService {
                     totalItems: 0,
                     currentItem: currentItem,
                     scannedItems: count,
+                    rootCompletedItems: rootCompletedItems,
+                    rootTotalItems: rootTotalItems,
                     elapsedSeconds: Date().timeIntervalSince(startedAt)
                 ))
             }
@@ -800,6 +855,8 @@ public struct FileOperationService {
                 completedItems: completedItems,
                 totalItems: totalItems,
                 currentItem: currentItem,
+                rootCompletedItems: rootCompletedItems,
+                rootTotalItems: rootTotalItems,
                 elapsedSeconds: Date().timeIntervalSince(operationStart)
             ))
         }

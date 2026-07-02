@@ -2915,8 +2915,10 @@ final class DualFinderViewModel: ObservableObject {
                 completedBytes: 0,
                 totalBytes: 0,
                 completedItems: 0,
-                totalItems: request.sources.count,
+                totalItems: 0,
                 currentItem: request.sources.first,
+                rootCompletedItems: 0,
+                rootTotalItems: request.sources.count,
                 elapsedSeconds: 0
             ),
             for: request.id

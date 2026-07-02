@@ -76,6 +76,24 @@ struct QueuedFileOperation: Identifiable, Equatable {
             return status == .running ? "Preparing..." : ""
         }
 
+        if progress.rootTotalItems > 0 {
+            var parts = ["\(progress.rootCompletedItems)/\(progress.rootTotalItems) item(s)"]
+            if let currentItem = progress.currentItem {
+                parts.append(currentItem.lastPathComponent)
+            }
+            if progress.scannedItems > 0, progress.totalBytes == 0, progress.completedItems == 0 {
+                parts.append("scanning \(progress.scannedItems) entries")
+            } else if progress.totalBytes > 0 {
+                parts.append("\(Self.formatBytes(progress.completedBytes)) / \(Self.formatBytes(progress.totalBytes))")
+            } else if status == .running {
+                parts.append("preparing")
+            }
+            if let elapsed = progress.elapsedSeconds, elapsed > 0 {
+                parts.append("\(Self.formatDecimal(elapsed))s")
+            }
+            return parts.joined(separator: " • ")
+        }
+
         if progress.scannedItems > 0, progress.totalBytes == 0, progress.completedItems == 0 {
             var parts = ["Scanning \(progress.scannedItems) item(s)"]
             if let currentItem = progress.currentItem {
