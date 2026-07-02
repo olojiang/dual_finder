@@ -1783,9 +1783,19 @@ final class DualFinderViewModel: ObservableObject {
 
     func beginTabDrag(tabID: UUID, on side: PaneSide) {
         activeTabDrag = (tabID, side)
+        logger.debug("tab", "tab.drag.began", metadata: [
+            "side": side.rawValue,
+            "tab": tabID.uuidString
+        ])
     }
 
     func endTabDrag() {
+        if let activeTabDrag {
+            logger.debug("tab", "tab.drag.ended", metadata: [
+                "side": activeTabDrag.sourceSide.rawValue,
+                "tab": activeTabDrag.tabID.uuidString
+            ])
+        }
         activeTabDrag = nil
     }
 

@@ -335,9 +335,7 @@ struct FilePaneView: View {
 
     @ViewBuilder
     private func tabButton(for tab: FileTab) -> some View {
-        Button {
-            model.selectTab(tab.id, on: side)
-        } label: {
+        ZStack {
             HStack(spacing: 4) {
                 Image(systemName: "folder")
                 Text(tabTitle(for: tab.url))
@@ -348,16 +346,24 @@ struct FilePaneView: View {
             .padding(.vertical, 5)
             .background(tab.id == model.pane(for: side).selectedTabID ? Color.accentColor.opacity(0.18) : Color.secondary.opacity(0.08))
             .clipShape(RoundedRectangle(cornerRadius: 6))
+
+            FileTabDragHandler(
+                tabID: tab.id,
+                side: side,
+                onSelect: { model.selectTab(tab.id, on: side) },
+                onDragBegan: {
+                    draggedTabID = tab.id
+                    model.beginTabDrag(tabID: tab.id, on: side)
+                },
+                onDragEnded: {
+                    draggedTabID = nil
+                    model.endTabDrag()
+                }
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .buttonStyle(.plain)
         .opacity(draggedTabID == tab.id ? 0.55 : 1)
         .help(tabHelp(for: tab.url))
-        .onDrag {
-            draggedTabID = tab.id
-            model.beginTabDrag(tabID: tab.id, on: side)
-            let payload = TabDragPayload.encode(tabID: tab.id, side: side)
-            return NSItemProvider(object: payload as NSString)
-        }
         .onDrop(
             of: [.plainText],
             delegate: TabStripDropDelegate(
@@ -2380,8 +2386,12 @@ private struct TabStripDropDelegate: DropDelegate {
     @Binding var draggedTabID: UUID?
     let model: DualFinderViewModel
 
+    func validateDrop(info: DropInfo) -> Bool {
+        model.activeTabDragContext != nil
+    }
+
     func dropUpdated(info: DropInfo) -> DropProposal? {
-        guard model.activeTabDragContext != nil || draggedTabID != nil else { return nil }
+        guard validateDrop(info: info) else { return nil }
         return DropProposal(operation: .move)
     }
 
@@ -2398,11 +2408,6 @@ private struct TabStripDropDelegate: DropDelegate {
     }
 
     func performDrop(info: DropInfo) -> Bool {
-        defer {
-            draggedTabID = nil
-            model.endTabDrag()
-        }
-
         guard let drag = model.activeTabDragContext else { return false }
         if drag.sourceSide != side {
             model.moveTabDuringDrag(
@@ -2412,6 +2417,7 @@ private struct TabStripDropDelegate: DropDelegate {
                 beforeTabID: targetTabID
             )
         }
+        draggedTabID = nil
         return true
     }
 }
