@@ -317,7 +317,7 @@ struct FilePaneView: View {
                     tabButton(for: tab)
                 }
                 Color.clear
-                    .frame(width: 20, height: 24)
+                    .frame(width: 20, height: 1)
                     .onDrop(
                         of: [.plainText],
                         delegate: TabStripDropDelegate(
@@ -335,18 +335,17 @@ struct FilePaneView: View {
 
     @ViewBuilder
     private func tabButton(for tab: FileTab) -> some View {
-        ZStack {
-            HStack(spacing: 4) {
-                Image(systemName: "folder")
-                Text(tabTitle(for: tab.url))
-                    .lineLimit(1)
-            }
-            .font(.caption)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .background(tab.id == model.pane(for: side).selectedTabID ? Color.accentColor.opacity(0.18) : Color.secondary.opacity(0.08))
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-
+        HStack(spacing: 4) {
+            Image(systemName: "folder")
+            Text(tabTitle(for: tab.url))
+                .lineLimit(1)
+        }
+        .font(.caption)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(tab.id == model.pane(for: side).selectedTabID ? Color.accentColor.opacity(0.18) : Color.secondary.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay {
             FileTabDragHandler(
                 tabID: tab.id,
                 side: side,
@@ -360,7 +359,6 @@ struct FilePaneView: View {
                     model.endTabDrag()
                 }
             )
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .opacity(draggedTabID == tab.id ? 0.55 : 1)
         .help(tabHelp(for: tab.url))
