@@ -140,9 +140,13 @@ public struct FileSystemService {
         return regular ?? importantUsage
     }
 
-    public func calculateFolderSize(at folder: URL, cache: FolderSizeCache = FolderSizeCache()) throws -> FolderSizeResolution {
+    public func calculateFolderSize(
+        at folder: URL,
+        cache: FolderSizeCache = FolderSizeCache(),
+        forceRecalculate: Bool = false
+    ) throws -> FolderSizeResolution {
         let modifiedAt = try folder.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
-        if let cachedSize = cache.size(for: folder, modifiedAt: modifiedAt) {
+        if !forceRecalculate, let cachedSize = cache.size(for: folder, modifiedAt: modifiedAt) {
             return .cached(cachedSize)
         }
 

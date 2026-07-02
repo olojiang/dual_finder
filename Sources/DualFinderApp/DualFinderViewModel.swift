@@ -2568,7 +2568,7 @@ final class DualFinderViewModel: ObservableObject {
 
             for folderURL in folderURLs {
                 do {
-                    let result = try service.calculateFolderSize(at: folderURL, cache: cache)
+                    let result = try service.calculateFolderSize(at: folderURL, cache: cache, forceRecalculate: true)
                     let source: String
                     switch result {
                     case .cached:

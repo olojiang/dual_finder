@@ -247,6 +247,28 @@ struct FileSystemServiceTests {
         #expect(second == .cached(12))
     }
 
+    @Test("force recalculates folder size even when cache is valid")
+    func forceRecalculatesFolderSizeEvenWhenCacheIsValid() throws {
+        let root = try TemporaryDirectory()
+        let cacheURL = root.url.appendingPathComponent("cache.json")
+        let folder = root.url.appendingPathComponent("Folder")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data(repeating: 1, count: 5).write(to: folder.appendingPathComponent("a.bin"))
+
+        let cache = FolderSizeCache(storageURL: cacheURL)
+        let service = FileSystemService()
+
+        let first = try service.calculateFolderSize(at: folder, cache: cache)
+        #expect(first == .computed(5))
+
+        try Data(repeating: 2, count: 7).write(to: folder.appendingPathComponent("b.bin"))
+        let cached = try service.calculateFolderSize(at: folder, cache: cache)
+        #expect(cached == .cached(5))
+
+        let forced = try service.calculateFolderSize(at: folder, cache: cache, forceRecalculate: true)
+        #expect(forced == .computed(12))
+    }
+
     private func setModificationDate(_ date: Date, for url: URL) throws {
         try FileManager.default.setAttributes([.modificationDate: date], ofItemAtPath: url.path)
     }
