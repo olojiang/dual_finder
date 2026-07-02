@@ -546,47 +546,49 @@ private struct OperationQueueBar: View {
 
     var body: some View {
         if !visibleOperations.isEmpty {
-            VStack(spacing: 0) {
-                ForEach(visibleOperations) { operation in
-                    HStack(spacing: 8) {
-                        Image(systemName: iconName(for: operation.kind))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 18)
-                        VStack(alignment: .leading, spacing: 3) {
-                            HStack {
-                                Text(operation.title)
-                                    .font(.caption)
-                                    .fontWeight(.semibold)
-                                Text(operation.message)
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
+            TimelineView(.periodic(from: .now, by: 1)) { _ in
+                VStack(spacing: 0) {
+                    ForEach(visibleOperations) { operation in
+                        HStack(spacing: 8) {
+                            Image(systemName: iconName(for: operation.kind))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 18)
+                            VStack(alignment: .leading, spacing: 3) {
+                                HStack {
+                                    Text(operation.title)
+                                        .font(.caption)
+                                        .fontWeight(.semibold)
+                                    Text(operation.message)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                }
+                                if !operation.progressDetailText.isEmpty {
+                                    Text(operation.progressDetailText)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                }
+                                if operation.progress?.scannedItems ?? 0 > 0, operation.fractionCompleted == nil {
+                                    ProgressView()
+                                        .progressViewStyle(.linear)
+                                } else {
+                                    ProgressView(value: operation.fractionCompleted ?? 0)
+                                        .progressViewStyle(.linear)
+                                }
                             }
-                            if !operation.progressDetailText.isEmpty {
-                                Text(operation.progressDetailText)
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                            }
-                            if operation.progress?.scannedItems ?? 0 > 0, operation.fractionCompleted == nil {
-                                ProgressView()
-                                    .progressViewStyle(.linear)
-                            } else {
-                                ProgressView(value: operation.fractionCompleted ?? 0)
-                                    .progressViewStyle(.linear)
+                            IconButton(systemName: "xmark.circle", help: "Cancel operation") {
+                                model.cancelFileOperation(operation.id)
                             }
                         }
-                        IconButton(systemName: "xmark.circle", help: "Cancel operation") {
-                            model.cancelFileOperation(operation.id)
-                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
                     }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 5)
                 }
+                .background(.bar)
             }
-            .background(.bar)
             Divider()
         }
     }

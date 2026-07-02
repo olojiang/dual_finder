@@ -67,12 +67,27 @@ struct QueuedFileOperation: Identifiable, Equatable {
         progress?.fractionCompleted
     }
 
+    var displayElapsedSeconds: TimeInterval? {
+        if status == .queued || status == .running {
+            if let elapsed = progress?.elapsedSeconds, elapsed > 0 {
+                return elapsed
+            }
+            return Date().timeIntervalSince(createdAt)
+        }
+        return progress?.elapsedSeconds
+    }
+
     var title: String {
         "\(kind.displayName) \(sources.count) item(s)"
     }
 
     var progressDetailText: String {
         guard let progress else {
+            if status == .running || status == .queued,
+               let elapsed = displayElapsedSeconds,
+               elapsed > 0 {
+                return "Preparing... • \(Self.formatDuration(elapsed))"
+            }
             return status == .running ? "Preparing..." : ""
         }
 
@@ -88,8 +103,8 @@ struct QueuedFileOperation: Identifiable, Equatable {
             } else if status == .running {
                 parts.append("preparing")
             }
-            if let elapsed = progress.elapsedSeconds, elapsed > 0 {
-                parts.append("\(Self.formatDecimal(elapsed))s")
+            if let elapsed = displayElapsedSeconds, elapsed > 0 {
+                parts.append(Self.formatDuration(elapsed))
             }
             return parts.joined(separator: " • ")
         }
@@ -99,8 +114,8 @@ struct QueuedFileOperation: Identifiable, Equatable {
             if let currentItem = progress.currentItem {
                 parts.append(currentItem.lastPathComponent)
             }
-            if let elapsed = progress.elapsedSeconds, elapsed > 0 {
-                parts.append("\(Self.formatDecimal(elapsed))s")
+            if let elapsed = displayElapsedSeconds, elapsed > 0 {
+                parts.append(Self.formatDuration(elapsed))
             }
             return parts.joined(separator: " • ")
         }
@@ -129,7 +144,20 @@ struct QueuedFileOperation: Identifiable, Equatable {
         if let currentItemBytes = progress.currentItemBytes {
             parts.append("current item \(Self.formatBytes(currentItemBytes))")
         }
+        if let elapsed = displayElapsedSeconds, elapsed > 0 {
+            parts.append(Self.formatDuration(elapsed))
+        }
         return parts.joined(separator: " • ")
+    }
+
+    private static func formatDuration(_ seconds: TimeInterval) -> String {
+        if seconds < 60 {
+            return "\(formatDecimal(seconds))s"
+        }
+        let totalSeconds = Int(seconds.rounded(.down))
+        let minutes = totalSeconds / 60
+        let remainder = totalSeconds % 60
+        return String(format: "%d:%02d", minutes, remainder)
     }
 
     private static func formatBytes(_ bytes: Int64) -> String {
