@@ -170,6 +170,7 @@ final class DualFinderViewModel: ObservableObject {
     private let paneSessionStore: PaneSessionStore
     private let folderBookmarkStore: FolderBookmarkStore
     private let folderSizeCache: FolderSizeCache
+    private let operationScanCache: OperationScanCache
     private let textEncodingCache: TextEncodingConversionCache
     private let androidFileService: AndroidFileService
     private let uiLayoutPreferencesStore: UILayoutPreferencesStore
@@ -200,6 +201,7 @@ final class DualFinderViewModel: ObservableObject {
         paneSessionStore: PaneSessionStore = PaneSessionStore(),
         folderBookmarkStore: FolderBookmarkStore = FolderBookmarkStore(),
         folderSizeCache: FolderSizeCache = FolderSizeCache(),
+        operationScanCache: OperationScanCache = OperationScanCache(),
         textEncodingCache: TextEncodingConversionCache = TextEncodingConversionCache(),
         uiLayoutPreferencesStore: UILayoutPreferencesStore = UILayoutPreferencesStore(),
         androidFileService: AndroidFileService? = nil,
@@ -212,6 +214,7 @@ final class DualFinderViewModel: ObservableObject {
         self.paneSessionStore = paneSessionStore
         self.folderBookmarkStore = folderBookmarkStore
         self.folderSizeCache = folderSizeCache
+        self.operationScanCache = operationScanCache
         self.textEncodingCache = textEncodingCache
         self.androidFileService = androidFileService ?? AndroidFileService(logger: logger)
         self.uiLayoutPreferencesStore = uiLayoutPreferencesStore
@@ -222,7 +225,7 @@ final class DualFinderViewModel: ObservableObject {
         leftPane = restoredPanes.left
         rightPane = restoredPanes.right
         uiLayoutPreferences = uiLayoutPreferencesStore.load()
-        operationService = FileOperationService(logger: logger)
+        operationService = FileOperationService(logger: logger, operationScanCache: operationScanCache)
         self.quickLookPreviewService.navigationHandler = { [weak self] direction in
             self?.previewAdjacentSelection(direction) ?? false
         }
@@ -2936,9 +2939,10 @@ final class DualFinderViewModel: ObservableObject {
         } ?? []
         let androidFileService = androidFileService
         let operationLogger = logger
+        let scanCache = operationScanCache
 
         Task.detached(priority: .userInitiated) { [weak self] in
-            let service = FileOperationService(logger: operationLogger)
+            let service = FileOperationService(logger: operationLogger, operationScanCache: scanCache)
             var applyAllResolution: FileOperationConflictResolution?
 
             func resolveConflict(_ conflict: FileOperationConflict) -> FileOperationConflictResolution {

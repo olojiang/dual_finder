@@ -48,10 +48,16 @@ public struct TrashContentsSummary: Equatable, Sendable {
 public struct FileOperationService {
     private let fileManager: FileManager
     private let logger: AppLogging?
+    private let operationScanCache: OperationScanCache?
 
-    public init(fileManager: FileManager = .default, logger: AppLogging?) {
+    public init(
+        fileManager: FileManager = .default,
+        logger: AppLogging?,
+        operationScanCache: OperationScanCache? = nil
+    ) {
         self.fileManager = fileManager
         self.logger = logger
+        self.operationScanCache = operationScanCache
     }
 
     public func copy(
@@ -73,6 +79,8 @@ public struct FileOperationService {
                 fileManager: fileManager,
                 cancellation: cancellation,
                 progress: progress,
+                operationScanCache: operationScanCache,
+                logger: logger,
                 rootCompletedItems: index,
                 rootTotalItems: total
             )
@@ -127,6 +135,8 @@ public struct FileOperationService {
                     fileManager: fileManager,
                     cancellation: cancellation,
                     progress: progress,
+                    operationScanCache: operationScanCache,
+                    logger: logger,
                     rootCompletedItems: index,
                     rootTotalItems: total
                 )
@@ -788,12 +798,16 @@ public struct FileOperationService {
 
         private let rootCompletedItems: Int
         private let rootTotalItems: Int
+        private let operationScanCache: OperationScanCache?
+        private let logger: AppLogging?
 
         init(
             sources: [URL],
             fileManager: FileManager,
             cancellation: FileOperationCancellation?,
             progress: ((FileOperationProgress) -> Void)?,
+            operationScanCache: OperationScanCache?,
+            logger: AppLogging?,
             rootCompletedItems: Int = 0,
             rootTotalItems: Int = 0
         ) throws {
@@ -801,6 +815,8 @@ public struct FileOperationService {
             self.progress = progress
             self.rootCompletedItems = rootCompletedItems
             self.rootTotalItems = rootTotalItems
+            self.operationScanCache = operationScanCache
+            self.logger = logger
             var plan = OperationPlan()
             var scannedItems = 0
             let startedAt = Date()
@@ -819,10 +835,31 @@ public struct FileOperationService {
             }
             reportScanning(0, currentItem: sources.first)
             for source in sources {
-                try Self.scan(source, fileManager: fileManager, plan: &plan) { item in
-                    scannedItems += 1
-                    if scannedItems == 1 || scannedItems % 100 == 0 {
-                        reportScanning(scannedItems, currentItem: item)
+                let modifiedAt = try source.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+                if sources.count == 1,
+                   let cachedPlan = operationScanCache?.plan(for: source, modifiedAt: modifiedAt) {
+                    plan.totalBytes = cachedPlan.totalBytes
+                    plan.totalItems = cachedPlan.totalItems
+                    logger?.info("file-operation", "scan.cache.hit", metadata: [
+                        "path": source.path,
+                        "totalBytes": "\(cachedPlan.totalBytes)",
+                        "totalItems": "\(cachedPlan.totalItems)"
+                    ])
+                } else {
+                    try Self.scan(source, fileManager: fileManager, plan: &plan) { item in
+                        scannedItems += 1
+                        if scannedItems == 1 || scannedItems % 100 == 0 {
+                            reportScanning(scannedItems, currentItem: item)
+                        }
+                    }
+                    if sources.count == 1 {
+                        let scanPlan = OperationScanPlan(totalBytes: plan.totalBytes, totalItems: plan.totalItems)
+                        try operationScanCache?.setPlan(scanPlan, for: source, modifiedAt: modifiedAt)
+                        logger?.info("file-operation", "scan.cache.saved", metadata: [
+                            "path": source.path,
+                            "totalBytes": "\(scanPlan.totalBytes)",
+                            "totalItems": "\(scanPlan.totalItems)"
+                        ])
                     }
                 }
             }
