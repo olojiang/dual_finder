@@ -69,9 +69,6 @@ struct QueuedFileOperation: Identifiable, Equatable {
 
     var displayElapsedSeconds: TimeInterval? {
         if status == .queued || status == .running {
-            if let elapsed = progress?.elapsedSeconds, elapsed > 0 {
-                return elapsed
-            }
             return Date().timeIntervalSince(createdAt)
         }
         return progress?.elapsedSeconds
@@ -101,7 +98,7 @@ struct QueuedFileOperation: Identifiable, Equatable {
             } else if progress.totalBytes > 0 {
                 parts.append("\(Self.formatBytes(progress.completedBytes)) / \(Self.formatBytes(progress.totalBytes))")
             } else if status == .running {
-                parts.append("preparing")
+                parts.append("scanning folder")
             }
             if let elapsed = displayElapsedSeconds, elapsed > 0 {
                 parts.append(Self.formatDuration(elapsed))

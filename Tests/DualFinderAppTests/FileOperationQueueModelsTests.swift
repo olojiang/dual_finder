@@ -183,6 +183,33 @@ struct FileOperationQueueModelsTests {
         #expect(operation.progressDetailText.contains("b"))
         #expect(operation.progressDetailText.contains("scanning 1200 entries"))
     }
+
+    @Test("root progress without scan data shows scanning folder")
+    func rootProgressWithoutScanDataShowsScanningFolder() {
+        let operation = QueuedFileOperation(
+            id: UUID(),
+            kind: .move,
+            sources: [URL(fileURLWithPath: "/tmp/big-folder", isDirectory: true)],
+            destination: URL(fileURLWithPath: "/tmp/out", isDirectory: true),
+            createdAt: Date(),
+            status: .running,
+            progress: FileOperationProgress(
+                completedBytes: 0,
+                totalBytes: 0,
+                completedItems: 0,
+                totalItems: 0,
+                currentItem: URL(fileURLWithPath: "/tmp/big-folder"),
+                rootCompletedItems: 0,
+                rootTotalItems: 1,
+                elapsedSeconds: 0
+            ),
+            message: "big-folder",
+            finishedAt: nil
+        )
+
+        #expect(operation.progressDetailText.contains("scanning folder"))
+        #expect(!operation.progressDetailText.contains("preparing"))
+    }
 }
 
 private final class AppTemporaryDirectory {

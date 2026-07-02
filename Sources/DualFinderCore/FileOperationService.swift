@@ -104,23 +104,32 @@ public struct FileOperationService {
         conflictResolver: ((FileOperationConflict) -> FileOperationConflictResolution)? = nil
     ) throws {
         logger?.info("file-operation", "move.started", metadata: operationMetadata(sources, destinationDirectory))
-        do {
-            try moveSourcesByRename(
-                sources,
-                to: destinationDirectory,
-                options: options,
-                cancellation: cancellation,
-                progress: progress,
-                conflictResolver: conflictResolver
-            )
-            logger?.info("file-operation", "move.completed", metadata: operationMetadata(sources, destinationDirectory))
-            return
-        } catch let error as MoveRenameFallbackError {
-            logger?.warning("file-operation", "move.rename-fallback", metadata: [
-                "error": error.underlying.localizedDescription
+        if FileOperationVolume.canRenameMove(sources: sources, to: destinationDirectory) {
+            do {
+                try moveSourcesByRename(
+                    sources,
+                    to: destinationDirectory,
+                    options: options,
+                    cancellation: cancellation,
+                    progress: progress,
+                    conflictResolver: conflictResolver
+                )
+                logger?.info("file-operation", "move.completed", metadata: operationMetadata(sources, destinationDirectory))
+                return
+            } catch let error as MoveRenameFallbackError {
+                logger?.warning("file-operation", "move.rename-fallback", metadata: [
+                    "error": error.underlying.localizedDescription
+                ])
+            } catch {
+                throw error
+            }
+        } else {
+            logger?.info("file-operation", "move.using-copy-delete", metadata: [
+                "reason": "cross-volume",
+                "count": "\(sources.count)",
+                "destination": destinationDirectory.path,
+                "sources": sources.map(\.path).joined(separator: "|")
             ])
-        } catch {
-            throw error
         }
 
         var copiedRoots: [CopiedRoot] = []
@@ -364,6 +373,11 @@ public struct FileOperationService {
             )
             guard let destination else { continue }
 
+            logger?.info("file-operation", "move.rename.attempt", metadata: [
+                "source": source.path,
+                "destination": destination.path
+            ])
+            let renameStart = Date()
             do {
                 try fileManager.moveItem(at: source, to: destination)
             } catch {
@@ -385,7 +399,8 @@ public struct FileOperationService {
             ))
             logger?.info("file-operation", "move.item.renamed", metadata: [
                 "source": source.path,
-                "destination": destination.path
+                "destination": destination.path,
+                "elapsedMs": "\(Int(Date().timeIntervalSince(renameStart) * 1000))"
             ])
         }
     }
@@ -836,6 +851,10 @@ public struct FileOperationService {
             reportScanning(0, currentItem: sources.first)
             for source in sources {
                 let modifiedAt = try source.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+                logger?.info("file-operation", "scan.started", metadata: [
+                    "path": source.path,
+                    "modifiedAt": modifiedAt.map { "\($0.timeIntervalSince1970)" } ?? "nil"
+                ])
                 if sources.count == 1,
                    let cachedPlan = operationScanCache?.plan(for: source, modifiedAt: modifiedAt) {
                     plan.totalBytes = cachedPlan.totalBytes
@@ -846,12 +865,29 @@ public struct FileOperationService {
                         "totalItems": "\(cachedPlan.totalItems)"
                     ])
                 } else {
+                    var lastProgressLog = startedAt
                     try Self.scan(source, fileManager: fileManager, plan: &plan) { item in
                         scannedItems += 1
                         if scannedItems == 1 || scannedItems % 100 == 0 {
                             reportScanning(scannedItems, currentItem: item)
                         }
+                        let now = Date()
+                        if now.timeIntervalSince(lastProgressLog) >= 5 {
+                            logger?.info("file-operation", "scan.progress", metadata: [
+                                "path": source.path,
+                                "scannedItems": "\(scannedItems)",
+                                "elapsedMs": "\(Int(now.timeIntervalSince(startedAt) * 1000))"
+                            ])
+                            lastProgressLog = now
+                        }
                     }
+                    logger?.info("file-operation", "scan.completed", metadata: [
+                        "path": source.path,
+                        "scannedItems": "\(scannedItems)",
+                        "totalBytes": "\(plan.totalBytes)",
+                        "totalItems": "\(plan.totalItems)",
+                        "elapsedMs": "\(Int(Date().timeIntervalSince(startedAt) * 1000))"
+                    ])
                     if sources.count == 1 {
                         let scanPlan = OperationScanPlan(totalBytes: plan.totalBytes, totalItems: plan.totalItems)
                         try operationScanCache?.setPlan(scanPlan, for: source, modifiedAt: modifiedAt)

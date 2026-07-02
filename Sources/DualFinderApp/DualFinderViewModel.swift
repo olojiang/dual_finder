@@ -3468,8 +3468,7 @@ final class DualFinderViewModel: ObservableObject {
             }
         }
         if let operation = fileOperationQueue.first(where: { $0.id == id }) {
-            let detail = operation.progressDetailText
-            statusMessage = detail.isEmpty ? operation.message : "\(operation.message) • \(detail)"
+            statusMessage = "\(operation.title): \(operation.message)"
         }
     }
 
