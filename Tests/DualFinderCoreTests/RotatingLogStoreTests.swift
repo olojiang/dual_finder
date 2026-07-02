@@ -47,4 +47,20 @@ struct RotatingLogStoreTests {
             "2024-01-10.log"
         ])
     }
+
+    @Test("AppLogger logSync writes immediately without async delay")
+    func appLoggerLogSync() throws {
+        let root = try TemporaryDirectory()
+        let store = RotatingLogStore(
+            directory: root.url,
+            calendar: Calendar(identifier: .gregorian),
+            dateProvider: { Date(timeIntervalSince1970: 1_704_067_200) }
+        )
+        let logger = AppLogger(store: store)
+        logger.logSync(.warning, "frontend.stderr", "sync warning line")
+        let log = try String(contentsOf: root.url.appendingPathComponent("2024-01-01.log"), encoding: .utf8)
+        #expect(log.contains("sync warning line"))
+        #expect(log.contains("WARN"))
+        #expect(log.contains("[frontend.stderr]"))
+    }
 }

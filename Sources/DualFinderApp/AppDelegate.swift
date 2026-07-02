@@ -24,6 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        FrontendLogCapture.install(logger: Self.sharedLogger)
         Self.sharedLogger.info("app.lifecycle", "app.launched", metadata: [
             "logDirectory": Self.sharedLogger.logDirectory.path,
             "hotkeyHelperEnabled": "\(HotkeyHelperLoginItem.isRegistered)"

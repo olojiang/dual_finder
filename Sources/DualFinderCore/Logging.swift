@@ -143,4 +143,13 @@ public final class AppLogger: AppLogging, @unchecked Sendable {
             }
         }
     }
+
+    /// Writes immediately on the calling thread. Use for crash/exception handlers.
+    public func logSync(_ level: LogLevel, _ category: String, _ message: String, metadata: [String: String] = [:]) {
+        do {
+            try store.append(level: level, category: category, message: message, metadata: metadata)
+        } catch {
+            fputs("DualFinder log write failed: \(error)\n", stderr)
+        }
+    }
 }
