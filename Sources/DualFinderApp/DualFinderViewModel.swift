@@ -190,6 +190,7 @@ final class DualFinderViewModel: ObservableObject {
     private var archiveCancellation: FileOperationCancellation?
     private var textEncodingScanCancellations: [PaneSide: TextEncodingScanCancellation] = [:]
     private var isArchiveOperationRunning = false
+    private var activeTabDrag: (tabID: UUID, sourceSide: PaneSide)?
     @Published private var isTextEncodingConversionRunning = false
 
     init(
@@ -1778,6 +1779,56 @@ final class DualFinderViewModel: ObservableObject {
             logger.debug("tab", "tab.close.ignored", metadata: ["side": side.rawValue, "tab": tabID.uuidString])
         }
         return didClose
+    }
+
+    func beginTabDrag(tabID: UUID, on side: PaneSide) {
+        activeTabDrag = (tabID, side)
+    }
+
+    func endTabDrag() {
+        activeTabDrag = nil
+    }
+
+    var activeTabDragContext: (tabID: UUID, sourceSide: PaneSide)? {
+        activeTabDrag
+    }
+
+    func reorderTabDuringDrag(tabID: UUID, on side: PaneSide, beforeTabID: UUID?) {
+        let moved = mutatePane(side) { $0.moveTab(id: tabID, beforeTabID: beforeTabID) }
+        guard moved else { return }
+        persistPaneSession()
+        refresh(side)
+    }
+
+    func moveTabDuringDrag(tabID: UUID, from sourceSide: PaneSide, to targetSide: PaneSide, beforeTabID: UUID?) {
+        if sourceSide == targetSide {
+            reorderTabDuringDrag(tabID: tabID, on: sourceSide, beforeTabID: beforeTabID)
+            return
+        }
+
+        let replacementURL = fallbackTabURL(for: sourceSide)
+        let detachedTab = mutatePane(sourceSide) {
+            $0.detachTab(id: tabID, replacementURLIfEmpty: replacementURL)
+        }
+        guard let tab = detachedTab else { return }
+
+        mutatePane(targetSide) { $0.insertTab(tab, beforeTabID: beforeTabID) }
+        activePaneSide = targetSide
+        persistPaneSession()
+        logger.info("tab", "tab.moved", metadata: [
+            "tab": tabID.uuidString,
+            "from": sourceSide.rawValue,
+            "to": targetSide.rawValue
+        ])
+        refresh(sourceSide)
+        refresh(targetSide)
+    }
+
+    private func fallbackTabURL(for side: PaneSide) -> URL {
+        if let serial = androidDeviceSerial(for: side) {
+            return AndroidFileURL.url(deviceSerial: serial, path: "/sdcard")
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
     }
 
     @discardableResult

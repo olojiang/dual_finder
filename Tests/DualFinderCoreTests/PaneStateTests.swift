@@ -121,4 +121,39 @@ struct PaneStateTests {
         #expect(pane.selectedTabID == first.id)
         #expect(pane.selectedURL == first.url)
     }
+
+    @Test("reorders tabs within the same pane")
+    func reordersTabsWithinSamePane() {
+        let first = FileTab(id: UUID(), url: URL(fileURLWithPath: "/tmp/first"))
+        let second = FileTab(id: UUID(), url: URL(fileURLWithPath: "/tmp/second"))
+        let third = FileTab(id: UUID(), url: URL(fileURLWithPath: "/tmp/third"))
+        var pane = PaneState(side: .left, tabs: [first, second, third], selectedTabID: first.id)
+
+        let moved = pane.moveTab(id: third.id, beforeTabID: first.id)
+        #expect(moved)
+        #expect(pane.tabs.map(\.id) == [third.id, first.id, second.id])
+    }
+
+    @Test("moves tabs between panes while keeping at least one tab")
+    func movesTabsBetweenPanesWhileKeepingAtLeastOneTab() {
+        let leftFirst = FileTab(id: UUID(), url: URL(fileURLWithPath: "/tmp/left-first"))
+        let leftSecond = FileTab(id: UUID(), url: URL(fileURLWithPath: "/tmp/left-second"))
+        let rightFirst = FileTab(id: UUID(), url: URL(fileURLWithPath: "/tmp/right-first"))
+        var leftPane = PaneState(side: .left, tabs: [leftFirst, leftSecond], selectedTabID: leftFirst.id)
+        var rightPane = PaneState(side: .right, tabs: [rightFirst], selectedTabID: rightFirst.id)
+        let replacement = URL(fileURLWithPath: "/tmp/replacement")
+
+        let detached = leftPane.detachTab(id: leftSecond.id, replacementURLIfEmpty: replacement)
+        let inserted = rightPane.insertTab(leftSecond, beforeTabID: nil)
+        #expect(detached?.id == leftSecond.id)
+        #expect(leftPane.tabs.map(\.id) == [leftFirst.id])
+        #expect(inserted)
+        #expect(rightPane.tabs.map(\.id) == [rightFirst.id, leftSecond.id])
+        #expect(rightPane.selectedTabID == leftSecond.id)
+
+        let onlyTab = leftPane.detachTab(id: leftFirst.id, replacementURLIfEmpty: replacement)
+        #expect(onlyTab?.id == leftFirst.id)
+        #expect(leftPane.tabs.count == 1)
+        #expect(leftPane.selectedURL == replacement)
+    }
 }

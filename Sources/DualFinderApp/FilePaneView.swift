@@ -62,6 +62,7 @@ struct FilePaneView: View {
     @FocusState private var isPathFieldFocused: Bool
     @FocusState private var isFileSearchFocused: Bool
     @State private var freeSpaceCapacity: Int64?
+    @State private var draggedTabID: UUID?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -313,30 +314,62 @@ struct FilePaneView: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 4) {
                 ForEach(model.pane(for: side).tabs) { tab in
-                    Button {
-                        model.selectTab(tab.id, on: side)
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "folder")
-                            Text(tabTitle(for: tab.url))
-                                .lineLimit(1)
-                        }
-                        .font(.caption)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
-                        .background(tab.id == model.pane(for: side).selectedTabID ? Color.accentColor.opacity(0.18) : Color.secondary.opacity(0.08))
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
-                    }
-                    .buttonStyle(.plain)
-                    .help(tabHelp(for: tab.url))
-                    .contextMenu {
-                        pathAndTerminalContextMenuItems(for: Set([tab.url]), selectTabID: tab.id)
-                        favoriteContextMenuItems(for: Set([tab.url]))
-                    }
+                    tabButton(for: tab)
                 }
+                Color.clear
+                    .frame(width: 20, height: 24)
+                    .onDrop(
+                        of: [.plainText],
+                        delegate: TabStripDropDelegate(
+                            side: side,
+                            targetTabID: nil,
+                            draggedTabID: $draggedTabID,
+                            model: model
+                        )
+                    )
             }
             .padding(.horizontal, 8)
             .padding(.bottom, 6)
+        }
+    }
+
+    @ViewBuilder
+    private func tabButton(for tab: FileTab) -> some View {
+        Button {
+            model.selectTab(tab.id, on: side)
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "folder")
+                Text(tabTitle(for: tab.url))
+                    .lineLimit(1)
+            }
+            .font(.caption)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(tab.id == model.pane(for: side).selectedTabID ? Color.accentColor.opacity(0.18) : Color.secondary.opacity(0.08))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
+        .opacity(draggedTabID == tab.id ? 0.55 : 1)
+        .help(tabHelp(for: tab.url))
+        .onDrag {
+            draggedTabID = tab.id
+            model.beginTabDrag(tabID: tab.id, on: side)
+            let payload = TabDragPayload.encode(tabID: tab.id, side: side)
+            return NSItemProvider(object: payload as NSString)
+        }
+        .onDrop(
+            of: [.plainText],
+            delegate: TabStripDropDelegate(
+                side: side,
+                targetTabID: tab.id,
+                draggedTabID: $draggedTabID,
+                model: model
+            )
+        )
+        .contextMenu {
+            pathAndTerminalContextMenuItems(for: Set([tab.url]), selectTabID: tab.id)
+            favoriteContextMenuItems(for: Set([tab.url]))
         }
     }
 
@@ -2338,6 +2371,48 @@ private final class FileDragPasteboardWriter: NSObject, NSPasteboardWriting {
         pasteboard: NSPasteboard
     ) -> NSPasteboard.WritingOptions {
         []
+    }
+}
+
+private struct TabStripDropDelegate: DropDelegate {
+    let side: PaneSide
+    let targetTabID: UUID?
+    @Binding var draggedTabID: UUID?
+    let model: DualFinderViewModel
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        guard model.activeTabDragContext != nil || draggedTabID != nil else { return nil }
+        return DropProposal(operation: .move)
+    }
+
+    func dropEntered(info: DropInfo) {
+        guard let drag = model.activeTabDragContext,
+              drag.sourceSide == side,
+              drag.tabID != targetTabID else {
+            return
+        }
+
+        withAnimation(.easeInOut(duration: 0.12)) {
+            model.reorderTabDuringDrag(tabID: drag.tabID, on: side, beforeTabID: targetTabID)
+        }
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        defer {
+            draggedTabID = nil
+            model.endTabDrag()
+        }
+
+        guard let drag = model.activeTabDragContext else { return false }
+        if drag.sourceSide != side {
+            model.moveTabDuringDrag(
+                tabID: drag.tabID,
+                from: drag.sourceSide,
+                to: side,
+                beforeTabID: targetTabID
+            )
+        }
+        return true
     }
 }
 

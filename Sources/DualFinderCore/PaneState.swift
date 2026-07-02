@@ -101,6 +101,52 @@ public struct PaneState: Sendable {
         return true
     }
 
+    @discardableResult
+    public mutating func moveTab(id: UUID, beforeTabID: UUID?) -> Bool {
+        guard let fromIndex = tabs.firstIndex(where: { $0.id == id }) else { return false }
+        if let beforeTabID, beforeTabID == id { return false }
+
+        let tab = tabs.remove(at: fromIndex)
+        let insertIndex: Int
+        if let beforeTabID, let targetIndex = tabs.firstIndex(where: { $0.id == beforeTabID }) {
+            insertIndex = targetIndex
+        } else {
+            insertIndex = tabs.count
+        }
+        tabs.insert(tab, at: insertIndex)
+        return true
+    }
+
+    @discardableResult
+    public mutating func detachTab(id: UUID, replacementURLIfEmpty: URL) -> FileTab? {
+        guard let index = tabs.firstIndex(where: { $0.id == id }) else { return nil }
+        let tab = tabs.remove(at: index)
+
+        if tabs.isEmpty {
+            let replacement = FileTab(url: replacementURLIfEmpty)
+            tabs.append(replacement)
+            selectedTabID = replacement.id
+        } else if selectedTabID == id {
+            selectedTabID = tabs[min(index, tabs.count - 1)].id
+        }
+        selectedItemURLs.removeAll()
+        return tab
+    }
+
+    @discardableResult
+    public mutating func insertTab(_ tab: FileTab, beforeTabID: UUID?) -> Bool {
+        let insertIndex: Int
+        if let beforeTabID, let targetIndex = tabs.firstIndex(where: { $0.id == beforeTabID }) {
+            insertIndex = targetIndex
+        } else {
+            insertIndex = tabs.count
+        }
+        tabs.insert(tab, at: insertIndex)
+        selectedTabID = tab.id
+        selectedItemURLs.removeAll()
+        return true
+    }
+
     public mutating func navigateSelectedTab(to url: URL, selecting selection: URL? = nil) {
         guard let index = tabs.firstIndex(where: { $0.id == selectedTabID }) else { return }
         if tabs[index].url != url {
