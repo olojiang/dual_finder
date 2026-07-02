@@ -105,19 +105,25 @@ public struct UILayoutPreferences: Codable, Equatable, Sendable {
     public var leftPaneFraction: Double
     public var isSidebarCollapsed: Bool
     public var isEncodingColumnVisible: Bool
+    public var leftTerminalHeight: Double?
+    public var rightTerminalHeight: Double?
 
     public init(
         leftColumnWidths: FileListColumnWidths = .default,
         rightColumnWidths: FileListColumnWidths = .default,
         leftPaneFraction: Double = 0.5,
         isSidebarCollapsed: Bool = false,
-        isEncodingColumnVisible: Bool = false
+        isEncodingColumnVisible: Bool = false,
+        leftTerminalHeight: Double? = nil,
+        rightTerminalHeight: Double? = nil
     ) {
         self.leftColumnWidths = leftColumnWidths.clamped()
         self.rightColumnWidths = rightColumnWidths.clamped()
         self.leftPaneFraction = Self.clampedFraction(leftPaneFraction)
         self.isSidebarCollapsed = isSidebarCollapsed
         self.isEncodingColumnVisible = isEncodingColumnVisible
+        self.leftTerminalHeight = leftTerminalHeight
+        self.rightTerminalHeight = rightTerminalHeight
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -127,6 +133,8 @@ public struct UILayoutPreferences: Codable, Equatable, Sendable {
         case leftPaneFraction
         case isSidebarCollapsed
         case isEncodingColumnVisible
+        case leftTerminalHeight
+        case rightTerminalHeight
     }
 
     public init(from decoder: Decoder) throws {
@@ -146,6 +154,8 @@ public struct UILayoutPreferences: Codable, Equatable, Sendable {
             .map(Self.clampedFraction) ?? 0.5
         self.isSidebarCollapsed = try container.decodeIfPresent(Bool.self, forKey: .isSidebarCollapsed) ?? false
         self.isEncodingColumnVisible = try container.decodeIfPresent(Bool.self, forKey: .isEncodingColumnVisible) ?? false
+        self.leftTerminalHeight = try container.decodeIfPresent(Double.self, forKey: .leftTerminalHeight)
+        self.rightTerminalHeight = try container.decodeIfPresent(Double.self, forKey: .rightTerminalHeight)
         clamp()
     }
 
@@ -156,6 +166,8 @@ public struct UILayoutPreferences: Codable, Equatable, Sendable {
         try container.encode(leftPaneFraction, forKey: .leftPaneFraction)
         try container.encode(isSidebarCollapsed, forKey: .isSidebarCollapsed)
         try container.encode(isEncodingColumnVisible, forKey: .isEncodingColumnVisible)
+        try container.encodeIfPresent(leftTerminalHeight, forKey: .leftTerminalHeight)
+        try container.encodeIfPresent(rightTerminalHeight, forKey: .rightTerminalHeight)
     }
 
     public static let `default` = UILayoutPreferences()
@@ -164,6 +176,8 @@ public struct UILayoutPreferences: Codable, Equatable, Sendable {
     public static let sidebarExpandedWidth: Double = 220
     public static let minimumLeftPaneFraction: Double = 0.2
     public static let maximumLeftPaneFraction: Double = 0.8
+    public static let minimumTerminalHeight: Double = 140
+    public static let maximumTerminalHeight: Double = 420
 
     public var sidebarWidth: Double {
         isSidebarCollapsed ? Self.sidebarCollapsedWidth : Self.sidebarExpandedWidth
@@ -187,10 +201,20 @@ public struct UILayoutPreferences: Codable, Equatable, Sendable {
         leftColumnWidths = leftColumnWidths.clamped()
         rightColumnWidths = rightColumnWidths.clamped()
         leftPaneFraction = Self.clampedFraction(leftPaneFraction)
+        if let leftTerminalHeight {
+            self.leftTerminalHeight = Self.clampedTerminalHeight(leftTerminalHeight)
+        }
+        if let rightTerminalHeight {
+            self.rightTerminalHeight = Self.clampedTerminalHeight(rightTerminalHeight)
+        }
     }
 
     public static func clampedFraction(_ value: Double) -> Double {
         min(max(value, minimumLeftPaneFraction), maximumLeftPaneFraction)
+    }
+
+    public static func clampedTerminalHeight(_ value: Double) -> Double {
+        min(max(value, minimumTerminalHeight), maximumTerminalHeight)
     }
 }
 

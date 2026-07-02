@@ -15,7 +15,7 @@ struct ContentView: View {
             mainContent
             Divider()
             OperationQueueBar(model: model)
-            StatusBar(message: model.statusMessage)
+            StatusBar(model: model)
         }
         .background(.background)
         .background(AppShortcutHandler(isSuspended: isGlobalShortcutSuspended) {
@@ -64,6 +64,8 @@ struct ContentView: View {
             model.moveSelection(from: .left)
         } moveRightSelectionToLeft: {
             model.moveSelection(from: .right)
+        } switchPane: {
+            model.switchPane()
         })
         .sheet(item: $model.folderBookmarkDialogRequest) { _ in
             FolderBookmarkDialog(model: model)
@@ -1267,6 +1269,7 @@ private enum ShortcutHelpCatalog {
             ShortcutHelpGroup(title: "Navigation", entries: [
                 entry(.focusLeftPane),
                 entry(.focusRightPane),
+                entry(.switchPane),
                 entry(.navigateBack),
                 entry(.navigateForward),
                 ShortcutHelpEntry(title: "Go to Parent Folder", shortcut: "⌘↑", note: nil),
@@ -1338,6 +1341,7 @@ private struct AppShortcutHandler: NSViewRepresentable {
     let copyRightSelectionToLeft: () -> Void
     let moveLeftSelectionToRight: () -> Void
     let moveRightSelectionToLeft: () -> Void
+    let switchPane: () -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
@@ -1361,6 +1365,7 @@ private struct AppShortcutHandler: NSViewRepresentable {
             copyRightSelectionToLeft: copyRightSelectionToLeft,
             moveLeftSelectionToRight: moveLeftSelectionToRight,
             moveRightSelectionToLeft: moveRightSelectionToLeft,
+            switchPane: switchPane,
             isSuspended: isSuspended
         )
     }
@@ -1391,6 +1396,7 @@ private struct AppShortcutHandler: NSViewRepresentable {
         context.coordinator.copyRightSelectionToLeft = copyRightSelectionToLeft
         context.coordinator.moveLeftSelectionToRight = moveLeftSelectionToRight
         context.coordinator.moveRightSelectionToLeft = moveRightSelectionToLeft
+        context.coordinator.switchPane = switchPane
         context.coordinator.isSuspended = isSuspended
     }
 
@@ -1419,6 +1425,7 @@ private struct AppShortcutHandler: NSViewRepresentable {
         var copyRightSelectionToLeft: () -> Void
         var moveLeftSelectionToRight: () -> Void
         var moveRightSelectionToLeft: () -> Void
+        var switchPane: () -> Void
         var isSuspended: Bool
         private var monitor: Any?
 
@@ -1443,6 +1450,7 @@ private struct AppShortcutHandler: NSViewRepresentable {
             copyRightSelectionToLeft: @escaping () -> Void,
             moveLeftSelectionToRight: @escaping () -> Void,
             moveRightSelectionToLeft: @escaping () -> Void,
+            switchPane: @escaping () -> Void,
             isSuspended: Bool
         ) {
             self.newActiveTab = newActiveTab
@@ -1465,6 +1473,7 @@ private struct AppShortcutHandler: NSViewRepresentable {
             self.copyRightSelectionToLeft = copyRightSelectionToLeft
             self.moveLeftSelectionToRight = moveLeftSelectionToRight
             self.moveRightSelectionToLeft = moveRightSelectionToLeft
+            self.switchPane = switchPane
             self.isSuspended = isSuspended
         }
 
@@ -1477,6 +1486,9 @@ private struct AppShortcutHandler: NSViewRepresentable {
                     return nil
                 }
                 guard let action = AppShortcutMatrix.action(matching: event) else {
+                    return event
+                }
+                if action == .switchPane, Self.shouldDeferToTextInput(event) {
                     return event
                 }
 
@@ -1540,8 +1552,16 @@ private struct AppShortcutHandler: NSViewRepresentable {
                 case .moveRightSelectionToLeft:
                     self?.moveRightSelectionToLeft()
                     return nil
+                case .switchPane:
+                    self?.switchPane()
+                    return nil
                 }
             }
+        }
+
+        private static func shouldDeferToTextInput(_ event: NSEvent) -> Bool {
+            guard let responder = event.window?.firstResponder else { return false }
+            return responder is NSTextView || responder is NSTextField
         }
 
         private func handlePaneFocusShortcut(_ event: NSEvent, target: PaneSide) {
@@ -2388,13 +2408,13 @@ private struct AppToolbar: View {
 }
 
 private struct StatusBar: View {
-    let message: String
+    @ObservedObject var model: DualFinderViewModel
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 5)) { _ in
             let memoryLabel = ProcessMemorySampler.displayLabel(for: ProcessMemorySampler.currentSnapshot())
             HStack(spacing: 8) {
-                Text(message.isEmpty ? "Ready" : message)
+                Text(model.statusMessage.isEmpty ? "Ready" : model.statusMessage)
                     .lineLimit(1)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -2404,6 +2424,9 @@ private struct StatusBar: View {
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
                     .help("Process memory footprint (phys_footprint). Shows RSS when it is much higher, refreshed every 5 seconds")
+                IconButton(systemName: "doc.text.magnifyingglass", help: "Open log folder") {
+                    model.openLogFolder()
+                }
             }
             .padding(.horizontal, 10)
             .frame(height: 26)

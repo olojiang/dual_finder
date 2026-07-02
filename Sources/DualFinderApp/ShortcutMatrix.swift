@@ -15,6 +15,7 @@ enum AppShortcutAction: String, CaseIterable, Identifiable {
     case showShortcutHelp
     case focusLeftPane
     case focusRightPane
+    case switchPane
     case selectTab1
     case selectTab2
     case selectTab3
@@ -47,6 +48,7 @@ enum AppShortcutAction: String, CaseIterable, Identifiable {
         case .showShortcutHelp: "Keyboard Shortcuts"
         case .focusLeftPane: "Focus Left Pane"
         case .focusRightPane: "Focus Right Pane"
+        case .switchPane: "Switch Left/Right Pane"
         case .selectTab1: "Select Tab 1"
         case .selectTab2: "Select Tab 2"
         case .selectTab3: "Select Tab 3"
@@ -71,7 +73,7 @@ enum AppShortcutAction: String, CaseIterable, Identifiable {
             "Commands"
         case .newActiveTab, .newRightTab, .closeActiveTab:
             "Tabs"
-        case .focusLeftPane, .focusRightPane, .navigateBack, .navigateForward:
+        case .focusLeftPane, .focusRightPane, .switchPane, .navigateBack, .navigateForward:
             "Navigation"
         case .selectTab1, .selectTab2, .selectTab3, .selectTab4, .selectTab5, .selectTab6, .selectTab7, .selectTab8, .selectTab9:
             "Tabs"
@@ -121,6 +123,8 @@ enum AppShortcutAction: String, CaseIterable, Identifiable {
             AppShortcutBinding(key: "left", keyCode: 123, modifiers: [.command])
         case .focusRightPane:
             AppShortcutBinding(key: "right", keyCode: 124, modifiers: [.command])
+        case .switchPane:
+            AppShortcutBinding(key: "tab", keyCode: 48, modifiers: [])
         case .selectTab1:
             AppShortcutBinding(key: "1", keyCode: nil, modifiers: [.command])
         case .selectTab2:
@@ -248,6 +252,7 @@ enum AppShortcutMatrix {
             ShortcutKeyChoice(id: "down", label: "↓", keyCode: 125),
             ShortcutKeyChoice(id: "space", label: "Space", keyCode: 49),
             ShortcutKeyChoice(id: "delete", label: "Delete", keyCode: 51),
+            ShortcutKeyChoice(id: "tab", label: "Tab", keyCode: 48),
             ShortcutKeyChoice(id: "/", label: "/", keyCode: 44)
         ]
     }()

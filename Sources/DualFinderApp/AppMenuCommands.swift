@@ -179,6 +179,18 @@ struct AppMenuCommands: Commands {
         }
         .keyboardShortcut("a", modifiers: [.command])
 
+        Menu("Select by Condition") {
+            Button("Same Extension as Selection") {
+                model.selectSameExtension(on: model.activePaneSide)
+            }
+            Button("Modified Today") {
+                model.selectModifiedToday(on: model.activePaneSide)
+            }
+            Button("Larger than 100 MB") {
+                model.selectLargerThan100MB(on: model.activePaneSide)
+            }
+        }
+
         Button("Rename") {
             model.requestInlineRenameActiveSelection()
         }

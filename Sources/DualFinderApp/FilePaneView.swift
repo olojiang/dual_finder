@@ -48,6 +48,7 @@ struct FilePaneView: View {
     @State private var terminalResizeStartHeight: CGFloat?
     @State private var terminalResizeAccumulatedDelta: CGFloat = 0
     @State private var terminalResizePreviewHeight: CGFloat?
+    @State private var fileListRenderLimit = 2_000
     @State private var isSimilarFileNavigatorEnabled = false
     @State private var similarFileGroupIndex = 0
     @State private var similarFileGroups: [SimilarFileNameGroup] = []
@@ -116,6 +117,10 @@ struct FilePaneView: View {
         .onAppear(perform: refreshToolbarVolumeEntries)
         .onAppear {
             model.refreshAndroidDevicesForToolbar()
+            terminalModel.resize(to: model.terminalHeight(for: side))
+        }
+        .onChange(of: model.pane(for: side).selectedURL) { _, _ in
+            fileListRenderLimit = 2_000
         }
         .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)) { _ in
             refreshToolbarVolumeEntries()
@@ -297,6 +302,14 @@ struct FilePaneView: View {
                 .onAppear {
                     isPathFieldFocused = true
                 }
+        } else if !model.isAndroidPane(side) {
+            PathBreadcrumbBar(
+                components: PathBreadcrumbBuilder.components(for: model.pane(for: side).selectedURL),
+                onSelect: { url in
+                    model.navigate(side, to: url)
+                },
+                onEditPath: beginPathEditing
+            )
         } else {
             Text(model.displayPath(for: side))
                 .font(.system(.caption, design: .monospaced))
@@ -553,7 +566,9 @@ struct FilePaneView: View {
     }
 
     private var fileList: some View {
-        let visibleFileItems = visibleItems
+        let allVisibleItems = visibleItems
+        let visibleFileItems = Array(allVisibleItems.prefix(fileListRenderLimit))
+        let hasMoreItems = fileListRenderLimit < allVisibleItems.count
         let selectionSnapshot = FileSelectionSnapshot(selection: model.pane(for: side).selectedItemURLs)
 
         return VStack(spacing: 0) {
@@ -611,6 +626,23 @@ struct FilePaneView: View {
                                             )
                                         }
                                     }
+                            }
+                            if hasMoreItems {
+                                HStack {
+                                    Text("Showing \(visibleFileItems.count) of \(allVisibleItems.count) items")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                    Spacer()
+                                    Button("Load More") {
+                                        fileListRenderLimit += 2_000
+                                    }
+                                    .font(.caption2)
+                                }
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 8)
+                                .onAppear {
+                                    fileListRenderLimit += 2_000
+                                }
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -844,6 +876,7 @@ struct FilePaneView: View {
                             onDragEnded: {
                                 if let terminalResizePreviewHeight {
                                     terminalModel.resize(to: terminalResizePreviewHeight)
+                                    model.setTerminalHeight(terminalResizePreviewHeight, for: side)
                                 }
                                 resetTerminalResize()
                             }

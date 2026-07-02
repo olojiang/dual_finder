@@ -602,6 +602,65 @@ final class DualFinderViewModel: ObservableObject {
         ])
     }
 
+    func selectSameExtension(on side: PaneSide) {
+        activatePane(side)
+        let paneItems = items(for: side)
+        let reference = orderedSelection(pane(for: side).selectedItemURLs, on: side).first
+        let urls = ConditionalFileSelection.matchingExtension(
+            reference?.pathExtension ?? "",
+            in: paneItems,
+            referenceURL: reference
+        )
+        applyConditionalSelection(urls, on: side, label: "same extension")
+    }
+
+    func selectModifiedToday(on side: PaneSide) {
+        activatePane(side)
+        let urls = ConditionalFileSelection.modifiedToday(in: items(for: side))
+        applyConditionalSelection(urls, on: side, label: "modified today")
+    }
+
+    func selectLargerThan100MB(on side: PaneSide) {
+        activatePane(side)
+        let urls = ConditionalFileSelection.largerThan(bytes: 100 * 1024 * 1024, in: items(for: side))
+        applyConditionalSelection(urls, on: side, label: "larger than 100 MB")
+    }
+
+    func switchPane() {
+        let next: PaneSide = activePaneSide == .left ? .right : .left
+        requestPaneFocus(next, requestID: UUID().uuidString, source: "tab")
+        activatePane(next)
+        statusMessage = "Focused \(next.rawValue) pane"
+    }
+
+    func terminalHeight(for side: PaneSide) -> CGFloat {
+        let stored = side == .left ? uiLayoutPreferences.leftTerminalHeight : uiLayoutPreferences.rightTerminalHeight
+        return CGFloat(stored ?? 220)
+    }
+
+    func setTerminalHeight(_ height: CGFloat, for side: PaneSide) {
+        var preferences = uiLayoutPreferences
+        let clamped = Double(EmbeddedTerminalPaneModel.clampedHeight(height))
+        switch side {
+        case .left:
+            preferences.leftTerminalHeight = clamped
+        case .right:
+            preferences.rightTerminalHeight = clamped
+        }
+        uiLayoutPreferences = preferences
+        commitUILayoutPreferences()
+    }
+
+    private func applyConditionalSelection(_ urls: Set<URL>, on side: PaneSide, label: String) {
+        setSelection(urls, for: side)
+        statusMessage = urls.isEmpty ? "No items matched \(label)" : "Selected \(urls.count) item(s) (\(label))"
+        logger.debug("selection", "conditional", metadata: [
+            "side": side.rawValue,
+            "label": label,
+            "count": "\(urls.count)"
+        ])
+    }
+
     func requestInlineRenameActiveSelection() {
         let side = activePaneSide
         let selected = pane(for: side).selectedItemURLs
