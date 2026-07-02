@@ -2903,6 +2903,24 @@ final class DualFinderViewModel: ObservableObject {
             $0.status = .running
             $0.message = "Running"
         }
+        logger.info("file-operation", "operation.started", metadata: [
+            "id": request.id.uuidString,
+            "kind": request.kind.rawValue,
+            "count": "\(request.sources.count)",
+            "destination": request.destination?.path ?? "",
+            "sources": request.sources.map(\.path).joined(separator: "|")
+        ])
+        recordFileOperationProgress(
+            FileOperationProgress(
+                completedBytes: 0,
+                totalBytes: 0,
+                completedItems: 0,
+                totalItems: request.sources.count,
+                currentItem: request.sources.first,
+                elapsedSeconds: 0
+            ),
+            for: request.id
+        )
 
         let id = request.id
         let kind = request.kind
@@ -2915,9 +2933,10 @@ final class DualFinderViewModel: ObservableObject {
             Self.fileConflictPreviews(for: sources, destinationDirectory: $0)
         } ?? []
         let androidFileService = androidFileService
+        let operationLogger = logger
 
         Task.detached(priority: .userInitiated) { [weak self] in
-            let service = FileOperationService(logger: nil)
+            let service = FileOperationService(logger: operationLogger)
             var applyAllResolution: FileOperationConflictResolution?
 
             func resolveConflict(_ conflict: FileOperationConflict) -> FileOperationConflictResolution {

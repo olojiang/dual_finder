@@ -124,6 +124,32 @@ struct FileOperationQueueModelsTests {
         #expect(previews[1].source == smallerSource)
         #expect(previews[1].largerWinsResolution == .skip)
     }
+
+    @Test("scanning progress shows scanned item count")
+    func scanningProgressShowsScannedItemCount() {
+        let operation = QueuedFileOperation(
+            id: UUID(),
+            kind: .move,
+            sources: [URL(fileURLWithPath: "/tmp/big-folder", isDirectory: true)],
+            destination: URL(fileURLWithPath: "/tmp/out", isDirectory: true),
+            createdAt: Date(),
+            status: .running,
+            progress: FileOperationProgress(
+                completedBytes: 0,
+                totalBytes: 0,
+                completedItems: 0,
+                totalItems: 0,
+                currentItem: URL(fileURLWithPath: "/tmp/big-folder/nested.bin"),
+                scannedItems: 250,
+                elapsedSeconds: 3.5
+            ),
+            message: "Running",
+            finishedAt: nil
+        )
+
+        #expect(operation.progressDetailText.contains("Scanning 250 item(s)"))
+        #expect(operation.progressDetailText.contains("nested.bin"))
+    }
 }
 
 private final class AppTemporaryDirectory {

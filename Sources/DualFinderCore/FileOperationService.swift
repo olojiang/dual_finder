@@ -749,8 +749,27 @@ public struct FileOperationService {
             self.cancellation = cancellation
             self.progress = progress
             var plan = OperationPlan()
+            var scannedItems = 0
+            let startedAt = Date()
+            func reportScanning(_ count: Int, currentItem: URL?) {
+                progress?(FileOperationProgress(
+                    completedBytes: 0,
+                    totalBytes: 0,
+                    completedItems: 0,
+                    totalItems: 0,
+                    currentItem: currentItem,
+                    scannedItems: count,
+                    elapsedSeconds: Date().timeIntervalSince(startedAt)
+                ))
+            }
+            reportScanning(0, currentItem: sources.first)
             for source in sources {
-                try Self.scan(source, fileManager: fileManager, plan: &plan)
+                try Self.scan(source, fileManager: fileManager, plan: &plan) { item in
+                    scannedItems += 1
+                    if scannedItems == 1 || scannedItems % 100 == 0 {
+                        reportScanning(scannedItems, currentItem: item)
+                    }
+                }
             }
             totalBytes = plan.totalBytes
             totalItems = plan.totalItems
@@ -785,9 +804,15 @@ public struct FileOperationService {
             ))
         }
 
-        private static func scan(_ url: URL, fileManager: FileManager, plan: inout OperationPlan) throws {
+        private static func scan(
+            _ url: URL,
+            fileManager: FileManager,
+            plan: inout OperationPlan,
+            onItemScanned: (URL) -> Void
+        ) throws {
             let values = try url.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
             plan.totalItems += 1
+            onItemScanned(url)
             if values.isRegularFile == true {
                 plan.totalBytes += Int64(values.fileSize ?? 0)
                 return
@@ -800,7 +825,7 @@ public struct FileOperationService {
                 options: []
             )
             for child in children {
-                try scan(child, fileManager: fileManager, plan: &plan)
+                try scan(child, fileManager: fileManager, plan: &plan, onItemScanned: onItemScanned)
             }
         }
     }

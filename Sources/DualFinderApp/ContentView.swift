@@ -570,8 +570,13 @@ private struct OperationQueueBar: View {
                                     .lineLimit(1)
                                     .truncationMode(.middle)
                             }
-                            ProgressView(value: operation.fractionCompleted ?? 0)
-                                .progressViewStyle(.linear)
+                            if operation.progress?.scannedItems ?? 0 > 0, operation.fractionCompleted == nil {
+                                ProgressView()
+                                    .progressViewStyle(.linear)
+                            } else {
+                                ProgressView(value: operation.fractionCompleted ?? 0)
+                                    .progressViewStyle(.linear)
+                            }
                         }
                         IconButton(systemName: "xmark.circle", help: "Cancel operation") {
                             model.cancelFileOperation(operation.id)

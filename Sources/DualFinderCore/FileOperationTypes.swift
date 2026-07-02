@@ -36,6 +36,7 @@ public struct FileOperationProgress: Sendable, Equatable {
     public let copiedBytes: Int64
     public let skippedItems: Int
     public let skippedBytes: Int64
+    public let scannedItems: Int
     public let elapsedSeconds: TimeInterval?
 
     public init(
@@ -49,6 +50,7 @@ public struct FileOperationProgress: Sendable, Equatable {
         copiedBytes: Int64 = 0,
         skippedItems: Int = 0,
         skippedBytes: Int64 = 0,
+        scannedItems: Int = 0,
         elapsedSeconds: TimeInterval? = nil
     ) {
         self.completedBytes = completedBytes
@@ -61,6 +63,7 @@ public struct FileOperationProgress: Sendable, Equatable {
         self.copiedBytes = copiedBytes
         self.skippedItems = skippedItems
         self.skippedBytes = skippedBytes
+        self.scannedItems = scannedItems
         self.elapsedSeconds = elapsedSeconds
     }
 
