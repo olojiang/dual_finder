@@ -588,6 +588,53 @@ struct FilePaneInteractionTests {
         #expect(mouseUpSelection == [urls[0], urls[1]])
     }
 
+    @Test("shift click extends from the latest command-selected anchor and preserves earlier ranges")
+    func shiftClickPreservesEarlierIndependentRanges() {
+        let urls = fileURLs(["a.txt", "b.txt", "c.txt", "d.txt", "e.txt", "f.txt", "g.txt", "h.txt", "i.txt", "j.txt"])
+        let firstSelection = FileRowSelectionReducer.selectionAfterMouseDown(
+            target: urls[0],
+            currentSelection: [],
+            orderedURLs: urls,
+            modifierFlags: []
+        ) ?? []
+        let firstRange = FileRowSelectionReducer.selectionAfterMouseDown(
+            target: urls[1],
+            currentSelection: firstSelection,
+            orderedURLs: urls,
+            anchorURL: urls[0],
+            modifierFlags: [.shift]
+        ) ?? []
+        let selectionAfterFirstCommandClick = FileRowSelectionReducer.selectionAfterMouseUp(
+            target: urls[3],
+            currentSelection: firstRange,
+            orderedURLs: [],
+            modifierFlags: [.command]
+        ) ?? []
+
+        let selectionAfterSecondRange = FileRowSelectionReducer.selectionAfterMouseDown(
+            target: urls[5],
+            currentSelection: selectionAfterFirstCommandClick,
+            orderedURLs: urls,
+            anchorURL: urls[3],
+            modifierFlags: [.shift]
+        ) ?? []
+        let selectionAfterSecondCommandClick = FileRowSelectionReducer.selectionAfterMouseUp(
+            target: urls[7],
+            currentSelection: selectionAfterSecondRange,
+            orderedURLs: [],
+            modifierFlags: [.command]
+        ) ?? []
+        let selectionAfterThirdRange = FileRowSelectionReducer.selectionAfterMouseDown(
+            target: urls[9],
+            currentSelection: selectionAfterSecondCommandClick,
+            orderedURLs: urls,
+            anchorURL: urls[7],
+            modifierFlags: [.shift]
+        ) ?? []
+
+        #expect(selectionAfterThirdRange == Set([urls[0], urls[1], urls[3], urls[4], urls[5], urls[7], urls[8], urls[9]]))
+    }
+
     @Test("selection snapshot matches exact and standardized file URLs")
     func selectionSnapshotMatchesExactAndStandardizedFileURLs() {
         let exact = URL(fileURLWithPath: "/tmp/DualFinder/a.txt").standardizedFileURL

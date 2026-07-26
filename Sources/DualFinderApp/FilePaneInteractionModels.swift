@@ -100,6 +100,7 @@ enum FileRowSelectionReducer {
         target: URL,
         currentSelection: Set<URL>,
         orderedURLs: [URL],
+        anchorURL: URL? = nil,
         modifierFlags: NSEvent.ModifierFlags
     ) -> Set<URL>? {
         if modifierFlags.contains(.command) {
@@ -107,7 +108,12 @@ enum FileRowSelectionReducer {
         }
 
         if modifierFlags.contains(.shift) {
-            return rangeSelection(to: target, currentSelection: currentSelection, orderedURLs: orderedURLs)
+            return rangeSelection(
+                to: target,
+                currentSelection: currentSelection,
+                orderedURLs: orderedURLs,
+                anchorURL: anchorURL
+            )
         }
 
         return currentSelection.contains(target) ? nil : [target]
@@ -140,13 +146,16 @@ enum FileRowSelectionReducer {
     private static func rangeSelection(
         to target: URL,
         currentSelection: Set<URL>,
-        orderedURLs: [URL]
+        orderedURLs: [URL],
+        anchorURL: URL?
     ) -> Set<URL> {
         guard let targetIndex = orderedURLs.firstIndex(of: target) else { return [target] }
         let selectedIndexes = currentSelection.compactMap { orderedURLs.firstIndex(of: $0) }
-        let anchorIndex = selectedIndexes.min() ?? targetIndex
+        let anchorIndex = anchorURL.flatMap { orderedURLs.firstIndex(of: $0) }
+            ?? selectedIndexes.min()
+            ?? targetIndex
         let bounds = min(anchorIndex, targetIndex)...max(anchorIndex, targetIndex)
-        return Set(orderedURLs[bounds])
+        return currentSelection.union(orderedURLs[bounds])
     }
 }
 

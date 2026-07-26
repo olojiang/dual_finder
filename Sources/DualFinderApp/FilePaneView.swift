@@ -58,6 +58,7 @@ struct FilePaneView: View {
     @State private var handledSimilarFileGroupIDs: Set<String> = []
     @State private var visuallyDeletedSimilarFileURLs: Set<URL> = []
     @State private var fileListKeyboardAnchorURL: URL?
+    @State private var fileListSelectionAnchorURL: URL?
     @State private var toolbarVolumeEntries: [MountedVolumeLocation] = []
     @FocusState private var isFileListFocused: Bool
     @FocusState private var isPathFieldFocused: Bool
@@ -1420,6 +1421,7 @@ struct FilePaneView: View {
         handledSimilarFileGroupIDs.removeAll()
         visuallyDeletedSimilarFileURLs.removeAll()
         fileListKeyboardAnchorURL = nil
+        fileListSelectionAnchorURL = nil
     }
 
     private func clearSimilarFileReviewCachesAfterExit() {
@@ -1918,6 +1920,9 @@ struct FilePaneView: View {
         guard renamingURL == nil else { return }
 
         let startedAt = Date()
+        if !modifierFlags.contains(.shift) {
+            fileListSelectionAnchorURL = url
+        }
         fileListKeyboardAnchorURL = url
         if isSimilarFileNavigatorEnabled {
             updateSimilarFileGroupIndex(containing: url)
@@ -1932,6 +1937,7 @@ struct FilePaneView: View {
                 target: url,
                 currentSelection: model.pane(for: side).selectedItemURLs,
                 orderedURLs: orderedURLs,
+                anchorURL: fileListSelectionAnchorURL,
                 modifierFlags: modifierFlags
             ),
             source: "file-row.mouse-down"
