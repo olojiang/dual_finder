@@ -24,6 +24,15 @@ public struct DirectoryComparisonEntry: Identifiable, Hashable, Sendable {
 }
 
 public struct DirectoryComparisonService {
+    private static let snapshotResourceKeys: Set<URLResourceKey> = [
+        .isDirectoryKey,
+        .isRegularFileKey,
+        .isSymbolicLinkKey,
+        .fileSizeKey,
+        .contentModificationDateKey,
+        .isHiddenKey
+    ]
+
     private let fileManager: FileManager
 
     public init(fileManager: FileManager = .default) {
@@ -70,18 +79,10 @@ public struct DirectoryComparisonService {
 
     private func snapshot(root: URL, includeHidden: Bool) throws -> [String: SnapshotItem] {
         let resolvedRootPath = root.resolvingSymlinksInPath().path
-        let keys: [URLResourceKey] = [
-            .isDirectoryKey,
-            .isRegularFileKey,
-            .isSymbolicLinkKey,
-            .fileSizeKey,
-            .contentModificationDateKey,
-            .isHiddenKey
-        ]
         let options: FileManager.DirectoryEnumerationOptions = includeHidden ? [] : [.skipsHiddenFiles]
         guard let enumerator = fileManager.enumerator(
             at: root,
-            includingPropertiesForKeys: keys,
+            includingPropertiesForKeys: Array(Self.snapshotResourceKeys),
             options: options
         ) else {
             return [:]
@@ -89,7 +90,7 @@ public struct DirectoryComparisonService {
 
         var result: [String: SnapshotItem] = [:]
         for case let url as URL in enumerator {
-            let values = try url.resourceValues(forKeys: Set(keys))
+            let values = try url.resourceValues(forKeys: Self.snapshotResourceKeys)
             guard includeHidden || values.isHidden != true else { continue }
             let resolvedPath = url.resolvingSymlinksInPath().path
             let relativePath: String

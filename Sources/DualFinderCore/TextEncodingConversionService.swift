@@ -101,7 +101,7 @@ public final class TextEncodingConversionCache: @unchecked Sendable {
     private let maxEntries: Int
     private let lock = NSLock()
     private var entries: [String: Entry] = [:]
-    private var accessOrder: [String] = []
+    private var accessOrder = OrderedAccessTracker<String>()
     private var entriesLoaded = false
     private var batchDepth = 0
     private var isDirty = false
@@ -175,14 +175,16 @@ public final class TextEncodingConversionCache: @unchecked Sendable {
         defer { lock.unlock() }
         guard entriesLoaded, batchDepth == 0, !isDirty else { return }
         entries = [:]
-        accessOrder = []
+        accessOrder.clear()
         entriesLoaded = false
     }
 
     private func ensureEntriesLoaded() {
         guard !entriesLoaded else { return }
         entries = Self.load(from: storageURL)
-        accessOrder = Array(entries.keys)
+        for key in entries.keys {
+            accessOrder.touch(key)
+        }
         trimEntriesIfNeeded()
         if isDirty {
             let snapshot = entries
@@ -193,15 +195,11 @@ public final class TextEncodingConversionCache: @unchecked Sendable {
     }
 
     private func touchEntry(key: String) {
-        if let index = accessOrder.firstIndex(of: key) {
-            accessOrder.remove(at: index)
-        }
-        accessOrder.append(key)
+        accessOrder.touch(key)
     }
 
     private func trimEntriesIfNeeded() {
-        while entries.count > maxEntries, let oldest = accessOrder.first {
-            accessOrder.removeFirst()
+        while entries.count > maxEntries, let oldest = accessOrder.removeOldest() {
             entries.removeValue(forKey: oldest)
             isDirty = true
         }
@@ -393,28 +391,30 @@ public struct TextEncodingConversionService {
         cache?.beginBatch()
         defer {
             try? cache?.endBatch()
+            cache?.releaseLoadedEntries()
         }
 
         var results: [TextEncodingConversionResult] = []
         results.reserveCapacity(urls.count)
         for (index, url) in urls.enumerated() {
-            let result: TextEncodingConversionResult
-            do {
-                result = try convertFileToUTF8(url)
-            } catch {
-                let standardizedURL = url.standardizedFileURL
-                let message = error.localizedDescription
-                logger?.error("text-encoding", "file.failed", metadata: [
-                    "path": standardizedURL.path,
-                    "error": message
-                ])
-                result = TextEncodingConversionResult(
-                    originalURL: standardizedURL,
-                    finalURL: standardizedURL,
-                    detectedEncoding: nil,
-                    status: .failed,
-                    diagnostic: message
-                )
+            let result: TextEncodingConversionResult = autoreleasepool {
+                do {
+                    return try convertFileToUTF8(url)
+                } catch {
+                    let standardizedURL = url.standardizedFileURL
+                    let message = error.localizedDescription
+                    logger?.error("text-encoding", "file.failed", metadata: [
+                        "path": standardizedURL.path,
+                        "error": message
+                    ])
+                    return TextEncodingConversionResult(
+                        originalURL: standardizedURL,
+                        finalURL: standardizedURL,
+                        detectedEncoding: nil,
+                        status: .failed,
+                        diagnostic: message
+                    )
+                }
             }
             results.append(result)
             if Self.shouldReportBatchProgress(
@@ -502,6 +502,19 @@ public struct TextEncodingConversionService {
             )
         }
 
+        if case .validUTF8(nulCount: 0, _) = streamingUTF8Validation(at: standardizedURL) {
+            let finalURL = try restoreUnknownEncodingNameIfNeeded(standardizedURL)
+            let finalFingerprint = finalURL == standardizedURL ? initialFingerprint : fileFingerprint(for: finalURL)
+            try cache?.markUTF8(for: finalURL, size: finalFingerprint?.size, modifiedAt: finalFingerprint?.modifiedAt)
+            logger?.info("text-encoding", "file.already-utf8", metadata: ["path": finalURL.path])
+            return TextEncodingConversionResult(
+                originalURL: standardizedURL,
+                finalURL: finalURL,
+                detectedEncoding: "utf-8",
+                status: .alreadyUTF8
+            )
+        }
+
         let data = try Data(contentsOf: standardizedURL)
         guard !data.isEmpty else {
             let finalURL = try restoreUnknownEncodingNameIfNeeded(standardizedURL)
@@ -586,10 +599,66 @@ public struct TextEncodingConversionService {
             return cachedEncoding
         }
 
+        if case .validUTF8(nulCount: 0, _) = streamingUTF8Validation(at: standardizedURL) {
+            try cache?.markEncoding("utf-8", for: standardizedURL, size: fingerprint?.size, modifiedAt: fingerprint?.modifiedAt)
+            return "utf-8"
+        }
+
         let data = try Data(contentsOf: standardizedURL)
         let label = data.isEmpty ? "utf-8" : (detectEncoding(for: data)?.label ?? "unknown")
         try cache?.markEncoding(label, for: standardizedURL, size: fingerprint?.size, modifiedAt: fingerprint?.modifiedAt)
         return label
+    }
+
+    private enum StreamingUTF8Result {
+        case validUTF8(nulCount: Int, totalBytes: Int)
+        case notUTF8
+        case unableToOpen
+    }
+
+    private func streamingUTF8Validation(at url: URL, chunkSize: Int = 64 * 1024) -> StreamingUTF8Result {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return .unableToOpen }
+        defer { try? handle.close() }
+
+        var carryOver = Data()
+        var nulCount = 0
+        var totalBytes = 0
+
+        while true {
+            let chunk = (try? handle.read(upToCount: chunkSize)) ?? Data()
+            if chunk.isEmpty {
+                if !carryOver.isEmpty {
+                    return .notUTF8
+                }
+                break
+            }
+            totalBytes += chunk.count
+
+            var data = carryOver + chunk
+            carryOver = Data()
+
+            if String(data: data, encoding: .utf8) != nil {
+                nulCount += data.filter { $0 == 0 }.count
+            } else {
+                var trimmed = 0
+                for trim in 1...3 {
+                    if data.count <= trim { break }
+                    let prefix = data.prefix(data.count - trim)
+                    if String(data: prefix, encoding: .utf8) != nil {
+                        nulCount += prefix.filter { $0 == 0 }.count
+                        carryOver = data.suffix(trim)
+                        trimmed = trim
+                        break
+                    }
+                }
+                if trimmed == 0 {
+                    return .notUTF8
+                }
+            }
+            data = Data()
+        }
+
+        return .validUTF8(nulCount: nulCount, totalBytes: totalBytes)
     }
 
     private func detectEncoding(for data: Data) -> DetectedTextEncoding? {

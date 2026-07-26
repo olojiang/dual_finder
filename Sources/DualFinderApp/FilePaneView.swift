@@ -123,13 +123,7 @@ struct FilePaneView: View {
         .onChange(of: model.pane(for: side).selectedURL) { _, _ in
             fileListRenderLimit = 2_000
         }
-        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)) { _ in
-            refreshToolbarVolumeEntries()
-        }
-        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didUnmountNotification)) { _ in
-            refreshToolbarVolumeEntries()
-        }
-        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didRenameVolumeNotification)) { _ in
+        .onChange(of: model.volumeRevision) { _, _ in
             refreshToolbarVolumeEntries()
         }
     }
@@ -140,7 +134,7 @@ struct FilePaneView: View {
             return
         }
         let url = model.pane(for: side).selectedURL
-        freeSpaceCapacity = (try? FileSystemService().availableCapacity(at: url)) ?? nil
+        freeSpaceCapacity = model.availableCapacity(at: url)
     }
 
     private var paneHeader: some View {

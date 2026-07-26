@@ -319,7 +319,7 @@ private struct CommonLocationsSidebar: View {
 
             ScrollView {
                 VStack(alignment: isCollapsed ? .center : .leading, spacing: 14) {
-                    sidebarSection("Pinned", entries: pinnedEntries)
+                    sidebarSection("Pinned", entries: Self.pinnedEntries)
                     if !volumeEntries.isEmpty {
                         volumeSection("Volumes", entries: volumeEntries)
                     }
@@ -336,18 +336,12 @@ private struct CommonLocationsSidebar: View {
         }
         .background(.bar.opacity(0.45))
         .onAppear(perform: refreshVolumeEntries)
-        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)) { _ in
-            refreshVolumeEntries()
-        }
-        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didUnmountNotification)) { _ in
-            refreshVolumeEntries()
-        }
-        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didRenameVolumeNotification)) { _ in
+        .onChange(of: model.volumeRevision) { _, _ in
             refreshVolumeEntries()
         }
     }
 
-    private var pinnedEntries: [FolderBookmarkEntry] {
+    private static let pinnedEntries: [FolderBookmarkEntry] = {
         let fileManager = FileManager.default
         return [
             fileManager.homeDirectoryForCurrentUser,
@@ -358,7 +352,7 @@ private struct CommonLocationsSidebar: View {
         ]
         .compactMap { $0 }
         .map { FolderBookmarkEntry(url: $0, isFavorite: false) }
-    }
+    }()
 
     private func sidebarSection(_ title: String, entries: [FolderBookmarkEntry]) -> some View {
         VStack(alignment: isCollapsed ? .center : .leading, spacing: 4) {

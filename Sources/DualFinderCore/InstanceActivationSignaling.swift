@@ -77,18 +77,38 @@ public final class InstanceActivationListener: @unchecked Sendable {
     private let socketURL: URL
     private let fileManager: FileManager
     private let onRequest: @Sendable () -> Void
+    private let socketFactory: @Sendable () -> Int32
+    private let closeDescriptor: @Sendable (Int32) -> Void
     private var serverFD: Int32 = -1
     private let queue = DispatchQueue(label: "com.local.dualfinder.activation-listener")
     private var source: DispatchSourceRead?
 
-    public init(
+    public convenience init(
         socketURL: URL? = nil,
         fileManager: FileManager = .default,
+        onRequest: @escaping @Sendable () -> Void
+    ) {
+        self.init(
+            socketURL: socketURL,
+            fileManager: fileManager,
+            socketFactory: { socket(AF_UNIX, SOCK_STREAM, 0) },
+            closeDescriptor: { close($0) },
+            onRequest: onRequest
+        )
+    }
+
+    init(
+        socketURL: URL? = nil,
+        fileManager: FileManager = .default,
+        socketFactory: @escaping @Sendable () -> Int32,
+        closeDescriptor: @escaping @Sendable (Int32) -> Void,
         onRequest: @escaping @Sendable () -> Void
     ) {
         self.socketURL = socketURL ?? InstanceActivationSignaling.socketURL(fileManager: fileManager)
         self.fileManager = fileManager
         self.onRequest = onRequest
+        self.socketFactory = socketFactory
+        self.closeDescriptor = closeDescriptor
     }
 
     @discardableResult
@@ -106,11 +126,12 @@ public final class InstanceActivationListener: @unchecked Sendable {
             try? fileManager.removeItem(at: socketURL)
         }
 
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        let fd = socketFactory()
         guard fd >= 0 else { return false }
 
         var addr = sockaddr_un()
         guard withUnsafeMutablePointer(to: &addr, { copyUnixSocketPath(socketURL.path, into: $0) }) else {
+            closeDescriptor(fd)
             return false
         }
 
@@ -120,12 +141,12 @@ public final class InstanceActivationListener: @unchecked Sendable {
             }
         }
         guard bound else {
-            close(fd)
+            closeDescriptor(fd)
             return false
         }
 
         guard listen(fd, 4) == 0 else {
-            close(fd)
+            closeDescriptor(fd)
             return false
         }
 
@@ -136,8 +157,8 @@ public final class InstanceActivationListener: @unchecked Sendable {
         readSource.setEventHandler { [weak self] in
             self?.acceptPendingConnections(on: fd)
         }
-        readSource.setCancelHandler { [fd] in
-            close(fd)
+        readSource.setCancelHandler { [fd, closeDescriptor] in
+            closeDescriptor(fd)
         }
         source = readSource
         readSource.resume()
@@ -145,12 +166,13 @@ public final class InstanceActivationListener: @unchecked Sendable {
     }
 
     public func stop() {
-        source?.cancel()
-        source = nil
-        if serverFD >= 0 {
-            close(serverFD)
-            serverFD = -1
+        if let source {
+            source.cancel()
+        } else if serverFD >= 0 {
+            closeDescriptor(serverFD)
         }
+        source = nil
+        serverFD = -1
         try? fileManager.removeItem(at: socketURL)
     }
 

@@ -761,6 +761,113 @@ struct TextEncodingConversionServiceTests {
         #expect(cache.cachedEncoding(for: oldest, size: 6, modifiedAt: modifiedAt) == nil)
     }
 
+    // MARK: - Fix 1: cache release after batch conversion
+
+    @Test("convertFilesToUTF8 releases cache entries after batch completion")
+    func convertFilesToUTF8ReleasesCacheEntriesAfterBatch() throws {
+        let root = try TemporaryDirectory()
+        let cacheURL = root.url.appendingPathComponent("encoding-cache.json")
+        let cache = TextEncodingConversionCache(storageURL: cacheURL)
+        let file = root.url.appendingPathComponent("utf8.txt")
+        try "hello".write(to: file, atomically: true, encoding: .utf8)
+
+        let service = TextEncodingConversionService(logger: CapturingLogger(), cache: cache)
+        _ = try service.convertFilesToUTF8([file])
+
+        #expect(cache.isLoadedInMemory == false)
+        #expect(cache.entryCount == 0)
+        #expect(FileManager.default.fileExists(atPath: cacheURL.path))
+    }
+
+    // MARK: - Fix 2: autoreleasepool in batch loop
+
+    @Test("batch conversion handles many mixed-encoding files correctly")
+    func batchConversionHandlesManyMixedEncodingFiles() throws {
+        let root = try TemporaryDirectory()
+        let files = (0..<60).map { index -> URL in
+            let url = root.url.appendingPathComponent("file-\(index).txt")
+            if index.isMultiple(of: 2) {
+                try? "utf8 content \(index) 中文".write(to: url, atomically: true, encoding: .utf8)
+            } else {
+                let text = "gbk content \(index) 简体"
+                try? text.data(using: encoding(named: "GBK"))?.write(to: url)
+            }
+            return url
+        }
+
+        let result = try TextEncodingConversionService(logger: CapturingLogger()).convertFilesToUTF8(files)
+
+        #expect(result.results.count == 60)
+        #expect(result.convertedCount == 30)
+        #expect(result.alreadyUTF8Count == 30)
+        #expect(result.failedCount == 0)
+        for file in files {
+            #expect(try String(contentsOf: file, encoding: .utf8).contains("content"))
+        }
+    }
+
+    // MARK: - Fix 3: streaming UTF-8 validation
+
+    @Test("large UTF-8 file is detected as already UTF-8")
+    func largeUTF8FileDetectedAsAlreadyUTF8() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("large-utf8.txt")
+        let line = "这是一行中文内容，用于测试大文件的 UTF-8 检测。\n"
+        let content = String(repeating: line, count: 10_000)
+        try content.write(to: file, atomically: true, encoding: .utf8)
+
+        let result = try TextEncodingConversionService(logger: CapturingLogger()).convertFileToUTF8(file)
+
+        #expect(result.status == .alreadyUTF8)
+        #expect(result.detectedEncoding == "utf-8")
+        #expect(try String(contentsOf: file, encoding: .utf8) == content)
+    }
+
+    @Test("large GBK file is converted correctly via fallback")
+    func largeGBKFileConvertedViaFallback() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("large-gbk.txt")
+        let line = "简体中文内容测试行\n"
+        let content = String(repeating: line, count: 10_000)
+        try #require(content.data(using: encoding(named: "GBK"))).write(to: file)
+
+        let result = try TextEncodingConversionService(logger: CapturingLogger()).convertFileToUTF8(file)
+
+        #expect(result.status == .converted)
+        #expect(result.detectedEncoding == "gbk")
+        #expect(try String(contentsOf: file, encoding: .utf8) == content)
+    }
+
+    @Test("large UTF-8 file with NUL bytes falls back to full read")
+    func largeUTF8WithNULBytesFallsBackToFullRead() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("large-utf8-nul.txt")
+        var data = Data(String(repeating: "中文内容\n", count: 10_000).utf8)
+        data.append(Data(repeating: 0, count: 2048))
+        try data.write(to: file)
+
+        let result = try TextEncodingConversionService(logger: CapturingLogger()).convertFileToUTF8(file)
+
+        // NUL bytes cause streaming fast path to be skipped; full-read path repairs and converts
+        #expect(result.status == .converted)
+        #expect(result.detectedEncoding?.hasPrefix("utf-8") == true)
+        // File should no longer contain NUL bytes after conversion
+        let convertedData = try Data(contentsOf: file)
+        #expect(!convertedData.contains(0))
+    }
+
+    @Test("detectFileEncoding returns utf-8 for large UTF-8 file")
+    func detectFileEncodingReturnsUTF8ForLargeFile() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("large-detect.txt")
+        let content = String(repeating: "检测编码内容行\n", count: 10_000)
+        try content.write(to: file, atomically: true, encoding: .utf8)
+
+        let encoding = try TextEncodingConversionService(logger: CapturingLogger()).detectFileEncoding(file)
+
+        #expect(encoding == "utf-8")
+    }
+
     private struct CacheProbeEntry: Codable {
         var size: Int64
         var modifiedAt: Date

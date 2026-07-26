@@ -13,6 +13,9 @@ public enum FolderSizeResolution: Equatable, Sendable {
 }
 
 public final class FolderSizeCache: @unchecked Sendable {
+    public static let defaultMaxEntries = 2_000
+    public static let defaultDebounceInterval: TimeInterval = 1.0
+
     private struct Entry: Codable {
         var size: Int64
         var modifiedAt: Date
@@ -20,31 +23,58 @@ public final class FolderSizeCache: @unchecked Sendable {
 
     private let storageURL: URL
     private let fileManager: FileManager
+    private let maxEntries: Int
+    private let debounceInterval: TimeInterval
     private let lock = NSLock()
     private var entries: [String: Entry]
+    private var accessOrder = OrderedAccessTracker<String>()
+    private var pendingSave: DispatchWorkItem?
+    private let saveQueue = DispatchQueue(label: "DualFinder.FolderSizeCache.save")
 
     public init(
         storageURL: URL = FolderSizeCache.defaultStorageURL(),
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        maxEntries: Int = FolderSizeCache.defaultMaxEntries,
+        debounceInterval: TimeInterval = FolderSizeCache.defaultDebounceInterval
     ) {
         self.storageURL = storageURL
         self.fileManager = fileManager
+        self.maxEntries = max(1, maxEntries)
+        self.debounceInterval = max(0, debounceInterval)
         entries = Self.load(from: storageURL)
+        for key in entries.keys {
+            accessOrder.touch(key)
+        }
+        trimEntriesIfNeeded()
     }
 
     public func size(for folder: URL, modifiedAt: Date?) -> Int64? {
         guard let modifiedAt else { return nil }
+        let key = normalizedPath(for: folder)
         lock.lock()
         defer { lock.unlock() }
-        guard let entry = entries[normalizedPath(for: folder)] else { return nil }
-        return entry.modifiedAt == modifiedAt ? entry.size : nil
+        guard let entry = entries[key], entry.modifiedAt == modifiedAt else { return nil }
+        touchEntry(key: key)
+        return entry.size
     }
 
     public func setSize(_ size: Int64, for folder: URL, modifiedAt: Date?) throws {
         guard let modifiedAt else { return }
+        let key = normalizedPath(for: folder)
         lock.lock()
-        entries[normalizedPath(for: folder)] = Entry(size: size, modifiedAt: modifiedAt)
-        let snapshot = entries
+        entries[key] = Entry(size: size, modifiedAt: modifiedAt)
+        touchEntry(key: key)
+        trimEntriesIfNeeded()
+        lock.unlock()
+        scheduleDebouncedSave()
+    }
+
+    public func flush() throws {
+        let snapshot: [String: Entry]
+        lock.lock()
+        pendingSave?.cancel()
+        pendingSave = nil
+        snapshot = entries
         lock.unlock()
         try save(snapshot)
     }
@@ -78,7 +108,36 @@ public final class FolderSizeCache: @unchecked Sendable {
         try data.write(to: storageURL, options: [.atomic])
     }
 
+    private func scheduleDebouncedSave() {
+        lock.lock()
+        pendingSave?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.performDebouncedSave()
+        }
+        pendingSave = work
+        lock.unlock()
+        saveQueue.asyncAfter(deadline: .now() + debounceInterval, execute: work)
+    }
+
+    private func performDebouncedSave() {
+        lock.lock()
+        pendingSave = nil
+        let latestSnapshot = entries
+        lock.unlock()
+        try? save(latestSnapshot)
+    }
+
     private func normalizedPath(for folder: URL) -> String {
         folder.standardizedFileURL.path
+    }
+
+    private func touchEntry(key: String) {
+        accessOrder.touch(key)
+    }
+
+    private func trimEntriesIfNeeded() {
+        while entries.count > maxEntries, let oldest = accessOrder.removeOldest() {
+            entries.removeValue(forKey: oldest)
+        }
     }
 }

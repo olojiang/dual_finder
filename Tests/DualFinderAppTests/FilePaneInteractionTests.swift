@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import Combine
 import Testing
 @testable import DualFinderApp
 @testable import DualFinderCore
@@ -505,6 +506,206 @@ struct FilePaneInteractionTests {
         }
 
         #expect(model.items(for: .left).first(where: { $0.url == uncachedFile.standardizedFileURL })?.textEncoding == "utf-8")
+    }
+
+    @MainActor
+    @Test("encoding scan batches @Published updates instead of one per file")
+    func encodingScanBatchesPublishedUpdates() async throws {
+        let root = try AppTestTemporaryDirectory()
+        let cacheURL = root.url.appendingPathComponent("encoding-cache.json")
+        let cache = TextEncodingConversionCache(storageURL: cacheURL)
+        let fileCount = 25
+        for index in 0..<fileCount {
+            try "content\(index)".write(
+                to: root.url.appendingPathComponent("file\(index).txt"),
+                atomically: true, encoding: .utf8
+            )
+        }
+
+        let (defaults, suiteName) = makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = DualFinderViewModel(
+            initialURL: root.url,
+            sortRuleStore: FolderSortRuleStore(defaults: defaults, key: "sort"),
+            paneSessionStore: PaneSessionStore(defaults: defaults, key: "session"),
+            folderBookmarkStore: FolderBookmarkStore(defaults: defaults, key: "bookmarks"),
+            textEncodingCache: cache,
+            uiLayoutPreferencesStore: UILayoutPreferencesStore(defaults: defaults, key: "layout"),
+            logger: AppTestLogger()
+        )
+
+        var changeCount = 0
+        let cancellable = model.objectWillChange.sink { _ in
+            changeCount += 1
+        }
+        defer { cancellable.cancel() }
+
+        model.setEncodingColumnVisible(true)
+
+        for _ in 0..<60 {
+            let items = model.items(for: .left)
+            let detected = items.filter { $0.textEncoding != nil }.count
+            if detected == fileCount { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+
+        let items = model.items(for: .left)
+        #expect(items.filter { $0.textEncoding == "utf-8" }.count == fileCount)
+        // With batching, changeCount should be well under fileCount.
+        // (setEncodingColumnVisible triggers a refresh + initial load, so allow some overhead.)
+        #expect(changeCount < fileCount)
+    }
+
+    @MainActor
+    @Test("calculating selected folder sizes batches refresh to a single pass")
+    func calculateSelectedFolderSizesBatchesRefresh() async throws {
+        let root = try AppTestTemporaryDirectory()
+        let folderCount = 3
+        for index in 0..<folderCount {
+            let folder = root.url.appendingPathComponent("folder\(index)")
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try Data(repeating: UInt8(index + 1), count: (index + 1) * 10)
+                .write(to: folder.appendingPathComponent("data.bin"))
+        }
+
+        let (defaults, suiteName) = makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = makeLocalModel(initialURL: root.url)
+
+        await model.refreshAndWait(.left)
+        #expect(model.items(for: .left).count == folderCount)
+
+        let allURLs = Set(model.items(for: .left).map(\.url))
+        model.replaceSelection(allURLs, on: .left, source: "test")
+
+        // Track how many times the items array actually changes (directory rescans).
+        var itemChangeCount = 0
+        var lastSignature: String? = nil
+        let pollTask = Task {
+            while !Task.isCancelled {
+                let signature = model.items(for: .left)
+                    .map { "\($0.url.path):\($0.size ?? -1)" }
+                    .joined(separator: "|")
+                if signature != lastSignature {
+                    lastSignature = signature
+                    itemChangeCount += 1
+                }
+                try? await Task.sleep(nanoseconds: 5_000_000)
+            }
+        }
+        defer { pollTask.cancel() }
+
+        model.calculateSelectedFolderSizes(on: .left)
+
+        // Wait for all sizes to appear
+        for _ in 0..<60 {
+            let items = model.items(for: .left)
+            if items.allSatisfy({ $0.size != nil }) { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        let items = model.items(for: .left)
+        let sizes = items.sorted { $0.name < $1.name }.map(\.size)
+        #expect(sizes == [10, 20, 30])
+        // With batched refresh, itemChangeCount should be:
+        // 1 (initial listing) + 1 (final refresh with sizes) = 2.
+        // Without batching it would be 1 + folderCount = 4.
+        #expect(itemChangeCount <= 3)
+    }
+
+    @MainActor
+    @Test("pasteboard revision updates when pasteboard changes externally")
+    func pasteboardRevisionUpdatesOnExternalChange() async throws {
+        let root = try AppTestTemporaryDirectory()
+        let model = makeLocalModel(initialURL: root.url)
+
+        let initialRevision = model.pasteboardRevision
+
+        // Simulate an external pasteboard change (e.g., another app copied files)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString("external-change-test", forType: .string)
+
+        // Wait for the poll to detect the change
+        for _ in 0..<20 {
+            if model.pasteboardRevision != initialRevision { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+
+        #expect(model.pasteboardRevision != initialRevision)
+    }
+
+    @MainActor
+    @Test("ViewModel flushes folder size cache on deinit")
+    func viewModelFlushesCacheOnDeinit() async throws {
+        let root = try AppTestTemporaryDirectory()
+        let cacheURL = root.url.appendingPathComponent("size-cache.json")
+        let cache = FolderSizeCache(storageURL: cacheURL, debounceInterval: 60)
+        let (defaults, suiteName) = makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        do {
+            let model = DualFinderViewModel(
+                initialURL: root.url,
+                sortRuleStore: FolderSortRuleStore(defaults: defaults, key: "sort"),
+                paneSessionStore: PaneSessionStore(defaults: defaults, key: "session"),
+                folderBookmarkStore: FolderBookmarkStore(defaults: defaults, key: "bookmarks"),
+                folderSizeCache: cache,
+                uiLayoutPreferencesStore: UILayoutPreferencesStore(defaults: defaults, key: "layout"),
+                logger: AppTestLogger()
+            )
+            // Write to cache (debounced, won't persist yet)
+            try cache.setSize(42, for: root.url, modifiedAt: Date(timeIntervalSince1970: 500))
+            #expect(cache.size(for: root.url, modifiedAt: Date(timeIntervalSince1970: 500)) == 42)
+            // Model goes out of scope — deinit should flush
+            _ = model
+        }
+
+        // Reload from disk — data should be persisted by deinit flush
+        let reloaded = FolderSizeCache(storageURL: cacheURL, debounceInterval: 60)
+        #expect(reloaded.size(for: root.url, modifiedAt: Date(timeIntervalSince1970: 500)) == 42)
+    }
+
+    @MainActor
+    @Test("compress selection to zip creates archive and clears operation flag")
+    func compressSelectionToZipCreatesArchive() async throws {
+        let root = try AppTestTemporaryDirectory()
+        let model = makeLocalModel(initialURL: root.url)
+        try "hello".write(to: root.url.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+        await model.refreshAndWait(.left)
+
+        let fileURL = model.items(for: .left).first!.url
+        model.replaceSelection([fileURL], on: .left, source: "test")
+        model.compressSelectionToZip(on: .left)
+
+        for _ in 0..<40 {
+            try await Task.sleep(nanoseconds: 50_000_000)
+            if FileManager.default.fileExists(atPath: root.url.appendingPathComponent("a.zip").path) {
+                break
+            }
+        }
+
+        await model.refreshAndWait(.left)
+        let names = model.items(for: .left).map(\.name)
+        #expect(names.contains("a.zip"))
+    }
+
+    @MainActor
+    @Test("volume revision increments on volume mount/unmount notification")
+    func volumeRevisionIncrementsOnNotification() async throws {
+        let root = try AppTestTemporaryDirectory()
+        let model = makeLocalModel(initialURL: root.url)
+
+        let initial = model.volumeRevision
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didMountNotification, object: nil)
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        #expect(model.volumeRevision == initial + 1)
+
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didUnmountNotification, object: nil)
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        #expect(model.volumeRevision == initial + 2)
     }
 
     @Test("formats file sizes with three fractional digits")

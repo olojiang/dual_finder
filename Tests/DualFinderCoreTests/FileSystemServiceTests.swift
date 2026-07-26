@@ -81,6 +81,17 @@ struct FileSystemServiceTests {
         #expect(includingHidden.map(\.name).contains(".hidden.txt"))
     }
 
+    @Test("cancels a directory listing before reading its entries")
+    func cancelsDirectoryListingBeforeReadingEntries() throws {
+        let root = try TemporaryDirectory()
+        let cancellation = FileOperationCancellation()
+        cancellation.cancel()
+
+        #expect(throws: FileOperationError.cancelled) {
+            try FileSystemService().contents(of: root.url, cancellation: cancellation)
+        }
+    }
+
     @Test("lists recursive file contents without folders")
     func listsRecursiveFileContentsWithoutFolders() throws {
         let root = try TemporaryDirectory()
@@ -114,6 +125,17 @@ struct FileSystemServiceTests {
 
         #expect(visibleOnly.map(\.name) == ["visible.txt"])
         #expect(includingHidden.map(\.name).contains(".hidden.txt"))
+    }
+
+    @Test("cancels recursive listing before enumerating a directory")
+    func cancelsRecursiveListingBeforeEnumeratingDirectory() throws {
+        let root = try TemporaryDirectory()
+        let cancellation = FileOperationCancellation()
+        cancellation.cancel()
+
+        #expect(throws: FileOperationError.cancelled) {
+            try FileSystemService().recursiveFileContents(of: root.url, cancellation: cancellation)
+        }
     }
 
     @Test("returns nil parent for filesystem root")
@@ -267,6 +289,33 @@ struct FileSystemServiceTests {
 
         let forced = try service.calculateFolderSize(at: folder, cache: cache, forceRecalculate: true)
         #expect(forced == .computed(12))
+    }
+
+    @Test("calculateFolderSize without cache computes size without disk I/O")
+    func calculateFolderSizeWithoutCache() throws {
+        let root = try TemporaryDirectory()
+        let folder = root.url.appendingPathComponent("Folder")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data(repeating: 1, count: 5).write(to: folder.appendingPathComponent("a.bin"))
+
+        let result = try FileSystemService().calculateFolderSize(at: folder)
+
+        #expect(result == .computed(5))
+    }
+
+    @Test("calculateFolderSize without cache returns computed on every call")
+    func calculateFolderSizeWithoutCacheAlwaysComputes() throws {
+        let root = try TemporaryDirectory()
+        let folder = root.url.appendingPathComponent("Folder")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data(repeating: 1, count: 5).write(to: folder.appendingPathComponent("a.bin"))
+
+        let service = FileSystemService()
+        let first = try service.calculateFolderSize(at: folder)
+        let second = try service.calculateFolderSize(at: folder)
+
+        #expect(first == .computed(5))
+        #expect(second == .computed(5))
     }
 
     private func setModificationDate(_ date: Date, for url: URL) throws {

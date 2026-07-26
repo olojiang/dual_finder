@@ -105,10 +105,6 @@ private enum AndroidPaneTransferError: LocalizedError {
     }
 }
 
-private extension Notification.Name {
-    static let pasteboardChanged = Notification.Name("NSPasteboardChangedNotification")
-}
-
 private final class TextEncodingScanCancellation: @unchecked Sendable {
     private let lock = NSLock()
     private var cancelled = false
@@ -150,6 +146,7 @@ final class DualFinderViewModel: ObservableObject {
     @Published var mirrorConfirmationRequest: MirrorConfirmationRequest?
     @Published var inlineRenameRequest: InlineRenameRequest?
     @Published private(set) var pasteboardRevision = 0
+    @Published private(set) var volumeRevision = 0
     @Published private(set) var fileOperationQueue: [QueuedFileOperation] = []
     @Published var fileConflictDialogRequest: FileConflictDialogRequest? {
         didSet {
@@ -208,8 +205,12 @@ final class DualFinderViewModel: ObservableObject {
             self?.flushFileOperationProgress(for: id)
         }
     }
-    private var memoryDiagnosticsTimer: Timer?
+    nonisolated(unsafe) private var memoryDiagnosticsTimer: Timer?
+    nonisolated(unsafe) private var pasteboardPollTimer: Timer?
+    nonisolated(unsafe) private var volumeObserverTokens: [NSObjectProtocol] = []
+    private var lastPasteboardChangeCount: Int = NSPasteboard.general.changeCount
     private var refreshGeneration: [PaneSide: UInt64] = [:]
+    private var refreshCancellations: [PaneSide: FileOperationCancellation] = [:]
     private var isArchiveOperationRunning = false
     private var activeTabDrag: (tabID: UUID, sourceSide: PaneSide)?
     @Published private var isTextEncodingConversionRunning = false
@@ -255,6 +256,15 @@ final class DualFinderViewModel: ObservableObject {
             "rightURL": rightPane.selectedURL.path
         ])
         setupPasteboardObservation()
+        setupVolumeObservation()
+    }
+
+    nonisolated deinit {
+        memoryDiagnosticsTimer?.invalidate()
+        pasteboardPollTimer?.invalidate()
+        volumeObserverTokens.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) }
+        try? folderSizeCache.flush()
+        try? operationScanCache.flush()
     }
 
     func startMemoryDiagnosticsMonitoring() {
@@ -419,6 +429,10 @@ final class DualFinderViewModel: ObservableObject {
 
     func hasSelection(on side: PaneSide) -> Bool {
         !pane(for: side).selectedItemURLs.isEmpty
+    }
+
+    func availableCapacity(at url: URL) -> Int64? {
+        try? fileSystem.availableCapacity(at: url)
     }
 
     var activeSelectionCount: Int {
@@ -1335,6 +1349,9 @@ final class DualFinderViewModel: ObservableObject {
     }
 
     func refresh(_ side: PaneSide, completion: (@MainActor () -> Void)? = nil) {
+        refreshCancellations[side]?.cancel()
+        refreshCancellations[side] = nil
+
         if isAndroidPane(side) {
             refreshAndroidDirectory(on: side)
             completion?()
@@ -1383,9 +1400,11 @@ final class DualFinderViewModel: ObservableObject {
         let folderSizeCache = folderSizeCache
         let textEncodingCache = textEncodingCache
         let logger = logger
+        let service = fileSystem
+        let cancellation = FileOperationCancellation()
+        refreshCancellations[side] = cancellation
 
         DispatchQueue.global(qos: .userInitiated).async {
-            let service = FileSystemService()
             do {
                 let nextItems = try service.contents(
                     of: currentURL,
@@ -1393,12 +1412,15 @@ final class DualFinderViewModel: ObservableObject {
                     sortRule: rule,
                     folderSizeCache: folderSizeCache,
                     textEncodingCache: textEncodingCache,
-                    includeTextEncoding: includeTextEncoding
+                    includeTextEncoding: includeTextEncoding,
+                    cancellation: cancellation
                 )
                 DispatchQueue.main.async { [weak self] in
                     defer { completion?() }
                     guard let self else { return }
                     guard self.refreshGeneration[side] == generation else { return }
+                    guard self.refreshCancellations[side] === cancellation else { return }
+                    self.refreshCancellations[side] = nil
                     guard self.pane(for: side).selectedURL.standardizedFileURL == currentURL else { return }
                     self.setItems(nextItems, for: side)
                     self.startTextEncodingScanIfNeeded(for: side, items: nextItems)
@@ -1419,6 +1441,8 @@ final class DualFinderViewModel: ObservableObject {
                     defer { completion?() }
                     guard let self else { return }
                     guard self.refreshGeneration[side] == generation else { return }
+                    guard self.refreshCancellations[side] === cancellation else { return }
+                    self.refreshCancellations[side] = nil
                     self.statusMessage = "Failed to read \(currentURL.path): \(error.localizedDescription)"
                     logger.error("navigation", "directory.refresh.failed", metadata: [
                         "side": side.rawValue,
@@ -1521,6 +1545,7 @@ final class DualFinderViewModel: ObservableObject {
             "path": url.path
         ])
         logMemoryDiagnostics(trigger: "navigate", side: side)
+        setItems([], for: side)
         refresh(side)
     }
 
@@ -1540,6 +1565,7 @@ final class DualFinderViewModel: ObservableObject {
             "path": directory.path,
             "selection": selection?.path ?? ""
         ])
+        setItems([], for: side)
         refresh(side)
     }
 
@@ -1560,6 +1586,7 @@ final class DualFinderViewModel: ObservableObject {
             "side": side.rawValue,
             "path": url.path
         ])
+        setItems([], for: side)
         refresh(side)
     }
 
@@ -1580,6 +1607,7 @@ final class DualFinderViewModel: ObservableObject {
             "side": side.rawValue,
             "path": url.path
         ])
+        setItems([], for: side)
         refresh(side)
     }
 
@@ -1697,10 +1725,10 @@ final class DualFinderViewModel: ObservableObject {
         let itemsByURL = Dictionary(uniqueKeysWithValues: items(for: side).map { ($0.url, $0) })
         let cache = folderSizeCache
         let isAndroid = isAndroidPane(side)
+        let service = fileSystem
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
-            let service = FileSystemService()
             var lines: [String] = []
             var needsRefresh = false
 
@@ -1783,6 +1811,7 @@ final class DualFinderViewModel: ObservableObject {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         let didWrite = pasteboard.writeObjects(urls.map { $0 as NSURL })
+        lastPasteboardChangeCount = pasteboard.changeCount
         pasteboardRevision &+= 1
         guard didWrite else {
             logger.error("clipboard", "files.copy.failed", metadata: metadataWithRequestID([
@@ -2848,7 +2877,7 @@ final class DualFinderViewModel: ObservableObject {
         isArchiveOperationRunning = true
         statusMessage = "\(label)..."
 
-        DispatchQueue.global(qos: .userInitiated).async {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let service = ArchiveService(logger: nil)
             do {
                 let successMessage: String
@@ -2862,20 +2891,23 @@ final class DualFinderViewModel: ObservableObject {
                     successMessage = "Created archive: \(created.lastPathComponent)"
                 }
 
-                DispatchQueue.main.async {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
                     self.isArchiveOperationRunning = false
                     self.archiveCancellation = nil
                     self.refreshAll()
                     self.statusMessage = successMessage
                 }
             } catch ArchiveError.cancelled {
-                DispatchQueue.main.async {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
                     self.isArchiveOperationRunning = false
                     self.archiveCancellation = nil
                     self.statusMessage = "Archive operation cancelled"
                 }
             } catch {
-                DispatchQueue.main.async {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
                     self.isArchiveOperationRunning = false
                     self.archiveCancellation = nil
                     self.reportOperationFailure("archive.failed", error: error)
@@ -2896,10 +2928,10 @@ final class DualFinderViewModel: ObservableObject {
 
         let cache = folderSizeCache
         let folderURLs = folders.map(\.url)
+        let service = fileSystem
         statusMessage = "Calculating folder size for \(folders.count) folder(s)..."
 
         DispatchQueue.global(qos: .userInitiated).async {
-            let service = FileSystemService()
             var completed = 0
             var computed = 0
             var cached = 0
@@ -2919,15 +2951,16 @@ final class DualFinderViewModel: ObservableObject {
                     }
                     completed += 1
                     let snapshot = (completed: completed, computed: computed, cached: cached, failures: failures)
+                    let pathString = folderURL.path
+                    let bytes = result.size
                     DispatchQueue.main.async { [weak self] in
                         guard let self else { return }
                         self.logger.info("folder-size", "folder.size.resolved", metadata: [
                             "side": side.rawValue,
-                            "path": folderURL.path,
-                            "bytes": "\(result.size)",
+                            "path": pathString,
+                            "bytes": "\(bytes)",
                             "source": source
                         ])
-                        self.refresh(side)
                         self.statusMessage = self.folderSizeProgressMessage(snapshot, total: folderURLs.count)
                     }
                 } catch {
@@ -2935,16 +2968,22 @@ final class DualFinderViewModel: ObservableObject {
                     completed += 1
                     let snapshot = (completed: completed, computed: computed, cached: cached, failures: failures)
                     let errorDescription = error.localizedDescription
+                    let pathString = folderURL.path
                     DispatchQueue.main.async { [weak self] in
                         guard let self else { return }
                         self.logger.error("folder-size", "folder.size.failed", metadata: [
                             "side": side.rawValue,
-                            "path": folderURL.path,
+                            "path": pathString,
                             "error": errorDescription
                         ])
                         self.statusMessage = self.folderSizeProgressMessage(snapshot, total: folderURLs.count)
                     }
                 }
+            }
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.refresh(side)
             }
         }
     }
@@ -4061,6 +4100,8 @@ final class DualFinderViewModel: ObservableObject {
         }
     }
 
+    private static let textEncodingScanBatchSize = 20
+
     private func startTextEncodingScanIfNeeded(for side: PaneSide, items: [FileItem]) {
         cancelTextEncodingScan(for: side)
         guard uiLayoutPreferences.isEncodingColumnVisible else { return }
@@ -4072,23 +4113,39 @@ final class DualFinderViewModel: ObservableObject {
         textEncodingScanCancellations[side] = cancellation
         let cache = textEncodingCache
         let logger = logger
+        let batchSize = Self.textEncodingScanBatchSize
 
         DispatchQueue.global(qos: .utility).async {
             let service = TextEncodingConversionService(logger: logger, cache: cache)
-            for item in pendingItems {
-                guard !cancellation.isCancelled else { return }
-                let encoding = (try? service.detectFileEncoding(item.url)) ?? "unknown"
-                guard !cancellation.isCancelled else { return }
+            var batch: [(url: URL, encoding: String)] = []
 
+            func flushBatch() {
+                guard !batch.isEmpty else { return }
+                let snapshot = batch
+                batch.removeAll(keepingCapacity: true)
                 DispatchQueue.main.async { [weak self] in
                     guard let self,
                           self.textEncodingScanCancellations[side] === cancellation,
                           self.uiLayoutPreferences.isEncodingColumnVisible else {
                         return
                     }
-                    self.updateTextEncoding(encoding, for: item.url, on: side)
+                    self.updateTextEncodings(snapshot, on: side)
                 }
             }
+
+            for item in pendingItems {
+                guard !cancellation.isCancelled else { return }
+                let encoding: String = autoreleasepool {
+                    (try? service.detectFileEncoding(item.url)) ?? "unknown"
+                }
+                guard !cancellation.isCancelled else { return }
+
+                batch.append((url: item.url, encoding: encoding))
+                if batch.count >= batchSize {
+                    flushBatch()
+                }
+            }
+            flushBatch()
 
             DispatchQueue.main.async { [weak self] in
                 guard let self,
@@ -4100,20 +4157,28 @@ final class DualFinderViewModel: ObservableObject {
         }
     }
 
-    private func updateTextEncoding(_ encoding: String, for url: URL, on side: PaneSide) {
+    private func updateTextEncodings(_ updates: [(url: URL, encoding: String)], on side: PaneSide) {
+        guard !updates.isEmpty else { return }
         if side == .left {
-            updateTextEncoding(encoding, for: url, in: &leftItems)
+            leftItems = applyTextEncodingUpdates(updates, to: leftItems)
         } else {
-            updateTextEncoding(encoding, for: url, in: &rightItems)
+            rightItems = applyTextEncodingUpdates(updates, to: rightItems)
         }
     }
 
-    private func updateTextEncoding(_ encoding: String, for url: URL, in items: inout [FileItem]) {
-        guard let index = items.firstIndex(where: { $0.url == url }),
-              items[index].textEncoding == nil else {
-            return
+    private func applyTextEncodingUpdates(_ updates: [(url: URL, encoding: String)], to items: [FileItem]) -> [FileItem] {
+        var urlToEncoding: [URL: String] = [:]
+        urlToEncoding.reserveCapacity(updates.count)
+        for entry in updates {
+            urlToEncoding[entry.url] = entry.encoding
         }
-        items[index] = items[index].withTextEncoding(encoding)
+        var result = items
+        for index in result.indices {
+            guard let encoding = urlToEncoding[result[index].url],
+                  result[index].textEncoding == nil else { continue }
+            result[index] = result[index].withTextEncoding(encoding)
+        }
+        return result
     }
 
     private func cancelTextEncodingScans() {
@@ -4279,14 +4344,27 @@ final class DualFinderViewModel: ObservableObject {
     }
 
     private func setupPasteboardObservation() {
-        NotificationCenter.default.addObserver(
-            forName: .pasteboardChanged,
-            object: NSPasteboard.general,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
-                self?.pasteboardRevision &+= 1
+        lastPasteboardChangeCount = NSPasteboard.general.changeCount
+        pasteboardPollTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let current = NSPasteboard.general.changeCount
+                guard current != self.lastPasteboardChangeCount else { return }
+                self.lastPasteboardChangeCount = current
+                self.pasteboardRevision &+= 1
             }
+        }
+    }
+
+    private func setupVolumeObservation() {
+        let center = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didMountNotification, NSWorkspace.didUnmountNotification, NSWorkspace.didRenameVolumeNotification] {
+            let token = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.volumeRevision &+= 1
+                }
+            }
+            volumeObserverTokens.append(token)
         }
     }
 

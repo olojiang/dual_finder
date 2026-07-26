@@ -13,7 +13,7 @@ public struct FileSystemService {
         .localizedNameKey,
         .localizedTypeDescriptionKey
     ]
-    private static let folderSizeResourceKeys: [URLResourceKey] = [
+    private static let folderSizeResourceKeys: Set<URLResourceKey> = [
         .isRegularFileKey,
         .fileSizeKey,
         .isDirectoryKey,
@@ -30,8 +30,10 @@ public struct FileSystemService {
         sortRule: FileSortRule = FileSortRule(),
         folderSizeCache: FolderSizeCache? = nil,
         textEncodingCache: TextEncodingConversionCache? = nil,
-        includeTextEncoding: Bool = false
+        includeTextEncoding: Bool = false,
+        cancellation: FileOperationCancellation? = nil
     ) throws -> [FileItem] {
+        try throwIfCancelled(cancellation)
         let options: FileManager.DirectoryEnumerationOptions = includeHidden ? [] : [.skipsHiddenFiles]
         let urls = try fileManager.contentsOfDirectory(
             at: directory,
@@ -39,7 +41,8 @@ public struct FileSystemService {
             options: options
         )
         return try urls.map {
-            try item(
+            try throwIfCancelled(cancellation)
+            return try item(
                 for: $0,
                 folderSizeCache: folderSizeCache,
                 textEncodingCache: textEncodingCache,
@@ -69,8 +72,10 @@ public struct FileSystemService {
         sortRule: FileSortRule = FileSortRule(),
         folderSizeCache: FolderSizeCache? = nil,
         textEncodingCache: TextEncodingConversionCache? = nil,
-        includeTextEncoding: Bool = false
+        includeTextEncoding: Bool = false,
+        cancellation: FileOperationCancellation? = nil
     ) throws -> [FileItem] {
+        try throwIfCancelled(cancellation)
         let options: FileManager.DirectoryEnumerationOptions = includeHidden ? [] : [.skipsHiddenFiles]
         guard let enumerator = fileManager.enumerator(
             at: directory,
@@ -82,6 +87,7 @@ public struct FileSystemService {
 
         var items: [FileItem] = []
         for case let url as URL in enumerator {
+            try throwIfCancelled(cancellation)
             let values = try url.resourceValues(forKeys: Self.itemResourceKeys)
             if values.isDirectory == true {
                 if values.isPackage == true {
@@ -99,6 +105,12 @@ public struct FileSystemService {
         }
 
         return items.sorted { FileSystemService.sortItems($0, $1, rule: sortRule) }
+    }
+
+    private func throwIfCancelled(_ cancellation: FileOperationCancellation?) throws {
+        guard cancellation?.isCancelled != true else {
+            throw FileOperationError.cancelled
+        }
     }
 
     public func parent(of url: URL) -> URL? {
@@ -142,16 +154,16 @@ public struct FileSystemService {
 
     public func calculateFolderSize(
         at folder: URL,
-        cache: FolderSizeCache = FolderSizeCache(),
+        cache: FolderSizeCache? = nil,
         forceRecalculate: Bool = false
     ) throws -> FolderSizeResolution {
         let modifiedAt = try folder.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
-        if !forceRecalculate, let cachedSize = cache.size(for: folder, modifiedAt: modifiedAt) {
+        if !forceRecalculate, let cache, let cachedSize = cache.size(for: folder, modifiedAt: modifiedAt) {
             return .cached(cachedSize)
         }
 
         let size = try recursiveSize(of: folder)
-        try cache.setSize(size, for: folder, modifiedAt: modifiedAt)
+        try cache?.setSize(size, for: folder, modifiedAt: modifiedAt)
         return .computed(size)
     }
 
@@ -210,7 +222,7 @@ public struct FileSystemService {
         let options: FileManager.DirectoryEnumerationOptions = []
         guard let enumerator = fileManager.enumerator(
             at: folder,
-            includingPropertiesForKeys: Self.folderSizeResourceKeys,
+            includingPropertiesForKeys: Array(Self.folderSizeResourceKeys),
             options: options
         ) else {
             return 0
@@ -218,7 +230,7 @@ public struct FileSystemService {
 
         var total: Int64 = 0
         for case let url as URL in enumerator {
-            guard let values = try? url.resourceValues(forKeys: Set(Self.folderSizeResourceKeys)) else { continue }
+            guard let values = try? url.resourceValues(forKeys: Self.folderSizeResourceKeys) else { continue }
             guard values.isSymbolicLink != true else { continue }
             if values.isRegularFile == true {
                 total += Int64(values.fileSize ?? 0)

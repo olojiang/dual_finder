@@ -11,6 +11,9 @@ public struct OperationScanPlan: Equatable, Sendable {
 }
 
 public final class OperationScanCache: @unchecked Sendable {
+    public static let defaultTTL: TimeInterval = 86_400
+    public static let defaultDebounceInterval: TimeInterval = 1.0
+
     private struct Entry: Codable {
         var totalBytes: Int64
         var totalItems: Int
@@ -18,24 +21,27 @@ public final class OperationScanCache: @unchecked Sendable {
         var cachedAt: Date
     }
 
-    public static let defaultTTL: TimeInterval = 86_400
-
     private let storageURL: URL
     private let fileManager: FileManager
     private let ttl: TimeInterval
+    private let debounceInterval: TimeInterval
     private let dateProvider: () -> Date
     private let lock = NSLock()
     private var entries: [String: Entry]
+    private var pendingSave: DispatchWorkItem?
+    private let saveQueue = DispatchQueue(label: "DualFinder.OperationScanCache.save")
 
     public init(
         storageURL: URL = OperationScanCache.defaultStorageURL(),
         fileManager: FileManager = .default,
         ttl: TimeInterval = OperationScanCache.defaultTTL,
-        dateProvider: @escaping () -> Date = Date.init
+        dateProvider: @escaping () -> Date = Date.init,
+        debounceInterval: TimeInterval = OperationScanCache.defaultDebounceInterval
     ) {
         self.storageURL = storageURL
         self.fileManager = fileManager
         self.ttl = ttl
+        self.debounceInterval = max(0, debounceInterval)
         self.dateProvider = dateProvider
         entries = Self.load(from: storageURL)
     }
@@ -65,7 +71,16 @@ public final class OperationScanCache: @unchecked Sendable {
             cachedAt: now
         )
         purgeExpiredEntries(olderThan: now.addingTimeInterval(-ttl))
-        let snapshot = entries
+        lock.unlock()
+        scheduleDebouncedSave()
+    }
+
+    public func flush() throws {
+        let snapshot: [String: Entry]
+        lock.lock()
+        pendingSave?.cancel()
+        pendingSave = nil
+        snapshot = entries
         lock.unlock()
         try save(snapshot)
     }
@@ -100,6 +115,25 @@ public final class OperationScanCache: @unchecked Sendable {
         try fileManager.createDirectory(at: storageURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         let data = try JSONEncoder().encode(entries)
         try data.write(to: storageURL, options: [.atomic])
+    }
+
+    private func scheduleDebouncedSave() {
+        lock.lock()
+        pendingSave?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.performDebouncedSave()
+        }
+        pendingSave = work
+        lock.unlock()
+        saveQueue.asyncAfter(deadline: .now() + debounceInterval, execute: work)
+    }
+
+    private func performDebouncedSave() {
+        lock.lock()
+        pendingSave = nil
+        let latestSnapshot = entries
+        lock.unlock()
+        try? save(latestSnapshot)
     }
 
     private func normalizedPath(for folder: URL) -> String {
