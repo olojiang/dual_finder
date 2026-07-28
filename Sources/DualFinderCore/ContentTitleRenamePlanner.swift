@@ -63,28 +63,34 @@ public struct ContentTitleRenamePlanner {
             do {
                 let operation = try operation(for: item)
                 let source = operation.sourceURL.standardizedFileURL
-                let destination = operation.destinationURL.standardizedFileURL
 
-                guard source != destination else {
+                guard source != operation.destinationURL.standardizedFileURL else {
                     skipped.append(ContentTitleRenameSkippedItem(sourceURL: item.url, reason: .unchanged))
                     continue
                 }
-                guard destinationPaths.insert(destination.path).inserted else {
+
+                let directory = source.deletingLastPathComponent()
+                guard let uniqueName = uniqueNewName(
+                    for: operation.newName,
+                    in: directory,
+                    reservedPaths: destinationPaths,
+                    sourcePaths: sourcePaths
+                ) else {
                     skipped.append(ContentTitleRenameSkippedItem(
                         sourceURL: item.url,
-                        reason: .duplicateDestination(destination)
-                    ))
-                    continue
-                }
-                if fileManager.fileExists(atPath: destination.path), !sourcePaths.contains(destination.path) {
-                    skipped.append(ContentTitleRenameSkippedItem(
-                        sourceURL: item.url,
-                        reason: .destinationExists(destination)
+                        reason: .duplicateDestination(directory.appendingPathComponent(operation.newName).standardizedFileURL)
                     ))
                     continue
                 }
 
-                operations.append(operation)
+                let uniqueDestination = directory.appendingPathComponent(uniqueName).standardizedFileURL
+                destinationPaths.insert(uniqueDestination.path)
+
+                if uniqueName == operation.newName {
+                    operations.append(operation)
+                } else {
+                    operations.append(BatchRenameOperation(sourceURL: operation.sourceURL, newName: uniqueName))
+                }
             } catch let error as ContentTitleRenameError {
                 skipped.append(ContentTitleRenameSkippedItem(sourceURL: item.url, reason: skipReason(for: error)))
             } catch {
@@ -93,6 +99,43 @@ public struct ContentTitleRenamePlanner {
         }
 
         return ContentTitleRenamePlan(operations: operations, skipped: skipped)
+    }
+
+    /// Finds a unique filename in `directory`, appending " (2)", " (3)", etc. when
+    /// the original name collides with an existing file or a destination already
+    /// claimed by another operation in the same batch.
+    private func uniqueNewName(
+        for originalName: String,
+        in directory: URL,
+        reservedPaths: Set<String>,
+        sourcePaths: Set<String>
+    ) -> String? {
+        let originalPath = directory.appendingPathComponent(originalName).standardizedFileURL.path
+        if isAvailable(originalPath, reservedPaths: reservedPaths, sourcePaths: sourcePaths) {
+            return originalName
+        }
+
+        let ext = (originalName as NSString).pathExtension
+        let baseName = (originalName as NSString).deletingPathExtension
+        for index in 2..<1000 {
+            let candidate: String
+            if ext.isEmpty {
+                candidate = "\(baseName) (\(index))"
+            } else {
+                candidate = "\(baseName) (\(index)).\(ext)"
+            }
+            let candidatePath = directory.appendingPathComponent(candidate).standardizedFileURL.path
+            if isAvailable(candidatePath, reservedPaths: reservedPaths, sourcePaths: sourcePaths) {
+                return candidate
+            }
+        }
+        return nil
+    }
+
+    private func isAvailable(_ path: String, reservedPaths: Set<String>, sourcePaths: Set<String>) -> Bool {
+        if reservedPaths.contains(path) { return false }
+        if fileManager.fileExists(atPath: path), !sourcePaths.contains(path) { return false }
+        return true
     }
 
     public func operations(for items: [FileItem]) throws -> [BatchRenameOperation] {
@@ -138,6 +181,7 @@ public struct ContentTitleRenamePlanner {
         for rawLine in normalized.split(separator: "\n", omittingEmptySubsequences: false).prefix(80) {
             let line = String(rawLine).trimmingCharacters(in: .whitespacesAndNewlines)
             guard !line.isEmpty, !isDecorativeSeparator(line) else { continue }
+            guard !containsURL(line), !isWatermarkPrefix(line) else { continue }
 
             let title = sanitizedTitle(strippingMetadata(from: line))
             guard (2...80).contains(title.count), !isNonTitleLine(title) else { continue }
@@ -145,6 +189,26 @@ public struct ContentTitleRenamePlanner {
         }
 
         return nil
+    }
+
+    private static func containsURL(_ line: String) -> Bool {
+        let lower = line.lowercased()
+        if lower.contains("http://") || lower.contains("https://") || lower.contains("ftp://") {
+            return true
+        }
+        // "www." followed by a dot guards against matching inside Chinese punctuation
+        if lower.range(of: #"www\.[a-z0-9]"#, options: .regularExpression) != nil {
+            return true
+        }
+        return false
+    }
+
+    private static func isWatermarkPrefix(_ line: String) -> Bool {
+        let compact = line
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: " ", with: "")
+        let prefixes = ["此文章由", "此文由", "本文由", "本篇文章由", "此文为", "本文为"]
+        return prefixes.contains(where: compact.hasPrefix)
     }
 
     private static func decodeText(_ data: Data) -> String? {
@@ -181,6 +245,14 @@ public struct ContentTitleRenamePlanner {
             )
             candidate = candidate.replacingOccurrences(
                 of: #"^\s*(\[[^\]\n]{1,16}\]|【[^】\n]{1,16}】|\([^\)\n]{1,16}\)|（[^）\n]{1,16}）)\s*"#,
+                with: "",
+                options: .regularExpression
+            )
+            // Strip trailing brackets only when they contain repost/metadata markers,
+            // so content-bearing suffixes like [桂林篇] are preserved to avoid
+            // duplicate destinations across a series.
+            candidate = candidate.replacingOccurrences(
+                of: #"\s*[（(][^）)\n]*(转寄|转贴|转载|repost)[^）)\n]*[）)]\s*$"#,
                 with: "",
                 options: .regularExpression
             )
