@@ -19,6 +19,28 @@ SIGNING_IDENTITY=""
 SIGNING_KEYCHAIN_PATH=""
 PREPARED_SIGNING_IDENTITY=""
 
+# Build mode: debug (default, incremental, fast) or release (optimized, slow).
+# SPM automatically falls back to a full rebuild when the incremental cache
+# is invalidated (e.g., Package.swift changed or cache corruption).
+BUILD_MODE="debug"
+SKIP_TESTS=false
+for arg in "$@"; do
+    case "$arg" in
+        --release) BUILD_MODE="release" ;;
+        --skip-tests) SKIP_TESTS=true ;;
+        -h|--help)
+            cat <<USAGE
+Usage: ./update_app.sh [--release] [--skip-tests]
+  (default)  Debug incremental build — fast, for local development.
+  --release  Release optimized build — slow (~10min), for distribution.
+  --skip-tests  Skip the swift test suite (use when flaky tests block deploy).
+USAGE
+            exit 0
+            ;;
+        *) echo "Unknown flag: $arg (try --help)" >&2; exit 2 ;;
+    esac
+done
+
 prepare_apple_signing_identity() {
     local metadata_env="$APPLE_KEYS_DIR/apple_key_metadata.env"
     local secrets_env="$APPLE_KEYS_DIR/apple_key_secrets.env"
@@ -124,24 +146,35 @@ codesign_app_bundle() {
     codesign "${args[@]}" "$target"
 }
 
-echo "[1/7] Running tests"
-swift test --package-path "$ROOT_DIR"
+if [[ "$SKIP_TESTS" == "true" ]]; then
+    echo "[1/7] Skipping tests (--skip-tests)"
+else
+    echo "[1/7] Running tests"
+    swift test --package-path "$ROOT_DIR"
+fi
 
-echo "[2/7] Building release binaries"
-swift build --package-path "$ROOT_DIR" -c release --product DualFinderApp
-swift build --package-path "$ROOT_DIR" -c release --product DualFinderHotkeyHelper
+echo "[2/7] Building $BUILD_MODE binaries"
+if [[ "$BUILD_MODE" == "release" ]]; then
+    swift build --package-path "$ROOT_DIR" -c release --product DualFinderApp
+    swift build --package-path "$ROOT_DIR" -c release --product DualFinderHotkeyHelper
+    BUILD_OUTPUT_DIR="$ROOT_DIR/.build/release"
+else
+    swift build --package-path "$ROOT_DIR" --product DualFinderApp
+    swift build --package-path "$ROOT_DIR" --product DualFinderHotkeyHelper
+    BUILD_OUTPUT_DIR="$ROOT_DIR/.build/debug"
+fi
 
 echo "[3/7] Creating app bundle"
 rm -rf "$APP_BUNDLE"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
-cp "$ROOT_DIR/.build/release/DualFinderApp" "$MACOS_DIR/$APP_NAME"
+cp "$BUILD_OUTPUT_DIR/DualFinderApp" "$MACOS_DIR/$APP_NAME"
 chmod +x "$MACOS_DIR/$APP_NAME"
 
 HELPER_APP_NAME="DualFinderHotkeyHelper"
 HELPER_APP="$RELEASE_DIR/$HELPER_APP_NAME.app"
 HELPER_MACOS="$HELPER_APP/Contents/MacOS"
 mkdir -p "$HELPER_MACOS"
-cp "$ROOT_DIR/.build/release/DualFinderHotkeyHelper" "$HELPER_MACOS/$HELPER_APP_NAME"
+cp "$BUILD_OUTPUT_DIR/DualFinderHotkeyHelper" "$HELPER_MACOS/$HELPER_APP_NAME"
 chmod +x "$HELPER_MACOS/$HELPER_APP_NAME"
 
 cat > "$HELPER_APP/Contents/Info.plist" <<HELPER_PLIST

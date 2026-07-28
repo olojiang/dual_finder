@@ -386,6 +386,7 @@ public struct TextEncodingConversionService {
 
     public func convertFilesToUTF8(
         _ urls: [URL],
+        force: Bool = false,
         progress: ProgressHandler? = nil
     ) throws -> TextEncodingBatchConversionResult {
         cache?.beginBatch()
@@ -399,7 +400,7 @@ public struct TextEncodingConversionService {
         for (index, url) in urls.enumerated() {
             let result: TextEncodingConversionResult = autoreleasepool {
                 do {
-                    return try convertFileToUTF8(url)
+                    return try convertFileToUTF8(url, force: force)
                 } catch {
                     let standardizedURL = url.standardizedFileURL
                     let message = error.localizedDescription
@@ -436,7 +437,7 @@ public struct TextEncodingConversionService {
         return batchResult
     }
 
-    public func convertFileToUTF8(_ url: URL) throws -> TextEncodingConversionResult {
+    public func convertFileToUTF8(_ url: URL, force: Bool = false) throws -> TextEncodingConversionResult {
         let standardizedURL = url.standardizedFileURL
 
         guard isSupportedTextFileCandidate(standardizedURL) else {
@@ -463,7 +464,20 @@ public struct TextEncodingConversionService {
             )
         }
 
-        if let lookup = cache?.lookupEncoding(
+        if isAppleDoubleMetadataFile(standardizedURL) {
+            logger?.info("text-encoding", "file.skipped", metadata: [
+                "path": standardizedURL.path,
+                "reason": "appledouble-metadata"
+            ])
+            return TextEncodingConversionResult(
+                originalURL: standardizedURL,
+                finalURL: standardizedURL,
+                detectedEncoding: nil,
+                status: .skipped
+            )
+        }
+
+        if !force, let lookup = cache?.lookupEncoding(
             for: standardizedURL,
             size: initialFingerprint?.size,
             modifiedAt: initialFingerprint?.modifiedAt
@@ -502,7 +516,7 @@ public struct TextEncodingConversionService {
             )
         }
 
-        if case .validUTF8(nulCount: 0, _) = streamingUTF8Validation(at: standardizedURL) {
+        if !force, case .validUTF8(nulCount: 0, _) = streamingUTF8Validation(at: standardizedURL) {
             let finalURL = try restoreUnknownEncodingNameIfNeeded(standardizedURL)
             let finalFingerprint = finalURL == standardizedURL ? initialFingerprint : fileFingerprint(for: finalURL)
             try cache?.markUTF8(for: finalURL, size: finalFingerprint?.size, modifiedAt: finalFingerprint?.modifiedAt)
@@ -525,6 +539,27 @@ public struct TextEncodingConversionService {
                 finalURL: finalURL,
                 detectedEncoding: "utf-8",
                 status: .alreadyUTF8
+            )
+        }
+
+        if force, let repaired = detectMojibakeRepair(for: data) {
+            let utf8Data = Data(repaired.text.utf8)
+            try utf8Data.write(to: standardizedURL, options: .atomic)
+            let finalURL = try restoreUnknownEncodingNameIfNeeded(standardizedURL)
+            let updatedFingerprint = fileFingerprint(for: finalURL)
+            try cache?.markUTF8(for: finalURL, size: updatedFingerprint?.size, modifiedAt: updatedFingerprint?.modifiedAt)
+            let metadata = [
+                "path": finalURL.path,
+                "sourceEncoding": repaired.label,
+                "destinationEncoding": "utf-8",
+                "mode": "force-repair"
+            ]
+            logger?.info("text-encoding", "file.converted", metadata: metadata)
+            return TextEncodingConversionResult(
+                originalURL: standardizedURL,
+                finalURL: finalURL,
+                detectedEncoding: repaired.label,
+                status: .converted
             )
         }
 
@@ -902,9 +937,15 @@ public struct TextEncodingConversionService {
             return nil
         }
 
-        if ["windows-1252", "iso-8859-1"].contains(label),
-           let cjkDetected = detectCJKEncoding(for: data) {
-            return cjkDetected
+        if ["windows-1252", "iso-8859-1"].contains(label) {
+            // Foundation frequently mis-detects GBK/GB18030/Big5 bytes as cp1252/iso-8859-1
+            // (both cover 0x80-0xFF without lossy conversion). Returning the cp1252-decoded
+            // text would write mojibake. Prefer a CJK match; if none succeeds, return nil so
+            // the legacy CJK candidate loop in detectEncoding gets to run.
+            if let cjkDetected = detectCJKEncoding(for: data) {
+                return cjkDetected
+            }
+            return nil
         }
 
         return DetectedTextEncoding(
@@ -925,6 +966,146 @@ public struct TextEncodingConversionService {
             return DetectedTextEncoding(label: candidate.label, text: cleaned)
         }
         return nil
+    }
+
+    /// Repairs UTF-8 mojibake: bytes are valid UTF-8 but the content is garbled because
+    /// the original CJK bytes (GBK/Big5/Shift_JIS/EUC-KR) were mis-decoded as Latin-1 or
+    /// cp1252 and then re-encoded as UTF-8. We reverse the mis-decode by re-encoding the
+    /// UTF-8 string back to Latin-1/cp1252 and decoding with each CJK candidate.
+    /// Requires `textHasCJKContent` to confirm the repair actually yields CJK text.
+    /// For files with sparse bad bytes that strict CJK decode rejects, falls back to
+    /// line-by-line decoding with a manual CJK lossy decoder (invalid byte → U+FFFD).
+    private func detectMojibakeRepair(for data: Data) -> DetectedTextEncoding? {
+        guard let utf8Text = String(data: data, encoding: .utf8) else { return nil }
+
+        let reverseEncodings: [(label: String, encoding: String.Encoding)] = [
+            ("latin1", .isoLatin1),
+            ("cp1252", .windowsCP1252)
+        ]
+
+        for reverse in reverseEncodings {
+            guard let recoveredBytes = utf8Text.data(using: reverse.encoding) else { continue }
+
+            for candidate in EncodingCandidate.cjkCandidates {
+                guard let text = String(data: recoveredBytes, encoding: candidate.encoding),
+                      let cleaned = cleanedTextIfLikelyText(text),
+                      textLooksReadable(cleaned),
+                      textHasCJKContent(cleaned) else {
+                    continue
+                }
+                return DetectedTextEncoding(
+                    label: "utf-8-mojibake-\(reverse.label)-\(candidate.label)",
+                    text: cleaned
+                )
+            }
+
+            // Line-by-line with CJK lossy fallback for sparse bad bytes.
+            // Foundation's auto-detection mis-detects GBK as iso-8859-10 (no CJK content),
+            // and detectMixedLineEncoding's utf-8-lossy fallback produces ~5% replacement
+            // chars on CJK bytes. We decode each line strictly, and for lines that fail all
+            // CJK candidates, walk byte-by-byte replacing invalid sequences with U+FFFD.
+            if let detected = detectMojibakeRepairLineByLine(
+                recoveredBytes: recoveredBytes,
+                reverseLabel: reverse.label
+            ) {
+                return detected
+            }
+        }
+        return nil
+    }
+
+    private func detectMojibakeRepairLineByLine(
+        recoveredBytes: Data,
+        reverseLabel: String
+    ) -> DetectedTextEncoding? {
+        let lines = splitDataByNewline(recoveredBytes)
+        guard lines.count > 1 else { return nil }
+
+        var decodedLines: [String] = []
+        decodedLines.reserveCapacity(lines.count)
+        var labels: Set<String> = []
+        var nonASCIIByteLineCount = 0
+        var lossyByteCount = 0
+        let lossyLimit = max(recoveredBytes.count / 20, 8)  // 5% threshold for mojibake repair
+
+        for line in lines {
+            if line.contains(where: { $0 >= 0x80 }) {
+                nonASCIIByteLineCount += 1
+            }
+
+            // Try strict CJK decode per line
+            var matched: (label: String, text: String)?
+            for candidate in EncodingCandidate.cjkCandidates {
+                if let text = String(data: line, encoding: candidate.encoding),
+                   let cleaned = cleanedTextIfLikelyText(text),
+                   textLooksReadable(cleaned) {
+                    matched = (candidate.label, cleaned)
+                    break
+                }
+            }
+            if let m = matched {
+                decodedLines.append(m.text)
+                labels.insert(m.label)
+                continue
+            }
+
+            // CJK lossy fallback: byte-by-byte decode with U+FFFD replacement
+            guard lossyByteCount + line.count <= lossyLimit else { return nil }
+            lossyByteCount += line.count
+            let (lossyText, _) = decodeCJKWithReplacement(line, encoding: EncodingCandidate.cjkCandidates.first?.encoding ?? .isoLatin1)
+            decodedLines.append(lossyText)
+            labels.insert("cjk-lossy")
+        }
+
+        guard labels.count > 0, nonASCIIByteLineCount > 0 else { return nil }
+
+        let text = decodedLines.joined()
+        guard let cleaned = cleanedTextIfLikelyText(text),
+              textLooksReadable(cleaned, replacementThreshold: lossyByteCount > 0 ? 0.06 : 0.001),
+              textHasCJKContent(cleaned) else {
+            return nil
+        }
+
+        let orderedLabels = ["gbk", "gb2312", "gb18030", "big5", "shift_jis", "euc-kr", "cjk-lossy"]
+            .filter { labels.contains($0) }
+        return DetectedTextEncoding(
+            label: "utf-8-mojibake-\(reverseLabel)-mixed:\(orderedLabels.joined(separator: "+"))",
+            text: cleaned,
+            lossyByteCount: lossyByteCount == 0 ? nil : lossyByteCount
+        )
+    }
+
+    /// Manual lossy CJK decoder: walks bytes, decodes valid 2-byte CJK sequences strictly,
+    /// replaces invalid lead/trail pairs with U+FFFD. ASCII (0x00-0x7F) passes through.
+    /// Used for mojibake repair on lines with sparse bad bytes.
+    private func decodeCJKWithReplacement(_ data: Data, encoding: String.Encoding) -> (text: String, replacedBytes: Int) {
+        var result = ""
+        result.reserveCapacity(data.count)
+        var replaced = 0
+        var i = data.startIndex
+        while i < data.endIndex {
+            let byte = data[i]
+            if byte < 0x80 {
+                result.append(Character(Unicode.Scalar(byte)))
+                i = data.index(after: i)
+                continue
+            }
+            // High byte: try 2-byte CJK decode
+            let next = data.index(after: i)
+            if next < data.endIndex {
+                let twoBytes = data.subdata(in: i..<data.index(after: next))
+                if let s = String(data: twoBytes, encoding: encoding) {
+                    result.append(s)
+                    i = data.index(after: next)
+                    continue
+                }
+            }
+            // Invalid: replace and advance 1 byte
+            result.append("\u{fffd}")
+            replaced += 1
+            i = next
+        }
+        return (result, replaced)
     }
 
     private func textHasCJKContent(_ text: String) -> Bool {
@@ -1008,6 +1189,17 @@ public struct TextEncodingConversionService {
         return Self.supportedTextFileExtensions.contains(fileExtension)
     }
 
+    /// macOS AppleDouble files (created on FAT/exFAT volumes) start with magic
+    /// 0x00051607 and hold resource-fork metadata, not text content. They should
+    /// be skipped rather than moved to unknown_encode/.
+    private func isAppleDoubleMetadataFile(_ url: URL) -> Bool {
+        guard url.lastPathComponent.hasPrefix("._") else { return false }
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        guard let header = try? handle.read(upToCount: 4), header.count == 4 else { return false }
+        return header == Data([0x00, 0x05, 0x16, 0x07])
+    }
+
     private func hasUTF16SignatureOrPattern(_ data: Data) -> Bool {
         guard data.count >= 8 else { return false }
         let bytes = Array(data.prefix(256))
@@ -1080,8 +1272,8 @@ public struct TextEncodingConversionService {
             return nil
         }
 
-        var codeUnits: [UInt16] = []
-        codeUnits.reserveCapacity(data.count / 2)
+        var rawUnits: [UInt16] = []
+        rawUnits.reserveCapacity(data.count / 2)
         var index = 2
         while index + 1 < data.count {
             let first = UInt16(data[index])
@@ -1091,21 +1283,52 @@ public struct TextEncodingConversionService {
             case 0x0000:
                 break
             case 0x0a00:
-                codeUnits.append(0x000a)
+                rawUnits.append(0x000a)
             case 0x0d00:
-                codeUnits.append(0x000d)
+                rawUnits.append(0x000d)
             case 0x2000:
-                codeUnits.append(0x0020)
+                rawUnits.append(0x0020)
             default:
-                codeUnits.append(value)
+                rawUnits.append(value)
             }
             index += 2
+        }
+
+        // Strip orphan surrogates: high surrogate must be followed by low surrogate,
+        // low surrogate must be preceded by high surrogate. Orphan surrogates would
+        // otherwise become U+FFFD via lossy decoding and trip textLooksReadable.
+        var codeUnits: [UInt16] = []
+        codeUnits.reserveCapacity(rawUnits.count)
+        var strippedSurrogates = 0
+        var i = 0
+        while i < rawUnits.count {
+            let value = rawUnits[i]
+            if 0xD800 <= value && value <= 0xDBFF {
+                if i + 1 < rawUnits.count,
+                   0xDC00 <= rawUnits[i + 1] && rawUnits[i + 1] <= 0xDFFF {
+                    codeUnits.append(value)
+                    codeUnits.append(rawUnits[i + 1])
+                    i += 2
+                    continue
+                }
+                strippedSurrogates += 1
+                i += 1
+                continue
+            }
+            if 0xDC00 <= value && value <= 0xDFFF {
+                strippedSurrogates += 1
+                i += 1
+                continue
+            }
+            codeUnits.append(value)
+            i += 1
         }
 
         let text = String(decoding: codeUnits, as: Unicode.UTF16.self)
         guard let cleaned = cleanedTextIfLikelyText(text),
               textLooksReadable(cleaned) else { return nil }
-        return DetectedTextEncoding(label: label, text: cleaned)
+        let finalLabel = strippedSurrogates > 0 ? "\(label)-surrogates" : label
+        return DetectedTextEncoding(label: finalLabel, text: cleaned)
     }
 
     private func moveUnknownEncodingFile(_ url: URL) throws -> URL {

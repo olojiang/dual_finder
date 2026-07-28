@@ -249,6 +249,127 @@ struct TextEncodingConversionServiceTests {
         #expect(result.status == .renamedUnknown)
     }
 
+    @Test("repairs UTF-16 LE files with orphan high surrogate")
+    func repairsUTF16LEFilesWithOrphanHighSurrogate() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("utf16-orphan-high.txt")
+        // UTF-16 LE BOM + "晓故事" + orphan high surrogate U+D800 + "正文"
+        var data = Data([0xff, 0xfe])
+        data.append(contentsOf: [0x53, 0x66, 0x45, 0x65, 0x8b, 0x4e])  // 晓故事
+        data.append(contentsOf: [0x00, 0xd8])                          // orphan high surrogate
+        data.append(contentsOf: [0x63, 0x6b, 0x87, 0x65])              // 正文
+        try data.write(to: file)
+
+        let result = try TextEncodingConversionService(logger: CapturingLogger()).convertFileToUTF8(file)
+
+        #expect(result.status == .converted)
+        #expect(result.detectedEncoding?.hasPrefix("utf-16le") == true)
+        let converted = try String(contentsOf: file, encoding: .utf8)
+        #expect(converted.contains("晓故事"))
+        #expect(converted.contains("正文"))
+        #expect(!converted.contains("\u{fffd}"))
+    }
+
+    @Test("repairs UTF-16 LE files with orphan low surrogate")
+    func repairsUTF16LEFilesWithOrphanLowSurrogate() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("utf16-orphan-low.txt")
+        // UTF-16 LE BOM + "标题" + orphan low surrogate U+DE62 + "内容"
+        var data = Data([0xff, 0xfe])
+        data.append(contentsOf: [0x00, 0x6d, 0x98, 0x98])              // 标题 (U+6D00, U+9898)
+        data.append(contentsOf: [0x62, 0xde])                          // orphan low surrogate
+        data.append(contentsOf: [0x4e, 0x53, 0x39, 0x5b])              // 内容 (U+534E, U+5B39)
+        try data.write(to: file)
+
+        let result = try TextEncodingConversionService(logger: CapturingLogger()).convertFileToUTF8(file)
+
+        #expect(result.status == .converted)
+        #expect(result.detectedEncoding?.hasPrefix("utf-16le") == true)
+        let converted = try String(contentsOf: file, encoding: .utf8)
+        #expect(!converted.contains("\u{fffd}"))
+    }
+
+    @Test("preserves valid UTF-16 LE surrogate pairs (emoji)")
+    func preservesValidUTF16LESurrogatePairs() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("utf16-emoji.txt")
+        // UTF-16 LE BOM + "emoji " + U+1F600 (grinning face, surrogate pair D83D DE00) + " text"
+        var data = Data([0xff, 0xfe])
+        let prefix = "emoji "
+        for scalar in prefix.unicodeScalars {
+            let v = UInt16(scalar.value)
+            data.append(UInt8(v & 0xff))
+            data.append(UInt8(v >> 8))
+        }
+        data.append(contentsOf: [0x3d, 0xd8, 0x00, 0xde])              // U+1F600 as surrogate pair
+        let suffix = " text"
+        for scalar in suffix.unicodeScalars {
+            let v = UInt16(scalar.value)
+            data.append(UInt8(v & 0xff))
+            data.append(UInt8(v >> 8))
+        }
+        try data.write(to: file)
+
+        let result = try TextEncodingConversionService(logger: CapturingLogger()).convertFileToUTF8(file)
+
+        #expect(result.status == .converted)
+        #expect(result.detectedEncoding?.hasPrefix("utf-16le") == true)
+        let converted = try String(contentsOf: file, encoding: .utf8)
+        #expect(converted.contains("emoji"))
+        #expect(converted.contains("\u{1f600}"))
+        #expect(converted.contains("text"))
+    }
+
+    @Test("repairs UTF-16 LE file with massive orphan surrogates from real-world corruption")
+    func repairsUTF16LEFileWithMassiveOrphanSurrogates() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("utf16-corrupted.txt")
+        // Simulate real-world PP_Novel_Download corruption: many orphan surrogates
+        // interspersed with readable text. Files in unknown_encode/ have ~5% orphan
+        // surrogates which previously caused textLooksReadable to reject them.
+        var data = Data([0xff, 0xfe])
+        let line = "正文行内容继续测试，这是中文字符。\n"
+        for _ in 0..<50 {
+            for scalar in line.unicodeScalars {
+                let v = UInt16(scalar.value)
+                data.append(UInt8(v & 0xff))
+                data.append(UInt8(v >> 8))
+            }
+            // Insert 3 orphan surrogates per line (~5% corruption rate)
+            data.append(contentsOf: [0x00, 0xd8])  // orphan high surrogate
+            data.append(contentsOf: [0x62, 0xde])  // orphan low surrogate
+            data.append(contentsOf: [0x01, 0xd9])  // orphan high surrogate
+        }
+        try data.write(to: file)
+
+        let result = try TextEncodingConversionService(logger: CapturingLogger()).convertFileToUTF8(file)
+
+        #expect(result.status == .converted)
+        #expect(result.detectedEncoding?.hasPrefix("utf-16le") == true)
+        let converted = try String(contentsOf: file, encoding: .utf8)
+        #expect(converted.contains("正文行内容继续测试"))
+        // Orphan surrogates should be dropped, not converted to U+FFFD
+        #expect(!converted.contains("\u{fffd}"))
+    }
+
+    @Test("skips AppleDouble metadata files without moving to unknown_encode")
+    func skipsAppleDoubleMetadataFilesWithoutMoving() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("._novel.txt")
+        // AppleDouble header magic: 00 05 16 07
+        var data = Data([0x00, 0x05, 0x16, 0x07])
+        data.append(Data(repeating: 0, count: 100))
+        try data.write(to: file)
+
+        let result = try TextEncodingConversionService(logger: CapturingLogger()).convertFileToUTF8(file)
+
+        #expect(result.status == .skipped)
+        #expect(result.finalURL == file.standardizedFileURL)
+        #expect(FileManager.default.fileExists(atPath: file.path))
+        let unknownDir = root.url.appendingPathComponent("unknown_encode")
+        #expect(!FileManager.default.fileExists(atPath: unknownDir.path))
+    }
+
     @Test("converts UTF-16 BE files to UTF-8")
     func convertsUTF16BEFilesToUTF8() throws {
         let root = try TemporaryDirectory()
@@ -878,5 +999,128 @@ struct TextEncodingConversionServiceTests {
         let cfEncoding = CFStringConvertIANACharSetNameToEncoding(name as CFString)
         let nsEncoding = CFStringConvertEncodingToNSStringEncoding(cfEncoding)
         return String.Encoding(rawValue: nsEncoding)
+    }
+
+    // MARK: - Force re-convert / mojibake repair
+
+    @Test("force re-convert repairs UTF-8 mojibake from GBK via latin-1")
+    func forceReconvertRepairsMojibakeFromGBKViaLatin1() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("mojibake-gbk.txt")
+        let sourceText = "简体中文内容测试，验证 mojibake 修复功能。"
+        let gbkBytes = try #require(sourceText.data(using: encoding(named: "GBK")))
+        // Reproduce mojibake: GBK bytes read as Latin-1, then encoded as UTF-8.
+        let garbledText = try #require(String(data: gbkBytes, encoding: .isoLatin1))
+        let mojibakeData = Data(garbledText.utf8)
+        try mojibakeData.write(to: file)
+
+        let result = try TextEncodingConversionService(logger: CapturingLogger()).convertFileToUTF8(file, force: true)
+
+        #expect(result.status == .converted)
+        #expect(result.detectedEncoding?.hasPrefix("utf-8-mojibake-latin1-gbk") == true)
+        #expect(try String(contentsOf: file, encoding: .utf8) == sourceText)
+    }
+
+    @Test("force re-convert repairs UTF-8 mojibake from GBK via cp1252")
+    func forceReconvertRepairsMojibakeFromGBKViaCp1252() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("mojibake-cp1252.txt")
+        let sourceText = "简体中文内容测试，验证 cp1252 反推修复。"
+        let gbkBytes = try #require(sourceText.data(using: encoding(named: "GBK")))
+        let garbledText = try #require(String(data: gbkBytes, encoding: .windowsCP1252))
+        let mojibakeData = Data(garbledText.utf8)
+        try mojibakeData.write(to: file)
+
+        let result = try TextEncodingConversionService(logger: CapturingLogger()).convertFileToUTF8(file, force: true)
+
+        #expect(result.status == .converted)
+        #expect(result.detectedEncoding?.hasPrefix("utf-8-mojibake-") == true)
+        #expect(try String(contentsOf: file, encoding: .utf8) == sourceText)
+    }
+
+    @Test("force re-convert bypasses cached utf-8 entry and repairs mojibake")
+    func forceReconvertBypassesCachedUTF8Entry() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("mojibake-cached.txt")
+        let sourceText = "缓存记录为 utf-8 但实际是 mojibake，强制重转化应修复。"
+        let gbkBytes = try #require(sourceText.data(using: encoding(named: "GBK")))
+        let garbledText = try #require(String(data: gbkBytes, encoding: .isoLatin1))
+        try Data(garbledText.utf8).write(to: file)
+
+        let cache = TextEncodingConversionCache(storageURL: root.url.appendingPathComponent("cache.json"))
+        let fingerprint = try file.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+        try cache.markUTF8(
+            for: file,
+            size: Int64(fingerprint.fileSize ?? 0),
+            modifiedAt: fingerprint.contentModificationDate
+        )
+
+        // Non-force path returns alreadyUTF8 (cache hit).
+        let nonForceResult = try TextEncodingConversionService(
+            logger: CapturingLogger(),
+            cache: cache
+        ).convertFileToUTF8(file)
+        #expect(nonForceResult.status == .alreadyUTF8)
+        #expect(nonForceResult.usedCache == true)
+
+        // Force path bypasses cache and repairs.
+        let forceResult = try TextEncodingConversionService(
+            logger: CapturingLogger(),
+            cache: cache
+        ).convertFileToUTF8(file, force: true)
+        #expect(forceResult.status == .converted)
+        #expect(forceResult.detectedEncoding?.hasPrefix("utf-8-mojibake-") == true)
+        #expect(try String(contentsOf: file, encoding: .utf8) == sourceText)
+    }
+
+    @Test("non-force path leaves plain UTF-8 file untouched, force path keeps it as UTF-8")
+    func forceReconvertKeepsPlainUTF8FileUntouched() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("plain-utf8.txt")
+        let sourceText = "这是正常的 UTF-8 文件，无需修复。"
+        try sourceText.write(to: file, atomically: true, encoding: .utf8)
+
+        let result = try TextEncodingConversionService(logger: CapturingLogger()).convertFileToUTF8(file, force: true)
+
+        #expect(result.status == .alreadyUTF8)
+        #expect(result.detectedEncoding == "utf-8")
+        #expect(try String(contentsOf: file, encoding: .utf8) == sourceText)
+    }
+
+    @Test("pure GBK file is not mis-detected as cp1252 mojibake")
+    func pureGBKFileNotMisDetectedAsCp1252() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("pure-gbk.txt")
+        let sourceText = "简体中文内容测试，纯 GBK 编码文件不应被误判为 cp1252。"
+        try #require(sourceText.data(using: encoding(named: "GBK"))).write(to: file)
+
+        let result = try TextEncodingConversionService(logger: CapturingLogger()).convertFileToUTF8(file)
+
+        #expect(result.status == .converted)
+        #expect(result.detectedEncoding == "gbk")
+        #expect(try String(contentsOf: file, encoding: .utf8) == sourceText)
+    }
+
+    @Test("force re-convert repairs mojibake with sparse bad bytes via line-by-line fallback")
+    func forceReconvertRepairsMojibakeWithSparseBadBytes() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("mojibake-sparse.txt")
+        // Two lines so detectMixedLineEncoding has multiple lines to work with.
+        let line1 = "简体中文内容测试第一行，验证稀疏坏字节修复。"
+        let line2 = "第二行继续中文内容，保证多行解码成功。"
+        let sourceText = line1 + "\n" + line2
+        var gbkBytes = try #require(sourceText.data(using: encoding(named: "GBK")))
+        // Insert 0xAC at a byte boundary inside line 1: 0xAC is not a valid GBK lead byte,
+        // so strict full-file GBK decode fails, but per-line decode succeeds for line 2.
+        gbkBytes.insert(0xAC, at: 8)
+        let garbledText = try #require(String(data: gbkBytes, encoding: .isoLatin1))
+        try Data(garbledText.utf8).write(to: file)
+
+        let result = try TextEncodingConversionService(logger: CapturingLogger()).convertFileToUTF8(file, force: true)
+
+        #expect(result.status == .converted)
+        #expect(result.detectedEncoding?.hasPrefix("utf-8-mojibake-") == true)
+        let repaired = try String(contentsOf: file, encoding: .utf8)
+        #expect(repaired.contains("第二行继续中文内容"))
     }
 }

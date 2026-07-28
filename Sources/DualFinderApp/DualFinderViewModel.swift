@@ -2042,6 +2042,45 @@ final class DualFinderViewModel: ObservableObject {
         refresh(side)
     }
 
+    func duplicateTabOnSameSide(tabID: UUID, on side: PaneSide) {
+        guard let sourceTab = pane(for: side).tabs.first(where: { $0.id == tabID }) else {
+            logger.debug("tab", "tab.duplicate.ignored", metadata: [
+                "side": side.rawValue,
+                "tab": tabID.uuidString
+            ])
+            return
+        }
+        let newTabID = mutatePane(side) { $0.addTab(url: sourceTab.url) }
+        persistPaneSession()
+        logger.info("tab", "tab.duplicated.same_side", metadata: [
+            "side": side.rawValue,
+            "tab": tabID.uuidString,
+            "new_tab": newTabID.uuidString
+        ])
+        refresh(side)
+    }
+
+    func duplicateTabToOppositeSide(tabID: UUID, on side: PaneSide) {
+        guard let sourceTab = pane(for: side).tabs.first(where: { $0.id == tabID }) else {
+            logger.debug("tab", "tab.duplicate.ignored", metadata: [
+                "side": side.rawValue,
+                "tab": tabID.uuidString
+            ])
+            return
+        }
+        let targetSide = opposite(side)
+        let newTabID = mutatePane(targetSide) { $0.addTab(url: sourceTab.url) }
+        activePaneSide = targetSide
+        persistPaneSession()
+        logger.info("tab", "tab.duplicated", metadata: [
+            "tab": tabID.uuidString,
+            "from": side.rawValue,
+            "to": targetSide.rawValue,
+            "new_tab": newTabID.uuidString
+        ])
+        refresh(targetSide)
+    }
+
     func moveTabDuringDrag(tabID: UUID, from sourceSide: PaneSide, to targetSide: PaneSide, beforeTabID: UUID?) {
         if sourceSide == targetSide {
             reorderTabDuringDrag(tabID: tabID, on: sourceSide, beforeTabID: beforeTabID)
@@ -2852,6 +2891,69 @@ final class DualFinderViewModel: ObservableObject {
                     guard let self else { return }
                     self.isTextEncodingConversionRunning = false
                     self.reportOperationFailure("text-encoding.convert.failed", error: error)
+                }
+            }
+        }
+    }
+
+    func reconvertSelectedTextEncodingToUTF8(on side: PaneSide) {
+        guard !isInlineRenaming, !isTextEncodingConversionRunning else { return }
+        let sources = orderedSelection(pane(for: side).selectedItemURLs, on: side)
+        guard !sources.isEmpty else { return }
+
+        activatePane(side)
+        isTextEncodingConversionRunning = true
+        statusMessage = "Force re-converting text encoding for \(sources.count) item(s)..."
+        logger.info("text-encoding", "selection.reconvert.requested", metadata: [
+            "side": side.rawValue,
+            "count": "\(sources.count)",
+            "sources": sources.map(\.path).joined(separator: "|")
+        ])
+
+        let conversionLogger = logger
+        let textEncodingCache = textEncodingCache
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let result = try TextEncodingConversionService(
+                    logger: conversionLogger,
+                    cache: textEncodingCache
+                ).convertFilesToUTF8(sources, force: true) { completedCount, totalCount, fileResult in
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, self.isTextEncodingConversionRunning else { return }
+                        self.statusMessage = self.textEncodingConversionProgress(
+                            completedCount: completedCount,
+                            totalCount: totalCount,
+                            result: fileResult
+                        )
+                    }
+                }
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.isTextEncodingConversionRunning = false
+                    self.refresh(side)
+                    let finalSelection = Set(result.results
+                        .filter { $0.status != .skipped }
+                        .map(\.finalURL))
+                    if !finalSelection.isEmpty {
+                        self.setSelection(finalSelection, for: side)
+                    }
+                    let problemReportURL = self.writeTextEncodingProblemReport(for: result)
+                    self.statusMessage = self.textEncodingConversionSummary(result, problemReportURL: problemReportURL)
+                    self.logger.info("text-encoding", "selection.reconvert.completed", metadata: [
+                        "side": side.rawValue,
+                        "converted": "\(result.convertedCount)",
+                        "utf8": "\(result.alreadyUTF8Count)",
+                        "cachedUTF8": "\(result.cachedUTF8Count)",
+                        "unknownRenamed": "\(result.renamedUnknownCount)",
+                        "skipped": "\(result.skippedCount)",
+                        "failed": "\(result.failedCount)"
+                    ])
+                }
+            } catch {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.isTextEncodingConversionRunning = false
+                    self.reportOperationFailure("text-encoding.reconvert.failed", error: error)
                 }
             }
         }

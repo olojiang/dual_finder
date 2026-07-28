@@ -198,8 +198,21 @@ swift test
 构建、ad-hoc 签名、复制到 `/Applications` 并启动：
 
 ```bash
-./update_app.sh
+./update_app.sh                  # 默认：debug 增量编译（快，日常开发用）
+./update_app.sh --release        # release 优化编译（慢约 10 分钟，用于分发）
+./update_app.sh --skip-tests     # 跳过测试套件（flaky 测试阻塞部署时用）
+./update_app.sh --help           # 查看所有选项
 ```
+
+**构建模式说明：**
+
+| 模式 | 命令 | 编译时间 | 用途 |
+|---|---|---|---|
+| debug 增量（默认） | `./update_app.sh` | 2-5 秒 | 日常开发迭代，只重编译改动文件 |
+| debug 全量 | `./update_app.sh` | 60-90 秒 | SPM 在增量缓存失效时自动回退（如 `Package.swift` 变更） |
+| release | `./update_app.sh --release` | 8-12 分钟 | Swift 优化器全量编译，用于 GitHub Release 或对外分发 |
+
+SPM 自动管理增量/全量回退，无需手动 `swift package clean`。若遇到缓存损坏导致编译异常，删除 `.build/` 目录后重跑即可。
 
 清理 release 目录：
 

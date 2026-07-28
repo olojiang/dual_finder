@@ -382,6 +382,18 @@ struct FilePaneView: View {
         .contextMenu {
             pathAndTerminalContextMenuItems(for: Set([tab.url]), selectTabID: tab.id)
             favoriteContextMenuItems(for: Set([tab.url]))
+            Button("Duplicate Tab") {
+                model.duplicateTabOnSameSide(tabID: tab.id, on: side)
+            }
+            Button("Copy Tab to Other Side") {
+                model.duplicateTabToOppositeSide(tabID: tab.id, on: side)
+            }
+            if model.pane(for: side).tabs.count > 1 {
+                Button("Close Tab") {
+                    model.selectTab(tab.id, on: side)
+                    model.closeSelectedTab(on: side)
+                }
+            }
         }
     }
 
@@ -466,6 +478,9 @@ struct FilePaneView: View {
             Divider()
             Button("Convert Text Encoding to UTF-8") {
                 model.convertSelectedTextEncodingToUTF8(on: side)
+            }
+            Button("Re-Convert to UTF-8 (Repair Mojibake)") {
+                model.reconvertSelectedTextEncodingToUTF8(on: side)
             }
             Button("Extract Filename from Content") {
                 model.extractFilenamesFromContent(on: side)
@@ -593,6 +608,7 @@ struct FilePaneView: View {
                                     .overlay {
                                         if renamingURL != item.url {
                                             RowMouseHandler(
+                                                toolTip: displayName(for: item),
                                                 mouseDown: { modifierFlags in
                                                     selectItemFromRowMouseDown(
                                                         item.url,
@@ -2161,6 +2177,7 @@ private struct FilePaneSummary {
 }
 
 private struct RowMouseHandler: NSViewRepresentable {
+    let toolTip: String?
     let mouseDown: (NSEvent.ModifierFlags) -> Void
     let mouseUp: (NSEvent.ModifierFlags) -> Void
     let doubleClick: () -> Void
@@ -2169,6 +2186,7 @@ private struct RowMouseHandler: NSViewRepresentable {
 
     func makeNSView(context: Context) -> MouseHandlingView {
         let view = MouseHandlingView()
+        view.toolTip = toolTip
         view.mouseDownAction = mouseDown
         view.mouseUpAction = mouseUp
         view.doubleClickAction = doubleClick
@@ -2178,6 +2196,7 @@ private struct RowMouseHandler: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: MouseHandlingView, context: Context) {
+        nsView.toolTip = toolTip
         nsView.mouseDownAction = mouseDown
         nsView.mouseUpAction = mouseUp
         nsView.doubleClickAction = doubleClick
@@ -2681,6 +2700,7 @@ private struct FileRow: View, Equatable {
             Text(displayName)
                 .lineLimit(1)
                 .truncationMode(.middle)
+                .help(displayName)
         }
     }
 
