@@ -80,7 +80,7 @@ struct OperationScanCacheTests {
 
         try cache.setPlan(OperationScanPlan(totalBytes: 42, totalItems: 7), for: folder, modifiedAt: modifiedAt)
 
-        try await Task.sleep(nanoseconds: 300_000_000)
+        try await Task.sleep(nanoseconds: 200_000_000)
 
         let reloaded = OperationScanCache(storageURL: cacheURL, dateProvider: { now }, debounceInterval: 60)
         #expect(reloaded.plan(for: folder, modifiedAt: modifiedAt) == OperationScanPlan(totalBytes: 42, totalItems: 7))

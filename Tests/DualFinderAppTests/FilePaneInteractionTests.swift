@@ -449,6 +449,7 @@ struct FilePaneInteractionTests {
         model.replaceSelection([selectedFile.standardizedFileURL], on: .left, source: "test")
 
         model.toggleFlatView(on: .left)
+        await model.refreshAndWait(.left)
 
         #expect(model.flatViewRoot(for: .left) == root.url.standardizedFileURL)
         #expect(model.items(for: .left).map(\.url).contains(selectedFile.standardizedFileURL))
@@ -456,6 +457,7 @@ struct FilePaneInteractionTests {
         #expect(model.items(for: .left).allSatisfy { !$0.isDirectoryLike })
 
         model.toggleFlatView(on: .left)
+        await model.refreshAndWait(.left)
 
         #expect(model.flatViewRoot(for: .left) == nil)
         #expect(model.pane(for: .left).selectedItemURLs == [selectedFile.standardizedFileURL])
@@ -492,7 +494,7 @@ struct FilePaneInteractionTests {
                items.first(where: { $0.url == cachedFile.standardizedFileURL })?.textEncoding == "utf-8" {
                 break
             }
-            try await Task.sleep(nanoseconds: 50_000_000)
+            try await Task.sleep(nanoseconds: 15_000_000)
         }
         let initialItems = model.items(for: .left)
 
@@ -502,7 +504,7 @@ struct FilePaneInteractionTests {
             if model.items(for: .left).first(where: { $0.url == uncachedFile.standardizedFileURL })?.textEncoding == "utf-8" {
                 break
             }
-            try await Task.sleep(nanoseconds: 50_000_000)
+            try await Task.sleep(nanoseconds: 15_000_000)
         }
 
         #expect(model.items(for: .left).first(where: { $0.url == uncachedFile.standardizedFileURL })?.textEncoding == "utf-8")
@@ -546,7 +548,7 @@ struct FilePaneInteractionTests {
             let items = model.items(for: .left)
             let detected = items.filter { $0.textEncoding != nil }.count
             if detected == fileCount { break }
-            try await Task.sleep(nanoseconds: 50_000_000)
+            try await Task.sleep(nanoseconds: 15_000_000)
         }
 
         let items = model.items(for: .left)
@@ -601,9 +603,9 @@ struct FilePaneInteractionTests {
         for _ in 0..<60 {
             let items = model.items(for: .left)
             if items.allSatisfy({ $0.size != nil }) { break }
-            try await Task.sleep(nanoseconds: 50_000_000)
+            try await Task.sleep(nanoseconds: 15_000_000)
         }
-        try await Task.sleep(nanoseconds: 50_000_000)
+        try await Task.sleep(nanoseconds: 15_000_000)
 
         let items = model.items(for: .left)
         let sizes = items.sorted { $0.name < $1.name }.map(\.size)
@@ -626,10 +628,10 @@ struct FilePaneInteractionTests {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString("external-change-test", forType: .string)
 
-        // Wait for the poll to detect the change
-        for _ in 0..<20 {
+        // Wait for the poll to detect the change (model polls every 0.5s)
+        for _ in 0..<40 {
             if model.pasteboardRevision != initialRevision { break }
-            try await Task.sleep(nanoseconds: 50_000_000)
+            try await Task.sleep(nanoseconds: 15_000_000)
         }
 
         #expect(model.pasteboardRevision != initialRevision)
@@ -679,7 +681,7 @@ struct FilePaneInteractionTests {
         model.compressSelectionToZip(on: .left)
 
         for _ in 0..<40 {
-            try await Task.sleep(nanoseconds: 50_000_000)
+            try await Task.sleep(nanoseconds: 15_000_000)
             if FileManager.default.fileExists(atPath: root.url.appendingPathComponent("a.zip").path) {
                 break
             }
@@ -698,12 +700,12 @@ struct FilePaneInteractionTests {
 
         let initial = model.volumeRevision
         NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didMountNotification, object: nil)
-        try await Task.sleep(nanoseconds: 100_000_000)
+        try await Task.sleep(nanoseconds: 50_000_000)
 
         #expect(model.volumeRevision == initial + 1)
 
         NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didUnmountNotification, object: nil)
-        try await Task.sleep(nanoseconds: 100_000_000)
+        try await Task.sleep(nanoseconds: 50_000_000)
 
         #expect(model.volumeRevision == initial + 2)
     }
@@ -1071,7 +1073,7 @@ struct FilePaneInteractionTests {
             if model.pane(for: .left).selectedItemURLs.contains(merged) {
                 break
             }
-            try await Task.sleep(nanoseconds: 50_000_000)
+            try await Task.sleep(nanoseconds: 15_000_000)
         }
 
         #expect(try String(contentsOf: merged, encoding: .utf8) == "three\none\ntwo")
@@ -1132,7 +1134,7 @@ struct FilePaneInteractionTests {
             if selection.count == 2, !selection.contains(file.standardizedFileURL) {
                 break
             }
-            try await Task.sleep(nanoseconds: 50_000_000)
+            try await Task.sleep(nanoseconds: 15_000_000)
         }
 
         let first = root.url.appendingPathComponent("第一篇.txt").standardizedFileURL
@@ -1183,13 +1185,13 @@ struct FilePaneInteractionTests {
     private func waitForCall(
         _ runner: AppRecordingCommandRunner,
         arguments: [String],
-        attempts: Int = 40
+        attempts: Int = 20
     ) async throws {
         for _ in 0..<attempts {
             if runner.containsCall(arguments: arguments) {
                 return
             }
-            try await Task.sleep(nanoseconds: 50_000_000)
+            try await Task.sleep(nanoseconds: 15_000_000)
         }
         Issue.record("Timed out waiting for command: \(arguments.joined(separator: " "))")
     }

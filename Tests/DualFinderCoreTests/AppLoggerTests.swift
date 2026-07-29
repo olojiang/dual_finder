@@ -15,7 +15,7 @@ struct AppLoggerTests {
         }
         logger.info("file-operation", "sync.skip-progress", metadata: ["skippedItems": "1"])
 
-        try await Task.sleep(nanoseconds: 300_000_000)
+        try await Task.sleep(nanoseconds: 200_000_000)
 
         let contents = try String(contentsOf: root.url.appendingPathComponent(logFileName(in: root.url)), encoding: .utf8)
         let debugIdenticalCount = contents.components(separatedBy: "sync.skip-identical").count - 1

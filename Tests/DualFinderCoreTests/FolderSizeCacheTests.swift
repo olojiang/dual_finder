@@ -136,7 +136,7 @@ struct FolderSizeCacheTests {
         try cache.setSize(42, for: root.url.appendingPathComponent("Folder"), modifiedAt: date)
 
         // Wait for debounce timer to fire
-        try await Task.sleep(nanoseconds: 300_000_000)
+        try await Task.sleep(nanoseconds: 200_000_000)
 
         let reloaded = FolderSizeCache(storageURL: cacheURL, debounceInterval: 60)
         #expect(reloaded.size(for: root.url.appendingPathComponent("Folder"), modifiedAt: date) == 42)
