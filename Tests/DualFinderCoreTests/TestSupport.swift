@@ -17,9 +17,18 @@ final class TemporaryDirectory {
 }
 
 final class CapturingLogger: AppLogging, @unchecked Sendable {
-    private(set) var messages: [String] = []
+    private let lock = NSLock()
+    private var _messages: [String] = []
+
+    var messages: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return _messages
+    }
 
     func log(_ level: LogLevel, _ category: String, _ message: String, metadata: [String: String]) {
-        messages.append("\(level.rawValue) \(category) \(message) \(metadata)")
+        lock.lock()
+        _messages.append("\(level.rawValue) \(category) \(message) \(metadata)")
+        lock.unlock()
     }
 }

@@ -73,9 +73,7 @@ struct ProcessCommandRunnerTests {
     @Test("terminates running process when cancelled")
     func terminatesRunningProcessWhenCancelled() throws {
         let cancellation = FileOperationCancellation()
-        DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) {
-            cancellation.cancel()
-        }
+        Task { try? await Task.sleep(for: .milliseconds(200)); cancellation.cancel() }
 
         let startedAt = Date()
         #expect(throws: FileOperationError.cancelled) {
@@ -86,6 +84,10 @@ struct ProcessCommandRunnerTests {
                 cancellation: cancellation
             )
         }
-        #expect(Date().timeIntervalSince(startedAt) < 2)
+        // sleep 5 would naturally complete at ~5s; cancellation must return
+        // well before that. Tighten to 1.5s to verify cancel actually fires
+        // (rather than the test passing because sleep finished). Allow slack
+        // for parallel-test scheduling jitter on the global dispatch queue.
+        #expect(Date().timeIntervalSince(startedAt) < 1.5)
     }
 }
