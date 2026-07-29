@@ -1115,22 +1115,34 @@ struct FilePaneView: View {
     private func footerStats(for items: [FileItem]) -> some View {
         let summary = FilePaneSummary(items: items)
         let freeSpaceText = formattedFreeSpace
+        let loadDurationText = formattedListingDuration
 
         return HStack(spacing: 12) {
             summaryMetric("Files", value: "\(summary.fileCount)")
             summaryMetric("Size", value: summary.formattedFileSize)
             summaryMetric("Folders", value: "\(summary.folderCount)")
             summaryMetric("Free space", value: freeSpaceText)
+            if let loadDurationText {
+                summaryMetric("Load", value: loadDurationText)
+            }
         }
         .font(.caption2)
         .foregroundStyle(.secondary)
         .monospacedDigit()
-        .accessibilityLabel("Files \(summary.fileCount), total size \(summary.formattedFileSize), folders \(summary.folderCount), free space \(freeSpaceText)")
+        .accessibilityLabel("Files \(summary.fileCount), total size \(summary.formattedFileSize), folders \(summary.folderCount), free space \(freeSpaceText)\(loadDurationText.map { ", load time \($0)" } ?? "")")
     }
 
     private var formattedFreeSpace: String {
         guard let freeSpaceCapacity else { return "--" }
         return ByteCountFormatter.string(fromByteCount: freeSpaceCapacity, countStyle: .file)
+    }
+
+    private var formattedListingDuration: String? {
+        guard let duration = model.lastListingDuration else { return nil }
+        if duration < 1 {
+            return String(format: "%.0fms", duration * 1000)
+        }
+        return String(format: "%.1fs", duration)
     }
 
     private func summaryMetric(_ title: String, value: String) -> some View {

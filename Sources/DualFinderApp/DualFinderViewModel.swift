@@ -154,6 +154,7 @@ final class DualFinderViewModel: ObservableObject {
     @Published var navigationRevealRequest: NavigationRevealRequest?
     @Published private(set) var pasteboardRevision = 0
     @Published private(set) var volumeRevision = 0
+    @Published private(set) var lastListingDuration: TimeInterval? = nil
     @Published private(set) var fileOperationQueue: [QueuedFileOperation] = []
     @Published var fileConflictDialogRequest: FileConflictDialogRequest? {
         didSet {
@@ -1411,6 +1412,7 @@ final class DualFinderViewModel: ObservableObject {
         refreshCancellations[side] = cancellation
 
         DispatchQueue.global(qos: .userInitiated).async {
+            let listingStartedAt = Date()
             do {
                 let nextItems = try service.contents(
                     of: currentURL,
@@ -1430,6 +1432,7 @@ final class DualFinderViewModel: ObservableObject {
                     guard self.pane(for: side).selectedURL.standardizedFileURL == currentURL else { return }
                     self.setItems(nextItems, for: side)
                     self.startTextEncodingScanIfNeeded(for: side, items: nextItems)
+                    self.lastListingDuration = Date().timeIntervalSince(listingStartedAt)
                     self.statusMessage = "\(currentURL.path) - \(nextItems.count) items"
                     logger.info("navigation", "directory.refreshed", metadata: [
                         "side": side.rawValue,
@@ -4183,6 +4186,7 @@ final class DualFinderViewModel: ObservableObject {
         refreshCancellations[side] = cancellation
 
         DispatchQueue.global(qos: .userInitiated).async {
+            let listingStartedAt = Date()
             do {
                 let nextItems = try service.recursiveFileContents(
                     of: root,
@@ -4202,6 +4206,7 @@ final class DualFinderViewModel: ObservableObject {
                     guard self.flatViewRoot(for: side)?.standardizedFileURL == root.standardizedFileURL else { return }
                     self.setItems(nextItems, for: side)
                     self.startTextEncodingScanIfNeeded(for: side, items: nextItems)
+                    self.lastListingDuration = Date().timeIntervalSince(listingStartedAt)
                     self.statusMessage = "Flat: \(root.path) - \(nextItems.count) file(s)"
                     logger.info("flat-view", "refreshed", metadata: [
                         "side": side.rawValue,

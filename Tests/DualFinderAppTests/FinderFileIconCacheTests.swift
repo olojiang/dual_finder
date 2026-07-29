@@ -51,4 +51,23 @@ struct FinderFileIconCacheTests {
         cache.clear()
         #expect(cache.iconLoadCount == 0)
     }
+
+    @Test("cache holds more than the legacy 200-entry limit")
+    func cacheHoldsMoreThanLegacy200Entries() {
+        // Regression guard: countLimit was 200, causing thrash on 10000-file
+        // directories. With the raised limit, 250 unique URLs must all stay
+        // cached (no reload on second access).
+        let cache = FinderFileIconCache(loader: { _ in
+            NSImage(size: NSSize(width: 16, height: 16))
+        })
+        let urls = (0..<250).map { URL(fileURLWithPath: "/tmp/bench/file\($0).txt") }
+
+        for url in urls { _ = cache.icon(for: url) }
+        let loadsAfterFirstPass = cache.iconLoadCount
+        #expect(loadsAfterFirstPass == 250)
+
+        for url in urls { _ = cache.icon(for: url) }
+        // If any entry was evicted, iconLoadCount would exceed 250.
+        #expect(cache.iconLoadCount == 250)
+    }
 }
