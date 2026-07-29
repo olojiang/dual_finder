@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Pre-commit hook: run `swift test` before allowing a commit.
+#
+# Skipped via `git commit --no-verify` (emergencies only).
+# Skips automatically when no .swift files are staged (e.g. docs-only commits).
+
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+
+# Skip if no Swift sources are staged — avoids a ~10s test run for doc/config
+# only commits.
+staged_swift=$(git diff --cached --name-only --diff-filter=ACM -- '*.swift' '*.SWIFT' | wc -l | tr -d ' ')
+if [[ "$staged_swift" -eq 0 ]]; then
+    exit 0
+fi
+
+echo "[pre-commit] Staged Swift changes detected; running swift test..."
+echo "[pre-commit] (bypass with: git commit --no-verify)"
+
+# Run tests; capture output so failures are surfaced cleanly.
+if ! swift test --package-path "$repo_root"; then
+    echo ""
+    echo "[pre-commit] swift test FAILED — commit blocked."
+    echo "[pre-commit] Fix the failing tests, or bypass with: git commit --no-verify"
+    exit 1
+fi
+
+echo "[pre-commit] swift test passed."
+exit 0

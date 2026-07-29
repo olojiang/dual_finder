@@ -481,7 +481,9 @@ public struct TextEncodingConversionService {
             for: standardizedURL,
             size: initialFingerprint?.size,
             modifiedAt: initialFingerprint?.modifiedAt
-        ), lookup.encoding == "utf-8" {
+        ), lookup.encoding == "utf-8",
+           let cachedData = try? Data(contentsOf: standardizedURL),
+           !containsEmbeddedMojibakeMarkers(in: cachedData) {
             if needsUnknownEncodingNameRestore(standardizedURL) {
                 let finalURL = try restoreUnknownEncodingNameIfNeeded(standardizedURL)
                 let finalFingerprint = fileFingerprint(for: finalURL)
@@ -516,19 +518,6 @@ public struct TextEncodingConversionService {
             )
         }
 
-        if !force, case .validUTF8(nulCount: 0, _) = streamingUTF8Validation(at: standardizedURL) {
-            let finalURL = try restoreUnknownEncodingNameIfNeeded(standardizedURL)
-            let finalFingerprint = finalURL == standardizedURL ? initialFingerprint : fileFingerprint(for: finalURL)
-            try cache?.markUTF8(for: finalURL, size: finalFingerprint?.size, modifiedAt: finalFingerprint?.modifiedAt)
-            logger?.info("text-encoding", "file.already-utf8", metadata: ["path": finalURL.path])
-            return TextEncodingConversionResult(
-                originalURL: standardizedURL,
-                finalURL: finalURL,
-                detectedEncoding: "utf-8",
-                status: .alreadyUTF8
-            )
-        }
-
         let data = try Data(contentsOf: standardizedURL)
         guard !data.isEmpty else {
             let finalURL = try restoreUnknownEncodingNameIfNeeded(standardizedURL)
@@ -542,7 +531,8 @@ public struct TextEncodingConversionService {
             )
         }
 
-        if force, let repaired = detectMojibakeRepair(for: data) {
+        let embeddedRepair = detectEmbeddedMojibakeRepair(for: data)
+        if let repaired = (force ? detectMojibakeRepair(for: data) : nil) ?? embeddedRepair {
             let utf8Data = Data(repaired.text.utf8)
             try utf8Data.write(to: standardizedURL, options: .atomic)
             let finalURL = try restoreUnknownEncodingNameIfNeeded(standardizedURL)
@@ -552,7 +542,7 @@ public struct TextEncodingConversionService {
                 "path": finalURL.path,
                 "sourceEncoding": repaired.label,
                 "destinationEncoding": "utf-8",
-                "mode": "force-repair"
+                "mode": force ? "force-repair" : "embedded-mojibake-repair"
             ]
             logger?.info("text-encoding", "file.converted", metadata: metadata)
             return TextEncodingConversionResult(
@@ -560,6 +550,20 @@ public struct TextEncodingConversionService {
                 finalURL: finalURL,
                 detectedEncoding: repaired.label,
                 status: .converted
+            )
+        }
+
+        // Force mode is allowed to repair content, not to reinterpret an otherwise
+        // valid UTF-8 document just because no repair candidate was convincing.
+        if force, case .validUTF8(nulCount: 0, _) = streamingUTF8Validation(at: standardizedURL) {
+            let finalURL = try restoreUnknownEncodingNameIfNeeded(standardizedURL)
+            let finalFingerprint = finalURL == standardizedURL ? initialFingerprint : fileFingerprint(for: finalURL)
+            try cache?.markUTF8(for: finalURL, size: finalFingerprint?.size, modifiedAt: finalFingerprint?.modifiedAt)
+            return TextEncodingConversionResult(
+                originalURL: standardizedURL,
+                finalURL: finalURL,
+                detectedEncoding: "utf-8",
+                status: .alreadyUTF8
             )
         }
 
@@ -985,6 +989,11 @@ public struct TextEncodingConversionService {
 
         for reverse in reverseEncodings {
             guard let recoveredBytes = utf8Text.data(using: reverse.encoding) else { continue }
+            // Foundation can perform a lossy conversion for characters outside the
+            // reverse encoding. Never feed those substituted bytes into a repair pass.
+            guard String(data: recoveredBytes, encoding: reverse.encoding) == utf8Text else {
+                continue
+            }
 
             for candidate in EncodingCandidate.cjkCandidates {
                 guard let text = String(data: recoveredBytes, encoding: candidate.encoding),
@@ -1073,6 +1082,147 @@ public struct TextEncodingConversionService {
             text: cleaned,
             lossyByteCount: lossyByteCount == 0 ? nil : lossyByteCount
         )
+    }
+
+    /// Repairs a second class of mojibake produced when GBK-ish bytes were decoded as
+    /// GB18030. Unlike the Latin-1 form above, the resulting UTF-8 text also contains
+    /// real CJK characters, so the whole file cannot be converted back to bytes in one
+    /// pass. Re-decode only lines containing suspicious scalars and keep a line only when
+    /// the result has fewer private-use/replacement characters. This is deliberately
+    /// conservative: valid UTF-8 files with intentional private-use glyphs must remain
+    /// unchanged unless the candidate is measurably cleaner.
+    private func detectEmbeddedMojibakeRepair(for data: Data) -> DetectedTextEncoding? {
+        guard let utf8Text = String(data: data, encoding: .utf8) else { return nil }
+
+        let lines = utf8Text.split(separator: "\n", omittingEmptySubsequences: false)
+        guard lines.count > 1 else { return nil }
+
+        var repairedLines: [String] = []
+        repairedLines.reserveCapacity(lines.count)
+        var changedLineCount = 0
+        var lossyByteCount = 0
+
+        for substring in lines {
+            let line = String(substring)
+            guard line.unicodeScalars.contains(where: isSuspiciousMojibakeScalar) else {
+                repairedLines.append(line)
+                continue
+            }
+
+            guard let candidate = redecodeGB18030AsGB2312(line) else {
+                repairedLines.append(line)
+                continue
+            }
+
+            guard candidate.text != line,
+                  mojibakeQualityScore(candidate.text) < mojibakeQualityScore(line),
+                  let cleaned = cleanedMojibakeCandidate(candidate.text),
+                  // A short corrupted line can legitimately gain a few replacement
+                  // scalars while removing much more damaging private-use mojibake.
+                  // The quality-score comparison above remains the hard guard.
+                  textLooksReadable(cleaned, replacementThreshold: 0.15),
+                  textHasCJKContent(cleaned) else {
+                repairedLines.append(line)
+                continue
+            }
+
+            repairedLines.append(cleaned)
+            changedLineCount += 1
+            lossyByteCount += candidate.replacedBytes
+        }
+
+        guard changedLineCount > 0 else { return nil }
+
+        let repairedText = repairedLines.joined(separator: "\n")
+        guard mojibakeQualityScore(repairedText) < mojibakeQualityScore(utf8Text),
+              textLooksReadable(repairedText, replacementThreshold: 0.15),
+              textHasCJKContent(repairedText) else {
+            return nil
+        }
+
+        return DetectedTextEncoding(
+            label: "utf-8-embedded-mojibake-gb18030-gb2312-lossy",
+            text: repairedText,
+            lossyByteCount: lossyByteCount == 0 ? nil : lossyByteCount
+        )
+    }
+
+    private func cleanedMojibakeCandidate(_ text: String) -> String? {
+        if let cleaned = cleanedTextIfLikelyText(text) {
+            return cleaned
+        }
+
+        let result = cleanScalars(text)
+        guard result.totalCount > 0,
+              result.nulCount == 0,
+              Double(result.suspiciousControlCount) / Double(result.totalCount) <= 0.06 else {
+            return nil
+        }
+        return result.cleaned
+    }
+
+    private func redecodeGB18030AsGB2312(_ text: String) -> (text: String, replacedBytes: Int)? {
+        guard let sourceEncoding = EncodingCandidate.legacyCandidates.first(where: { $0.label == "gb18030" })?.encoding,
+              // On macOS the GBK codec accepts GB18030 extension mappings. GB2312 is
+              // stricter and therefore gives us a useful, conservative lossy fallback.
+              let destinationEncoding = EncodingCandidate.legacyCandidates.first(where: { $0.label == "gb2312" })?.encoding,
+              !text.isEmpty else {
+            return nil
+        }
+
+        // A replacement character or another unsupported scalar can make the whole
+        // line fail GB18030 encoding. Keep those scalars in place and re-decode only
+        // the adjacent runs that can be represented by the source encoding.
+        var decoded = ""
+        decoded.reserveCapacity(text.count)
+        var encodableRun = ""
+        var replacedBytes = 0
+        var decodedRunCount = 0
+
+        func flushRun() {
+            guard !encodableRun.isEmpty,
+                  let bytes = encodableRun.data(using: sourceEncoding) else {
+                return
+            }
+            let result = decodeCJKWithReplacement(bytes, encoding: destinationEncoding)
+            decoded += result.text
+            replacedBytes += result.replacedBytes
+            decodedRunCount += 1
+            encodableRun.removeAll(keepingCapacity: true)
+        }
+
+        for character in text {
+            let scalarText = String(character)
+            if scalarText.data(using: sourceEncoding) == nil {
+                flushRun()
+                decoded += scalarText
+            } else {
+                encodableRun.append(character)
+            }
+        }
+        flushRun()
+
+        guard decodedRunCount > 0 else { return nil }
+        return (decoded, replacedBytes)
+    }
+
+    private func isSuspiciousMojibakeScalar(_ scalar: Unicode.Scalar) -> Bool {
+        scalar == "\u{fffd}" || (0xe000...0xf8ff).contains(Int(scalar.value))
+    }
+
+    private func containsEmbeddedMojibakeMarkers(in data: Data) -> Bool {
+        guard let text = String(data: data, encoding: .utf8) else { return false }
+        return text.unicodeScalars.contains(where: isSuspiciousMojibakeScalar)
+    }
+
+    private func mojibakeQualityScore(_ text: String) -> Int {
+        text.unicodeScalars.reduce(into: 0) { score, scalar in
+            if scalar == "\u{fffd}" {
+                score += 20
+            } else if (0xe000...0xf8ff).contains(Int(scalar.value)) {
+                score += 8
+            }
+        }
     }
 
     /// Manual lossy CJK decoder: walks bytes, decodes valid 2-byte CJK sequences strictly,

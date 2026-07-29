@@ -1123,4 +1123,58 @@ struct TextEncodingConversionServiceTests {
         let repaired = try String(contentsOf: file, encoding: .utf8)
         #expect(repaired.contains("第二行继续中文内容"))
     }
+
+    @Test("re-convert repairs embedded GB18030 mojibake without touching clean UTF-8 lines")
+    func reconvertRepairsEmbeddedGB18030Mojibake() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("embedded-gb18030-mojibake.txt")
+        let cleanLine = "这是正常的 UTF-8 行，应该保持不变。"
+        let corruptedLine = "师傅笑着说：「你这砘铮\u{e0ef}谖艺馊\u{e42d}甑墓Ψ蛑\u{e1a6}拢\u{e0e9}蚁肟梢猿晌\u{e01c}捣\u{e48f}魏闻\u{e1a7}缘氖テ罚∧阋部梢越逵伤\u{e3cb}瘩补，但是记得，不要伤了人命！」"
+        try (cleanLine + "\n" + corruptedLine + "\n" + cleanLine).write(
+            to: file,
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let result = try TextEncodingConversionService(logger: CapturingLogger()).convertFileToUTF8(file)
+
+        #expect(result.status == .converted)
+        #expect(result.detectedEncoding == "utf-8-embedded-mojibake-gb18030-gb2312-lossy")
+        let repaired = try String(contentsOf: file, encoding: .utf8)
+        #expect(repaired.contains("在我这三年的功夫之下"))
+        #expect(repaired.components(separatedBy: "\n").first == cleanLine)
+        #expect(repaired.components(separatedBy: "\n").last == cleanLine)
+        #expect(!repaired.contains("\u{e0ef}"))
+    }
+
+    @Test("force re-convert preserves intentional private-use UTF-8 glyphs")
+    func forceReconvertPreservesIntentionalPrivateUseGlyphs() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("private-use-utf8.txt")
+        let sourceText = "正常文本\n" + String(repeating: "\u{e4c6}", count: 20) + "\n后续文本"
+        try sourceText.write(to: file, atomically: true, encoding: .utf8)
+
+        let result = try TextEncodingConversionService(logger: CapturingLogger()).convertFileToUTF8(file, force: true)
+
+        #expect(result.status == .alreadyUTF8)
+        #expect(result.detectedEncoding == "utf-8")
+        #expect(try String(contentsOf: file, encoding: .utf8) == sourceText)
+    }
+
+    @Test("force re-convert repairs mojibake runs next to replacement characters")
+    func forceReconvertRepairsMojibakeRunsNextToReplacementCharacters() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("mojibake-with-replacements.txt")
+        let corruptedLine = "\u{3000}\u{3000}男人淫笑着说：“臊拢\u{e0cc}鸱丫⒘耍\u{e0ef}僭趺囱\u{e294}\u{e0d9}退阆衷谖曳趴\u{e023}悖\u{e0e9}蚁旅婺嵌\u{e08b}骰共皇且丫\u{e13c}H进过你的吕锪耍\u{e0d5}佟\u{e11a}\u{e133}佟\u{e11a}\u{e11a}\u{fffd}"
+        try ("正常 UTF-8 行\n" + corruptedLine + "\n正常 UTF-8 行")
+            .write(to: file, atomically: true, encoding: .utf8)
+
+        let result = try TextEncodingConversionService(logger: CapturingLogger()).convertFileToUTF8(file, force: true)
+
+        #expect(result.status == .converted)
+        #expect(result.detectedEncoding == "utf-8-embedded-mojibake-gb18030-gb2312-lossy")
+        let repaired = try String(contentsOf: file, encoding: .utf8)
+        #expect(!repaired.contains("\u{e0cc}"))
+        #expect(repaired.contains("�"))
+    }
 }

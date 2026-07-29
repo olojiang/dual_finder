@@ -78,6 +78,26 @@ public struct TextFileSplitService {
 
         let text = normalizeLineEndings(decoded.text)
         let headings = chapterHeadings(in: text)
+        let mergedHeadings = mergedDetectionHeadings(in: text, chapterHeadings: headings)
+
+        if let mergedBoundaries = TextFileMergedSplitDetector.detectBoundaries(headings: mergedHeadings, text: text),
+           mergedBoundaries.count >= 2 {
+            let adjustedBoundaries = rebalanceMergedBoundaries(
+                mergedBoundaries,
+                candidates: mergedHeadings,
+                text: text,
+                sourceURL: sourceURL
+            )
+            let chapters = buildChapters(from: adjustedBoundaries, text: text, sourceURL: sourceURL)
+            if chapters.count >= 2 {
+                return TextFileSplitPreview(
+                    sourceURL: sourceURL.standardizedFileURL,
+                    detectedEncoding: decoded.label,
+                    chapters: chapters
+                )
+            }
+        }
+
         let bodyHeadings: [ChapterHeading]
         if headings.count >= 2 {
             let bodyStartIndex = bodyStartHeadingIndex(in: headings, text: text)
@@ -140,6 +160,30 @@ public struct TextFileSplitService {
         }
     }
 
+    private func buildChapters(
+        from boundaries: [ChapterHeading],
+        text: String,
+        sourceURL: URL
+    ) -> [TextFileSplitChapterPreview] {
+        var reservedOutputNames = Set<String>()
+        return boundaries.enumerated().map { index, heading in
+            let end = index + 1 < boundaries.count ? boundaries[index + 1].range.lowerBound : text.endIndex
+            let content = String(text[heading.range.lowerBound..<end]).trimmingCharacters(in: .newlines)
+            let outputURL = uniqueOutputURL(
+                for: heading.title,
+                sourceURL: sourceURL,
+                reservedNames: reservedOutputNames
+            )
+            reservedOutputNames.insert(outputURL.lastPathComponent)
+            return TextFileSplitChapterPreview(
+                heading: heading.title,
+                outputURL: outputURL,
+                lineNumber: heading.lineNumber,
+                content: content + "\n"
+            )
+        }
+    }
+
     private func decodeText(_ data: Data) -> DecodedText? {
         if let utf8 = String(data: data, encoding: .utf8) {
             return DecodedText(label: "utf-8", text: utf8)
@@ -181,6 +225,7 @@ public struct TextFileSplitService {
                     ordinal: parsed.ordinal,
                     unit: parsed.unit,
                     unitIndex: parsed.unitIndex,
+                    hierarchyRank: parsed.hierarchyRank,
                     lineNumber: lineNumber,
                     range: lineStart..<lineEnd
                 ))
@@ -192,6 +237,174 @@ public struct TextFileSplitService {
         }
 
         return headings
+    }
+
+    private func mergedDetectionHeadings(in text: String, chapterHeadings: [ChapterHeading]) -> [ChapterHeading] {
+        var candidates = chapterHeadings
+        let completionMarkerPositions = completionMarkerPositions(in: text)
+        if let first = chapterHeadings.first,
+           first.range.lowerBound > text.startIndex,
+           text.distance(from: text.startIndex, to: first.range.lowerBound) >= 128,
+           !completionMarkerPositions.isEmpty {
+            candidates.insert(
+                ChapterHeading(
+                    title: "Merged prefix",
+                    ordinal: nil,
+                    unit: nil,
+                    unitIndex: nil,
+                    hierarchyRank: 1,
+                    lineNumber: 1,
+                    range: text.startIndex..<text.startIndex
+                ),
+                at: 0
+            )
+        }
+
+        let articleHeadings = standaloneArticleHeadings(in: text).filter { article in
+            guard !chapterHeadings.contains(where: { chapter in chapter.range == article.range }) else {
+                return false
+            }
+            guard isLikelyMergedDocumentTitle(article.title) else { return false }
+            let previousEnd = chapterHeadings.last(where: { $0.range.upperBound <= article.range.lowerBound })?.range.upperBound
+                ?? text.startIndex
+            return completionMarkerPositions.contains { $0 >= previousEnd && $0 < article.range.lowerBound }
+        }
+        return (candidates + articleHeadings)
+            .sorted { $0.range.lowerBound < $1.range.lowerBound }
+    }
+
+    private func completionMarkerPositions(in text: String) -> [String.Index] {
+        let markers = ["全文完", "全书完", "全本完", "（完）", "(完)"]
+        var positions: [String.Index] = []
+        var lineStart = text.startIndex
+        while lineStart < text.endIndex {
+            let lineEnd = text[lineStart...].firstIndex(of: "\n") ?? text.endIndex
+            let line = text[lineStart..<lineEnd].trimmingCharacters(in: .whitespacesAndNewlines)
+            if markers.contains(where: { line.contains($0) }) {
+                positions.append(lineStart)
+            }
+            guard lineEnd < text.endIndex else { break }
+            lineStart = text.index(after: lineEnd)
+        }
+        return positions
+    }
+
+    private func isLikelyMergedDocumentTitle(_ title: String) -> Bool {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.hasPrefix("第"),
+              !trimmed.hasPrefix("（"),
+              !trimmed.hasPrefix("("),
+              !trimmed.first!.isNumber,
+              !trimmed.contains("【"),
+              !trimmed.contains("目录"),
+              !trimmed.contains("待续"),
+              !trimmed.contains("文心阁"),
+              !trimmed.contains("＊"),
+              !trimmed.contains("*") else {
+            return false
+        }
+        guard trimmed.rangeOfCharacter(from: CharacterSet(charactersIn: "=─—<>±")) == nil else {
+            return false
+        }
+        return trimmed.unicodeScalars.contains {
+            (0x4E00...0x9FFF).contains(Int($0.value)) || (0x41...0x5A).contains(Int($0.value))
+        }
+    }
+
+    private func rebalanceMergedBoundaries(
+        _ boundaries: [ChapterHeading],
+        candidates: [ChapterHeading],
+        text: String,
+        sourceURL: URL
+    ) -> [ChapterHeading] {
+        guard let expectedCount = expectedMergedFileCount(from: sourceURL),
+              expectedCount >= 2,
+              boundaries.count != expectedCount else {
+            return boundaries
+        }
+
+        let completionPositions = completionMarkerPositions(in: text)
+        if boundaries.count > expectedCount {
+            let rankedIndices = boundaries.indices.dropFirst().sorted { lhs, rhs in
+                let leftScore = boundaryCandidateScore(boundaries[lhs], completionPositions: completionPositions)
+                let rightScore = boundaryCandidateScore(boundaries[rhs], completionPositions: completionPositions)
+                return leftScore == rightScore ? lhs < rhs : leftScore > rightScore
+            }
+            let selectedIndices = Set([boundaries.startIndex] + Array(rankedIndices.prefix(expectedCount - 1)))
+            return boundaries.enumerated()
+                .compactMap { selectedIndices.contains($0.offset) ? $0.element : nil }
+        }
+
+        var selected = boundaries
+        let selectedLineNumbers = Set(selected.map(\.lineNumber))
+        let additions = candidates
+            .filter { !selectedLineNumbers.contains($0.lineNumber) }
+            .filter { candidate in
+                guard candidate.ordinal != nil || candidate.unit == nil else { return false }
+                let title = candidate.title
+                return !title.contains("目录")
+                    && !title.contains("作者")
+                    && !title.contains("待续")
+                    && !title.contains("新书")
+                    && !title.contains("字数")
+                    && !title.contains("人物志")
+                    && !title.contains("全文完")
+                    && !title.contains("±")
+                    && !(candidate.hierarchyRank == 0 && candidate.ordinal != 1)
+            }
+            .sorted { lhs, rhs in
+                boundaryCandidateScore(lhs, completionPositions: completionPositions)
+                    > boundaryCandidateScore(rhs, completionPositions: completionPositions)
+            }
+
+        for candidate in additions where selected.count < expectedCount {
+            selected.append(candidate)
+        }
+        return selected.sorted { $0.range.lowerBound < $1.range.lowerBound }
+    }
+
+    private func expectedMergedFileCount(from sourceURL: URL) -> Int? {
+        let name = sourceURL.deletingPathExtension().lastPathComponent
+        let chineseNumerics = "零〇一二三四五六七八九十百千万两兩"
+        if let match = name.range(
+            of: #"[零〇一二三四五六七八九十百千万两兩]+(?:篇|部)(?:小说|作品|合集)?"#,
+            options: .regularExpression
+        ) {
+            let matched = String(name[match])
+            let token = String(matched.prefix { chineseNumerics.contains($0) })
+            if let count = chapterOrdinal(from: token), count >= 2 {
+                return count
+            }
+        }
+
+        let patterns = [
+            #"\d+个合并文件"#,
+            #"共\d+(?:篇|部|本|个)"#,
+            #"(?:\[\d+篇\]|（\d+篇）|\(\d+篇\))"#
+        ]
+        for pattern in patterns {
+            guard let match = name.range(of: pattern, options: .regularExpression) else {
+                continue
+            }
+            let digits = name[match].filter(\.isNumber)
+            if let count = Int(digits), count >= 2 {
+                return count
+            }
+        }
+        return nil
+    }
+
+    private func boundaryCandidateScore(
+        _ heading: ChapterHeading,
+        completionPositions: [String.Index]
+    ) -> Int {
+        var score = 0
+        if heading.ordinal == 1 { score += 80 }
+        if heading.hierarchyRank == 0 { score += 20 }
+        if heading.unit == "节" { score -= 100 }
+        if heading.unit == nil { score += 15 }
+        if completionPositions.contains(where: { $0 < heading.range.lowerBound }) { score += 10 }
+        return score
     }
 
     private func standaloneArticleHeadings(in text: String) -> [ChapterHeading] {
@@ -211,6 +424,7 @@ public struct TextFileSplitService {
                 ordinal: nil,
                 unit: nil,
                 unitIndex: nil,
+                hierarchyRank: 1,
                 lineNumber: line.lineNumber,
                 range: line.range
             ))
@@ -244,13 +458,15 @@ public struct TextFileSplitService {
     private func isStandaloneArticleTitle(_ title: String) -> Bool {
         guard (2...48).contains(title.count),
               !isDecorativeCollectionTitle(title),
+              !title.contains("人物志"),
+              !title.hasPrefix("作者"),
               !startsWithParenthesizedSectionMarker(title),
               !startsWithListMarker(title),
               !isDateLikeLine(title) else {
             return false
         }
 
-        let prosePunctuation = CharacterSet(charactersIn: "。！？!?；;，,")
+        let prosePunctuation = CharacterSet(charactersIn: "。！？!?；;，,：:“”「」『』")
         if title.rangeOfCharacter(from: prosePunctuation) != nil {
             return false
         }
@@ -305,44 +521,87 @@ public struct TextFileSplitService {
         return compact.count <= 12 && separators >= 2 && numbers >= 3
     }
 
-    private func parseHeading(_ line: String) -> (title: String, ordinal: Int?, unit: Character, unitIndex: Int)? {
+    private func parseHeading(_ line: String) -> (title: String, ordinal: Int?, unit: Character, unitIndex: Int, hierarchyRank: Int)? {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.hasPrefix("第") else { return nil }
 
         let units = Set("章节篇回卷部集")
+        let chineseNumerics = "零〇一二三四五六七八九十百千万兩两"
+
+        struct HeadingMatch {
+            let token: String
+            let unit: Character
+            let markerIndex: Int
+            let unitIndex: Int
+            let hasTextAfter: Bool
+        }
+
+        var matches: [HeadingMatch] = []
         var token = ""
-        var titleStart = trimmed.endIndex
-        var unit: Character?
-        var unitIndex: Int?
-        var cursor = trimmed.index(after: trimmed.startIndex)
+        var markerIndex = 0
+        var cursor = trimmed.startIndex
 
         while cursor < trimmed.endIndex {
             let character = trimmed[cursor]
-            if units.contains(character) {
-                unit = character
-                unitIndex = trimmed.distance(from: trimmed.startIndex, to: cursor)
-                titleStart = trimmed.index(after: cursor)
-                break
+            if character == "第" {
+                token = ""
+                markerIndex = trimmed.distance(from: trimmed.startIndex, to: cursor)
+            } else if units.contains(character) {
+                let unitIndex = trimmed.distance(from: trimmed.startIndex, to: cursor)
+                let titleStart = trimmed.index(after: cursor)
+                let hasTextAfter = titleStart < trimmed.endIndex
+                    && !trimmed[titleStart...].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                if !token.isEmpty,
+                   token.allSatisfy({ $0.isNumber || chineseNumerics.contains($0) }) {
+                    matches.append(HeadingMatch(token: token, unit: character, markerIndex: markerIndex, unitIndex: unitIndex, hasTextAfter: hasTextAfter))
+                }
+                token = ""
+            } else {
+                token.append(character)
             }
-            token.append(character)
             cursor = trimmed.index(after: cursor)
         }
 
-        guard let unit,
-              let unitIndex,
-              titleStart < trimmed.endIndex,
-              !token.isEmpty,
-              token.allSatisfy({ $0.isNumber || "零〇一二三四五六七八九十百千万兩两".contains($0) }) else {
+        guard let firstMatch = matches.first, firstMatch.markerIndex <= 24 else {
             return nil
         }
 
+        let chosen: HeadingMatch
+        if let lastWithText = matches.last(where: { $0.hasTextAfter }) {
+            chosen = lastWithText
+        } else {
+            chosen = matches[0]
+        }
+
         let title = trimmed.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard title.count > token.count + 1,
+        let prefix = String(trimmed[..<trimmed.index(trimmed.startIndex, offsetBy: firstMatch.markerIndex)])
+        let titleSuffix = String(trimmed[trimmed.index(trimmed.startIndex, offsetBy: chosen.unitIndex + 1)...])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard title.count > chosen.token.count + 1,
               title.count <= 64,
+              !prefix.contains("新书"),
+              !prefix.contains("推荐"),
+              !prefix.contains("介绍"),
+              !prefix.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("（"),
+              !prefix.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("("),
+              !(titleSuffix.hasPrefix("《") && (chapterOrdinal(from: chosen.token) ?? 0) > 1),
+              !title.contains("字数:"),
               title.rangeOfCharacter(from: CharacterSet(charactersIn: "。！？!?；;，,")) == nil else {
             return nil
         }
-        return (title, chapterOrdinal(from: token), unit, unitIndex)
+        let chosenIndex = matches.lastIndex { match in
+            match.token == chosen.token
+                && match.unit == chosen.unit
+                && match.unitIndex == chosen.unitIndex
+        } ?? 0
+        let hierarchyRank: Int
+        if matches[..<chosenIndex].contains(where: { $0.unit == "部" || $0.unit == "卷" }) {
+            hierarchyRank = 0
+        } else if chosen.unit == "节" {
+            hierarchyRank = 2
+        } else {
+            hierarchyRank = 1
+        }
+        return (title, chapterOrdinal(from: chosen.token), chosen.unit, chosen.unitIndex, hierarchyRank)
     }
 
     private func topLevelHeadings(_ headings: [ChapterHeading]) -> [ChapterHeading] {
@@ -456,11 +715,12 @@ private struct DecodedText {
     let text: String
 }
 
-private struct ChapterHeading {
+struct ChapterHeading {
     let title: String
     let ordinal: Int?
     let unit: Character?
     let unitIndex: Int?
+    let hierarchyRank: Int
     let lineNumber: Int
     let range: Range<String.Index>
 }

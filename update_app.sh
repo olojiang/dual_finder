@@ -257,9 +257,33 @@ pkill -x "Dual Finder" 2>/dev/null || true
 pkill -x "DualFinderApp" 2>/dev/null || true
 pkill -x "DualFinderHotkeyHelper" 2>/dev/null || true
 pkill -f "com.local.dualfinder.hotkey-helper" 2>/dev/null || true
+
+# Wait for processes to fully exit so LaunchServices and the single-instance
+# file lock are released before we replace the bundle and re-launch.
+# Without this, `open` fails with _LSOpenURLsWithCompletionHandler() error -600
+# because LaunchServices still sees the old instance as running.
+for _ in {1..50}; do
+    if ! pgrep -x "$APP_NAME" >/dev/null 2>&1 \
+        && ! pgrep -x "DualFinderApp" >/dev/null 2>&1 \
+        && ! pgrep -x "DualFinderHotkeyHelper" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+
+# Force-kill any stragglers that ignored SIGTERM.
+pkill -9 -x "$APP_NAME" 2>/dev/null || true
+pkill -9 -x "DualFinderApp" 2>/dev/null || true
+pkill -9 -x "DualFinderHotkeyHelper" 2>/dev/null || true
+sleep 0.2
+
 rm -rf "$INSTALL_PATH"
 cp -R "$APP_BUNDLE" "$INSTALL_PATH"
 
 echo "[7/7] Launching from /Applications"
+# Re-register with LaunchServices in case the bundle signature changed
+# during replacement; a stale registration can also trigger error -600.
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister"
+[[ -x "$LSREGISTER" ]] && "$LSREGISTER" -f "$INSTALL_PATH" 2>/dev/null || true
 open "$INSTALL_PATH"
 echo "Installed and launched: $INSTALL_PATH"
