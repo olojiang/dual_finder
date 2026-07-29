@@ -21,6 +21,12 @@ struct FileSearchRequest: Equatable {
     let side: PaneSide
 }
 
+struct NavigationRevealRequest: Equatable {
+    let id = UUID()
+    let side: PaneSide
+    let revealURL: URL
+}
+
 struct SimilarFileDeletionMarkRequest: Equatable {
     let id = UUID()
     let side: PaneSide
@@ -145,6 +151,7 @@ final class DualFinderViewModel: ObservableObject {
     @Published var emptyTrashConfirmationRequest: EmptyTrashConfirmationRequest?
     @Published var mirrorConfirmationRequest: MirrorConfirmationRequest?
     @Published var inlineRenameRequest: InlineRenameRequest?
+    @Published var navigationRevealRequest: NavigationRevealRequest?
     @Published private(set) var pasteboardRevision = 0
     @Published private(set) var volumeRevision = 0
     @Published private(set) var fileOperationQueue: [QueuedFileOperation] = []
@@ -1359,8 +1366,7 @@ final class DualFinderViewModel: ObservableObject {
         }
 
         if let flatRoot = flatViewRoot(for: side) {
-            refreshFlatView(root: flatRoot, on: side)
-            completion?()
+            refreshFlatView(root: flatRoot, on: side, completion: completion)
             return
         }
 
@@ -1673,6 +1679,9 @@ final class DualFinderViewModel: ObservableObject {
             selecting: selection,
             source: "navigate.up"
         )
+        if let selection {
+            navigationRevealRequest = NavigationRevealRequest(side: side, revealURL: selection)
+        }
     }
 
     func navigateIntoSelectedDirectory(_ side: PaneSide) {
@@ -4160,37 +4169,66 @@ final class DualFinderViewModel: ObservableObject {
         ])
     }
 
-    private func refreshFlatView(root: URL, on side: PaneSide) {
-        do {
-            let rule = sortRuleStore.rule(for: root)
-            let nextItems = try fileSystem.recursiveFileContents(
-                of: root,
-                includeHidden: showHiddenFiles,
-                sortRule: rule,
-                folderSizeCache: folderSizeCache,
-                textEncodingCache: textEncodingCache,
-                includeTextEncoding: uiLayoutPreferences.isEncodingColumnVisible
-            )
-            setItems(nextItems, for: side)
-            startTextEncodingScanIfNeeded(for: side, items: nextItems)
-            statusMessage = "Flat: \(root.path) - \(nextItems.count) file(s)"
-            logger.info("flat-view", "refreshed", metadata: [
-                "side": side.rawValue,
-                "root": root.path,
-                "count": "\(nextItems.count)",
-                "showHidden": "\(showHiddenFiles)",
-                "sort": "\(rule.field.rawValue).\(rule.direction.rawValue)"
-            ])
-        } catch {
-            clearFlatViewState(on: side)
-            statusMessage = "Failed to read \(root.path): \(error.localizedDescription)"
-            logger.error("flat-view", "refresh.failed", metadata: [
-                "side": side.rawValue,
-                "root": root.path,
-                "error": error.localizedDescription
-            ])
-            handlePossiblePermissionFailure(error, path: root.path)
-            refresh(side)
+    private func refreshFlatView(root: URL, on side: PaneSide, completion: (@MainActor () -> Void)? = nil) {
+        refreshGeneration[side, default: 0] += 1
+        let generation = refreshGeneration[side] ?? 0
+        let rule = sortRuleStore.rule(for: root)
+        let includeHidden = showHiddenFiles
+        let includeTextEncoding = uiLayoutPreferences.isEncodingColumnVisible
+        let folderSizeCache = folderSizeCache
+        let textEncodingCache = textEncodingCache
+        let logger = logger
+        let service = fileSystem
+        let cancellation = FileOperationCancellation()
+        refreshCancellations[side] = cancellation
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let nextItems = try service.recursiveFileContents(
+                    of: root,
+                    includeHidden: includeHidden,
+                    sortRule: rule,
+                    folderSizeCache: folderSizeCache,
+                    textEncodingCache: textEncodingCache,
+                    includeTextEncoding: includeTextEncoding,
+                    cancellation: cancellation
+                )
+                DispatchQueue.main.async { [weak self] in
+                    defer { completion?() }
+                    guard let self else { return }
+                    guard self.refreshGeneration[side] == generation else { return }
+                    guard self.refreshCancellations[side] === cancellation else { return }
+                    self.refreshCancellations[side] = nil
+                    guard self.flatViewRoot(for: side)?.standardizedFileURL == root.standardizedFileURL else { return }
+                    self.setItems(nextItems, for: side)
+                    self.startTextEncodingScanIfNeeded(for: side, items: nextItems)
+                    self.statusMessage = "Flat: \(root.path) - \(nextItems.count) file(s)"
+                    logger.info("flat-view", "refreshed", metadata: [
+                        "side": side.rawValue,
+                        "root": root.path,
+                        "count": "\(nextItems.count)",
+                        "showHidden": "\(includeHidden)",
+                        "sort": "\(rule.field.rawValue).\(rule.direction.rawValue)"
+                    ])
+                }
+            } catch {
+                DispatchQueue.main.async { [weak self] in
+                    defer { completion?() }
+                    guard let self else { return }
+                    guard self.refreshGeneration[side] == generation else { return }
+                    guard self.refreshCancellations[side] === cancellation else { return }
+                    self.refreshCancellations[side] = nil
+                    self.clearFlatViewState(on: side)
+                    self.statusMessage = "Failed to read \(root.path): \(error.localizedDescription)"
+                    logger.error("flat-view", "refresh.failed", metadata: [
+                        "side": side.rawValue,
+                        "root": root.path,
+                        "error": error.localizedDescription
+                    ])
+                    self.handlePossiblePermissionFailure(error, path: root.path)
+                    self.refresh(side)
+                }
+            }
         }
     }
 
@@ -4202,7 +4240,7 @@ final class DualFinderViewModel: ObservableObject {
         }
     }
 
-    private static let textEncodingScanBatchSize = 20
+    private static let textEncodingScanBatchSize = 200
 
     private func startTextEncodingScanIfNeeded(for side: PaneSide, items: [FileItem]) {
         cancelTextEncodingScan(for: side)

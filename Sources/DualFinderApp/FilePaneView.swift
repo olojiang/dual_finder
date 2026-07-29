@@ -103,6 +103,10 @@ struct FilePaneView: View {
             ])
             restoreFileListFocus(requestID: request.requestID, reason: request.source, revealURL: request.revealURL)
         }
+        .onChange(of: model.navigationRevealRequest) { _, request in
+            guard let request, request.side == side else { return }
+            pendingRevealURL = request.revealURL
+        }
         .onChange(of: model.pane(for: side).selectedURL) { _, url in
             if !isEditingPath {
                 pathText = model.isAndroidPane(side)
@@ -580,6 +584,9 @@ struct FilePaneView: View {
         let visibleFileItems = Array(allVisibleItems.prefix(fileListRenderLimit))
         let hasMoreItems = fileListRenderLimit < allVisibleItems.count
         let selectionSnapshot = FileSelectionSnapshot(selection: model.pane(for: side).selectedItemURLs)
+        // Precompute display names once per body evaluation so each row's
+        // FileRow + RowMouseHandler don't re-run standardizedFileURL.
+        let displayNameCache = makeDisplayNameCache(for: visibleFileItems)
 
         return VStack(spacing: 0) {
             sortHeader
@@ -590,7 +597,7 @@ struct FilePaneView: View {
                             ForEach(visibleFileItems) { item in
                                 FileRow(
                                     item: item,
-                                    displayName: displayName(for: item),
+                                    displayName: displayNameCache[item.url] ?? item.name,
                                     columnWidths: model.columnWidths(for: side),
                                     showsEncoding: model.isEncodingColumnVisible,
                                     isRenaming: renamingURL == item.url,
@@ -608,7 +615,7 @@ struct FilePaneView: View {
                                     .overlay {
                                         if renamingURL != item.url {
                                             RowMouseHandler(
-                                                toolTip: displayName(for: item),
+                                                toolTip: displayNameCache[item.url] ?? item.name,
                                                 mouseDown: { modifierFlags in
                                                     selectItemFromRowMouseDown(
                                                         item.url,
@@ -815,7 +822,7 @@ struct FilePaneView: View {
                             .disabled(model.isAndroidPane(side))
                             similarFileNavigatorControls(scrollProxy: scrollProxy)
                             Spacer()
-                            footerStats
+                            footerStats(for: allVisibleItems)
                         }
                         .padding(8)
                         .background(.bar)
@@ -969,6 +976,16 @@ struct FilePaneView: View {
         return relativePath.isEmpty ? item.name : relativePath
     }
 
+    private func makeDisplayNameCache(for items: [FileItem]) -> [URL: String] {
+        guard model.flatViewRoot(for: side) != nil else { return [:] }
+        var cache: [URL: String] = [:]
+        cache.reserveCapacity(items.count)
+        for item in items {
+            cache[item.url] = displayName(for: item)
+        }
+        return cache
+    }
+
     private var similarReviewItems: [FileItem] {
         similarReviewVisibleItems
     }
@@ -1095,8 +1112,8 @@ struct FilePaneView: View {
         .opacity(0.94)
     }
 
-    private var footerStats: some View {
-        let summary = FilePaneSummary(items: visibleItems)
+    private func footerStats(for items: [FileItem]) -> some View {
+        let summary = FilePaneSummary(items: items)
         let freeSpaceText = formattedFreeSpace
 
         return HStack(spacing: 12) {
@@ -2165,10 +2182,22 @@ private struct FilePaneSummary {
     let folderCount: Int
 
     init(items: [FileItem]) {
-        let files = items.filter { !$0.isDirectoryLike }
-        fileCount = files.count
-        fileTotalSize = files.compactMap(\.size).reduce(0, +)
-        folderCount = items.filter(\.isDirectoryLike).count
+        var files = 0
+        var folders = 0
+        var totalSize: Int64 = 0
+        for item in items {
+            if item.isDirectoryLike {
+                folders += 1
+            } else {
+                files += 1
+                if let size = item.size {
+                    totalSize += size
+                }
+            }
+        }
+        fileCount = files
+        folderCount = folders
+        fileTotalSize = totalSize
     }
 
     var formattedFileSize: String {

@@ -42,8 +42,12 @@ public struct FileSystemService {
         )
         return try urls.map {
             try throwIfCancelled(cancellation)
+            // contentsOfDirectory already prefetched resource values; reuse
+            // them instead of triggering another round-trip per URL.
+            let values = try $0.resourceValues(forKeys: Self.itemResourceKeys)
             return try item(
                 for: $0,
+                resourceValues: values,
                 folderSizeCache: folderSizeCache,
                 textEncodingCache: textEncodingCache,
                 includeTextEncoding: includeTextEncoding

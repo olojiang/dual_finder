@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-struct FinderFileIcon: View {
+struct FinderFileIcon: View, Equatable {
     let url: URL
     var size: CGFloat = 20
     var cache: FinderFileIconCache = .shared
@@ -14,6 +14,10 @@ struct FinderFileIcon: View {
             .frame(width: size, height: size)
             .accessibilityHidden(true)
     }
+
+    nonisolated static func == (lhs: FinderFileIcon, rhs: FinderFileIcon) -> Bool {
+        lhs.url == rhs.url && lhs.size == rhs.size
+    }
 }
 
 @MainActor
@@ -25,8 +29,8 @@ final class FinderFileIconCache {
     private(set) var iconLoadCount = 0
 
     init(
-        countLimit: Int = 200,
-        totalCostLimit: Int = 16 * 1024 * 1024,
+        countLimit: Int = 2_000,
+        totalCostLimit: Int = 64 * 1024 * 1024,
         loader: @escaping (URL) -> NSImage = { url in
             NSWorkspace.shared.icon(forFile: url.path)
         }
