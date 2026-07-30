@@ -41,6 +41,24 @@ struct FileOperationProgressCoalescerTests {
         #expect(coalescer.take(for: id) == nil)
     }
 
+    @Test("take drains pending progress so a subsequent take returns nil")
+    func takeDrainsPendingProgress() async throws {
+        let flushed = Locked(false)
+        let coalescer = FileOperationProgressCoalescer(flushDelay: 0.05) { _ in
+            flushed.withLock { $0 = true }
+        }
+        let id = UUID()
+        coalescer.record(sampleProgress(completedItems: 5), for: id)
+
+        let deadline = Date().addingTimeInterval(1)
+        while Date() < deadline, !flushed.value {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+
+        #expect(coalescer.take(for: id)?.completedItems == 5)
+        #expect(coalescer.take(for: id) == nil)
+    }
+
     private func sampleProgress(completedItems: Int) -> FileOperationProgress {
         FileOperationProgress(
             completedBytes: 0,

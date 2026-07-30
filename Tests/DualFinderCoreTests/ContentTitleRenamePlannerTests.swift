@@ -175,7 +175,7 @@ struct ContentTitleRenamePlannerTests {
         let source = root.url.appendingPathComponent("source.txt")
         try "Title\nBody".write(to: source, atomically: true, encoding: .utf8)
 
-        let plan = ContentTitleRenamePlanner().plan(for: [
+        let plan = try ContentTitleRenamePlanner().plan(for: [
             item(named: source.lastPathComponent, in: root.url)
         ])
 
@@ -193,7 +193,7 @@ struct ContentTitleRenamePlannerTests {
         let source = root.url.appendingPathComponent("source.txt")
         try "Title\nBody".write(to: source, atomically: true, encoding: .utf8)
 
-        let plan = ContentTitleRenamePlanner().plan(for: [
+        let plan = try ContentTitleRenamePlanner().plan(for: [
             item(named: source.lastPathComponent, in: root.url)
         ])
 
@@ -212,7 +212,7 @@ struct ContentTitleRenamePlannerTests {
         try "Same Title\nOther body".write(to: second, atomically: true, encoding: .utf8)
         try "Unique Title\nBody".write(to: third, atomically: true, encoding: .utf8)
 
-        let plan = ContentTitleRenamePlanner().plan(for: [
+        let plan = try ContentTitleRenamePlanner().plan(for: [
             item(named: first.lastPathComponent, in: root.url),
             item(named: second.lastPathComponent, in: root.url),
             item(named: third.lastPathComponent, in: root.url)
@@ -236,6 +236,44 @@ struct ContentTitleRenamePlannerTests {
             modifiedAt: nil,
             isHidden: false
         )
+    }
+
+    @Test("plan aborts when pre-cancelled before processing items")
+    func planAbortsWhenPreCancelled() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("a.txt")
+        try "Some Title\nbody".write(to: file, atomically: true, encoding: .utf8)
+
+        let cancellation = FileOperationCancellation()
+        cancellation.cancel()
+
+        #expect(throws: FileOperationError.cancelled) {
+            _ = try ContentTitleRenamePlanner().plan(
+                for: [item(named: file.lastPathComponent, in: root.url)],
+                cancellation: cancellation
+            )
+        }
+    }
+
+    @Test("plan reports progress after each scanned item")
+    func planReportsProgressPerItem() throws {
+        let root = try TemporaryDirectory()
+        var items: [FileItem] = []
+        for index in 0..<3 {
+            let name = "doc-\(index).txt"
+            let file = root.url.appendingPathComponent(name)
+            try "Title \(index)\nbody".write(to: file, atomically: true, encoding: .utf8)
+            items.append(item(named: name, in: root.url))
+        }
+
+        var reportedCounts: [Int] = []
+        let plan = try ContentTitleRenamePlanner().plan(
+            for: items,
+            progress: { reportedCounts.append($0) }
+        )
+
+        #expect(plan.operations.count == 3)
+        #expect(reportedCounts == [1, 2, 3])
     }
 
     private func encoding(named name: String) -> String.Encoding {

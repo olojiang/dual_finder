@@ -77,7 +77,9 @@ public struct FileSystemService {
         folderSizeCache: FolderSizeCache? = nil,
         textEncodingCache: TextEncodingConversionCache? = nil,
         includeTextEncoding: Bool = false,
-        cancellation: FileOperationCancellation? = nil
+        cancellation: FileOperationCancellation? = nil,
+        batchSize: Int = 0,
+        batchCallback: (([FileItem]) -> Void)? = nil
     ) throws -> [FileItem] {
         try throwIfCancelled(cancellation)
         let options: FileManager.DirectoryEnumerationOptions = includeHidden ? [] : [.skipsHiddenFiles]
@@ -90,6 +92,7 @@ public struct FileSystemService {
         }
 
         var items: [FileItem] = []
+        var pendingBatch: [FileItem] = []
         for case let url as URL in enumerator {
             try throwIfCancelled(cancellation)
             let values = try url.resourceValues(forKeys: Self.itemResourceKeys)
@@ -99,13 +102,25 @@ public struct FileSystemService {
                 }
                 continue
             }
-            items.append(try item(
+            let next = try item(
                 for: url,
                 resourceValues: values,
                 folderSizeCache: folderSizeCache,
                 textEncodingCache: textEncodingCache,
                 includeTextEncoding: includeTextEncoding
-            ))
+            )
+            items.append(next)
+            if batchSize > 0, let batchCallback {
+                pendingBatch.append(next)
+                if pendingBatch.count >= batchSize {
+                    batchCallback(pendingBatch)
+                    pendingBatch.removeAll(keepingCapacity: true)
+                }
+            }
+        }
+
+        if batchSize > 0, let batchCallback, !pendingBatch.isEmpty {
+            batchCallback(pendingBatch)
         }
 
         return items.sorted { FileSystemService.sortItems($0, $1, rule: sortRule) }
@@ -159,14 +174,17 @@ public struct FileSystemService {
     public func calculateFolderSize(
         at folder: URL,
         cache: FolderSizeCache? = nil,
-        forceRecalculate: Bool = false
+        forceRecalculate: Bool = false,
+        cancellation: FileOperationCancellation? = nil
     ) throws -> FolderSizeResolution {
+        try throwIfCancelled(cancellation)
         let modifiedAt = try folder.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
         if !forceRecalculate, let cache, let cachedSize = cache.size(for: folder, modifiedAt: modifiedAt) {
             return .cached(cachedSize)
         }
 
-        let size = try recursiveSize(of: folder)
+        try throwIfCancelled(cancellation)
+        let size = try recursiveSize(of: folder, cancellation: cancellation)
         try cache?.setSize(size, for: folder, modifiedAt: modifiedAt)
         return .computed(size)
     }
@@ -222,7 +240,7 @@ public struct FileSystemService {
         )
     }
 
-    private func recursiveSize(of folder: URL) throws -> Int64 {
+    private func recursiveSize(of folder: URL, cancellation: FileOperationCancellation? = nil) throws -> Int64 {
         let options: FileManager.DirectoryEnumerationOptions = []
         guard let enumerator = fileManager.enumerator(
             at: folder,
@@ -234,6 +252,7 @@ public struct FileSystemService {
 
         var total: Int64 = 0
         for case let url as URL in enumerator {
+            try throwIfCancelled(cancellation)
             guard let values = try? url.resourceValues(forKeys: Self.folderSizeResourceKeys) else { continue }
             guard values.isSymbolicLink != true else { continue }
             if values.isRegularFile == true {

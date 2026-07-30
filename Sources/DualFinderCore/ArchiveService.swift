@@ -70,7 +70,8 @@ public struct ArchiveService {
 
     public func compressToZip(
         sources: [URL],
-        cancellation: FileOperationCancellation? = nil
+        cancellation: FileOperationCancellation? = nil,
+        progress: ((Int, Int) -> Void)? = nil
     ) throws -> URL {
         let items = Self.compressibleSources(from: sources)
         guard !items.isEmpty else { throw ArchiveError.nothingToCompress }
@@ -90,8 +91,9 @@ public struct ArchiveService {
         ])
 
         try throwIfCancelled(cancellation)
-        try runZipCreate(items: items, parentDirectory: parentDirectory, destination: destination)
+        try runZipCreate(items: items, parentDirectory: parentDirectory, destination: destination, cancellation: cancellation)
 
+        progress?(items.count, items.count)
         logger?.info("archive", "compress.completed", metadata: ["destination": destination.path])
         return destination.standardizedFileURL
     }
@@ -99,14 +101,21 @@ public struct ArchiveService {
     public func extract(
         archives: [URL],
         mode: ArchiveExtractionMode,
-        cancellation: FileOperationCancellation? = nil
+        cancellation: FileOperationCancellation? = nil,
+        progress: ((Int, Int) -> Void)? = nil
     ) throws {
         let items = Self.extractableArchives(from: archives)
         guard !items.isEmpty else { throw ArchiveError.noArchives }
+        let total = items.count
 
+        var processed = 0
         for archive in items {
             try throwIfCancelled(cancellation)
-            guard let format = ArchiveFormatDetector.format(for: archive) else { continue }
+            guard let format = ArchiveFormatDetector.format(for: archive) else {
+                processed += 1
+                progress?(processed, total)
+                continue
+            }
             let parent = archive.deletingLastPathComponent()
             let destinationDirectory = try extractionDestination(
                 for: archive,
@@ -125,7 +134,10 @@ public struct ArchiveService {
             ])
 
             try throwIfCancelled(cancellation)
-            try runExtract(archive: archive, format: format, destination: destinationDirectory)
+            try runExtract(archive: archive, format: format, destination: destinationDirectory, cancellation: cancellation)
+
+            processed += 1
+            progress?(processed, total)
 
             logger?.info("archive", "extract.completed", metadata: [
                 "archive": archive.path,
@@ -176,7 +188,7 @@ public struct ArchiveService {
         }
     }
 
-    private func runZipCreate(items: [URL], parentDirectory: URL, destination: URL) throws {
+    private func runZipCreate(items: [URL], parentDirectory: URL, destination: URL, cancellation: FileOperationCancellation?) throws {
         #if os(macOS)
         var arguments = ["-r", "-q", destination.path]
         arguments.append(contentsOf: items.map(\.lastPathComponent))
@@ -184,7 +196,8 @@ public struct ArchiveService {
             commandLabel: "zip",
             executables: ["/usr/bin/zip"],
             arguments: arguments,
-            workingDirectory: parentDirectory
+            workingDirectory: parentDirectory,
+            cancellation: cancellation
         )
         #elseif os(Windows)
         throw ArchiveError.unsupportedFormat(.zip)
@@ -193,25 +206,26 @@ public struct ArchiveService {
         #endif
     }
 
-    private func runExtract(archive: URL, format: ArchiveFormat, destination: URL) throws {
+    private func runExtract(archive: URL, format: ArchiveFormat, destination: URL, cancellation: FileOperationCancellation?) throws {
         switch format {
         case .zip:
-            try extractZip(archive: archive, destination: destination)
+            try extractZip(archive: archive, destination: destination, cancellation: cancellation)
         case .tar, .tarGzip, .tarBzip2, .tarXz, .gzip, .bzip2, .xz:
-            try extractTarFamily(archive: archive, destination: destination)
+            try extractTarFamily(archive: archive, destination: destination, cancellation: cancellation)
         case .sevenZip, .rar, .iso:
-            try extractWithExternalTool(archive: archive, destination: destination)
+            try extractWithExternalTool(archive: archive, destination: destination, cancellation: cancellation)
         }
     }
 
-    private func extractZip(archive: URL, destination: URL) throws {
+    private func extractZip(archive: URL, destination: URL, cancellation: FileOperationCancellation?) throws {
         #if os(macOS)
         if fileManager.fileExists(atPath: "/usr/bin/ditto") {
             try runRequiredCommand(
                 commandLabel: "ditto",
                 executables: ["/usr/bin/ditto"],
                 arguments: ["-xk", archive.path, destination.path],
-                workingDirectory: nil
+                workingDirectory: nil,
+                cancellation: cancellation
             )
             return
         }
@@ -219,41 +233,45 @@ public struct ArchiveService {
             commandLabel: "unzip",
             executables: ["/usr/bin/unzip"],
             arguments: ["-qq", "-d", destination.path, archive.path],
-            workingDirectory: nil
+            workingDirectory: nil,
+            cancellation: cancellation
         )
         #elseif os(Windows)
         try runRequiredCommand(
             commandLabel: "tar",
             executables: ["tar.exe"],
             arguments: ["-xf", archive.path, "-C", destination.path],
-            workingDirectory: nil
+            workingDirectory: nil,
+            cancellation: cancellation
         )
         #else
         throw ArchiveError.unsupportedFormat(.zip)
         #endif
     }
 
-    private func extractTarFamily(archive: URL, destination: URL) throws {
+    private func extractTarFamily(archive: URL, destination: URL, cancellation: FileOperationCancellation?) throws {
         #if os(macOS)
         try runRequiredCommand(
             commandLabel: "tar",
             executables: ["/usr/bin/tar"],
             arguments: ["-xf", archive.path, "-C", destination.path],
-            workingDirectory: nil
+            workingDirectory: nil,
+            cancellation: cancellation
         )
         #elseif os(Windows)
         try runRequiredCommand(
             commandLabel: "tar",
             executables: ["tar.exe"],
             arguments: ["-xf", archive.path, "-C", destination.path],
-            workingDirectory: nil
+            workingDirectory: nil,
+            cancellation: cancellation
         )
         #else
         throw ArchiveError.unsupportedFormat(.tar)
         #endif
     }
 
-    private func extractWithExternalTool(archive: URL, destination: URL) throws {
+    private func extractWithExternalTool(archive: URL, destination: URL, cancellation: FileOperationCancellation?) throws {
         let toolCandidates = sevenZipExecutables() + unarExecutables()
         guard !toolCandidates.isEmpty else {
             throw ArchiveError.toolNotFound("7z or unar")
@@ -267,14 +285,16 @@ public struct ArchiveService {
                         commandLabel: "unar",
                         executables: [executable],
                         arguments: ["-q", "-o", destination.path, archive.path],
-                        workingDirectory: nil
+                        workingDirectory: nil,
+                        cancellation: cancellation
                     )
                 } else {
                     try runRequiredCommand(
                         commandLabel: "7z",
                         executables: [executable],
                         arguments: ["x", "-y", "-o\(destination.path)", archive.path],
-                        workingDirectory: nil
+                        workingDirectory: nil,
+                        cancellation: cancellation
                     )
                 }
                 return
@@ -321,17 +341,32 @@ public struct ArchiveService {
         commandLabel: String,
         executables: [String],
         arguments: [String],
-        workingDirectory: URL?
+        workingDirectory: URL?,
+        cancellation: FileOperationCancellation?
     ) throws {
         guard let executable = executables.first(where: { fileManager.isExecutableFile(atPath: $0) }) else {
             throw ArchiveError.toolNotFound(commandLabel)
         }
 
-        let result = try commandRunner.run(
-            executable: executable,
-            arguments: arguments,
-            workingDirectory: workingDirectory
-        )
+        let result: CommandResult
+        do {
+            if let cancellable = commandRunner as? any CancellableCommandRunning {
+                result = try cancellable.run(
+                    executable: executable,
+                    arguments: arguments,
+                    workingDirectory: workingDirectory,
+                    cancellation: cancellation
+                )
+            } else {
+                result = try commandRunner.run(
+                    executable: executable,
+                    arguments: arguments,
+                    workingDirectory: workingDirectory
+                )
+            }
+        } catch FileOperationError.cancelled {
+            throw ArchiveError.cancelled
+        }
         guard result.succeeded else {
             let detail = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
             let fallback = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)

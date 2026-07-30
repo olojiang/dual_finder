@@ -76,4 +76,48 @@ struct MirrorDeletionPlannerTests {
         #expect(!FileManager.default.fileExists(atPath: extraDestination.path))
         #expect(logger.messages.contains { $0.contains("mirror.completed") })
     }
+
+    @Test("extrasToDelete aborts when pre-cancelled")
+    func extrasToDeleteAbortsWhenPreCancelled() throws {
+        let root = try TemporaryDirectory()
+        let destinationDirectory = root.url.appendingPathComponent("destination", isDirectory: true)
+        let sourceFolder = root.url.appendingPathComponent("source", isDirectory: true)
+        let destinationFolder = destinationDirectory.appendingPathComponent("source", isDirectory: true)
+        try FileManager.default.createDirectory(at: sourceFolder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destinationFolder, withIntermediateDirectories: true)
+        try "extra".write(to: destinationFolder.appendingPathComponent("extra.txt"), atomically: true, encoding: .utf8)
+
+        let cancellation = FileOperationCancellation()
+        cancellation.cancel()
+
+        #expect(throws: FileOperationError.cancelled) {
+            _ = try MirrorDeletionPlanner.extrasToDelete(
+                sources: [sourceFolder],
+                destinationDirectory: destinationDirectory,
+                cancellation: cancellation
+            )
+        }
+    }
+
+    @Test("deletionSummary aborts when pre-cancelled")
+    func deletionSummaryAbortsWhenPreCancelled() throws {
+        let root = try TemporaryDirectory()
+        let destinationDirectory = root.url.appendingPathComponent("destination", isDirectory: true)
+        let sourceFolder = root.url.appendingPathComponent("source", isDirectory: true)
+        let destinationFolder = destinationDirectory.appendingPathComponent("source", isDirectory: true)
+        try FileManager.default.createDirectory(at: sourceFolder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destinationFolder, withIntermediateDirectories: true)
+        try "extra".write(to: destinationFolder.appendingPathComponent("extra.txt"), atomically: true, encoding: .utf8)
+
+        let cancellation = FileOperationCancellation()
+        cancellation.cancel()
+
+        #expect(throws: FileOperationError.cancelled) {
+            _ = try MirrorDeletionPlanner.deletionSummary(
+                sources: [sourceFolder],
+                destinationDirectory: destinationDirectory,
+                cancellation: cancellation
+            )
+        }
+    }
 }

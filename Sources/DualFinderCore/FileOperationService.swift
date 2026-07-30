@@ -136,12 +136,14 @@ public struct FileOperationService {
 
     public func mirrorDeletionSummary(
         sources: [URL],
-        destinationDirectory: URL
+        destinationDirectory: URL,
+        cancellation: FileOperationCancellation? = nil
     ) throws -> MirrorDeletionSummary {
         try MirrorDeletionPlanner.deletionSummary(
             sources: sources,
             destinationDirectory: destinationDirectory,
-            fileManager: fileManager
+            fileManager: fileManager,
+            cancellation: cancellation
         )
     }
 
@@ -275,7 +277,11 @@ public struct FileOperationService {
         return standardizedDestination
     }
 
-    public func batchRename(_ operations: [BatchRenameOperation]) throws -> [URL] {
+    public func batchRename(
+        _ operations: [BatchRenameOperation],
+        cancellation: FileOperationCancellation? = nil,
+        progress: ((Int) -> Void)? = nil
+    ) throws -> [URL] {
         let changes = try validatedBatchRenameChanges(operations)
         guard !changes.isEmpty else {
             logger?.info("file-operation", "batch-rename.noop")
@@ -290,13 +296,22 @@ public struct FileOperationService {
         var staged: [(temporary: URL, destination: URL, original: URL)] = []
         do {
             for change in changes {
+                if cancellation?.isCancelled == true {
+                    throw FileOperationError.cancelled
+                }
                 let temporary = uniqueTemporaryRenameURL(in: change.source.deletingLastPathComponent())
                 try fileManager.moveItem(at: change.source, to: temporary)
                 staged.append((temporary, change.destination, change.source))
             }
 
+            var committedCount = 0
             for item in staged {
+                if cancellation?.isCancelled == true {
+                    throw FileOperationError.cancelled
+                }
                 try fileManager.moveItem(at: item.temporary, to: item.destination)
+                committedCount += 1
+                progress?(committedCount)
                 logger?.info("file-operation", "batch-rename.item.completed", metadata: [
                     "source": item.original.path,
                     "destination": item.destination.path
@@ -701,7 +716,10 @@ public struct FileOperationService {
         throw FileOperationError.invalidDestination
     }
 
-    public func trashContentsSummary(at trashDirectory: URL = .trashDirectory) throws -> TrashContentsSummary {
+    public func trashContentsSummary(
+        at trashDirectory: URL = .trashDirectory,
+        cancellation: FileOperationCancellation? = nil
+    ) throws -> TrashContentsSummary {
         let resourceKeys: [URLResourceKey] = [
             .isDirectoryKey,
             .isRegularFileKey,
@@ -716,6 +734,9 @@ public struct FileOperationService {
         var containedItemCount = 0
         var totalByteCount: Int64 = 0
         for item in trashedItems {
+            if cancellation?.isCancelled == true {
+                throw FileOperationError.cancelled
+            }
             let summary = trashItemSummary(at: item, resourceKeys: resourceKeys)
             containedItemCount += summary.itemCount
             totalByteCount += summary.byteCount
@@ -728,7 +749,11 @@ public struct FileOperationService {
         )
     }
 
-    public func emptyTrash(at trashDirectory: URL = .trashDirectory) throws -> Int {
+    public func emptyTrash(
+        at trashDirectory: URL = .trashDirectory,
+        cancellation: FileOperationCancellation? = nil,
+        progress: ((Int) -> Void)? = nil
+    ) throws -> Int {
         let trashedItems = try userVisibleTrashItems(
             at: trashDirectory,
             includingPropertiesForKeys: nil
@@ -738,17 +763,23 @@ public struct FileOperationService {
             "path": trashDirectory.path,
             "count": "\(trashedItems.count)"
         ])
+        var removedCount = 0
         for item in trashedItems {
+            if cancellation?.isCancelled == true {
+                throw FileOperationError.cancelled
+            }
             try fileManager.removeItem(at: item)
+            removedCount += 1
+            progress?(removedCount)
             logger?.warning("file-operation", "trash.empty.item.removed", metadata: [
                 "path": item.path
             ])
         }
         logger?.warning("file-operation", "trash.empty.completed", metadata: [
             "path": trashDirectory.path,
-            "count": "\(trashedItems.count)"
+            "count": "\(removedCount)"
         ])
-        return trashedItems.count
+        return removedCount
     }
 
     private func userVisibleTrashItems(

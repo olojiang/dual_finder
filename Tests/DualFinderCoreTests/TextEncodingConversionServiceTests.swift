@@ -496,6 +496,34 @@ struct TextEncodingConversionServiceTests {
         #expect(progress.map(\.3) == [.alreadyUTF8, .alreadyUTF8])
     }
 
+    @Test("convertFilesToUTF8 aborts remaining files after cancellation")
+    func convertFilesToUTF8AbortsAfterCancellation() throws {
+        let root = try TemporaryDirectory()
+        var files: [URL] = []
+        for index in 0..<5 {
+            let url = root.url.appendingPathComponent("file-\(index).txt")
+            try "content-\(index)".write(to: url, atomically: true, encoding: .utf8)
+            files.append(url)
+        }
+
+        let cancellation = FileOperationCancellation()
+        var processedCount = 0
+        #expect(throws: FileOperationError.cancelled) {
+            _ = try TextEncodingConversionService(logger: CapturingLogger()).convertFilesToUTF8(
+                files,
+                cancellation: cancellation,
+                progress: { _, _, _ in
+                    processedCount += 1
+                    if processedCount == 2 {
+                        cancellation.cancel()
+                    }
+                }
+            )
+        }
+
+        #expect(processedCount == 2)
+    }
+
     @Test("batch conversion continues after a file failure")
     func batchConversionContinuesAfterFileFailure() throws {
         let root = try TemporaryDirectory()

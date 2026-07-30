@@ -514,4 +514,54 @@ struct TextFileSplitServiceTests {
 
         return lines.joined(separator: "\n") + "\n"
     }
+
+    @Test("split aborts and writes nothing when pre-cancelled")
+    func splitAbortsWhenPreCancelled() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("合集.txt")
+        try """
+        第01篇 第一篇
+        正文一
+        第02篇 第二篇
+        正文二
+        """.write(to: file, atomically: true, encoding: .utf8)
+
+        let preview = try TextFileSplitService().previewSplit(for: file)
+        let cancellation = FileOperationCancellation()
+        cancellation.cancel()
+
+        #expect(throws: FileOperationError.cancelled) {
+            try TextFileSplitService().split(preview, deleteOriginal: false, cancellation: cancellation)
+        }
+
+        for chapter in preview.chapters {
+            #expect(!FileManager.default.fileExists(atPath: chapter.outputURL.path))
+        }
+        #expect(FileManager.default.fileExists(atPath: file.path))
+    }
+
+    @Test("split reports progress after each chapter file is written")
+    func splitReportsProgressPerChapter() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("合集.txt")
+        try """
+        第01篇 第一篇
+        正文一
+        第02篇 第二篇
+        正文二
+        第03篇 第三篇
+        正文三
+        """.write(to: file, atomically: true, encoding: .utf8)
+
+        let preview = try TextFileSplitService().previewSplit(for: file)
+        var reportedCounts: [Int] = []
+        let created = try TextFileSplitService().split(
+            preview,
+            deleteOriginal: false,
+            progress: { reportedCounts.append($0) }
+        )
+
+        #expect(created.count == 3)
+        #expect(reportedCounts == [1, 2, 3])
+    }
 }

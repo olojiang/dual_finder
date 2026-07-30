@@ -387,6 +387,7 @@ public struct TextEncodingConversionService {
     public func convertFilesToUTF8(
         _ urls: [URL],
         force: Bool = false,
+        cancellation: FileOperationCancellation? = nil,
         progress: ProgressHandler? = nil
     ) throws -> TextEncodingBatchConversionResult {
         cache?.beginBatch()
@@ -398,6 +399,9 @@ public struct TextEncodingConversionService {
         var results: [TextEncodingConversionResult] = []
         results.reserveCapacity(urls.count)
         for (index, url) in urls.enumerated() {
+            if cancellation?.isCancelled == true {
+                throw FileOperationError.cancelled
+            }
             let result: TextEncodingConversionResult = autoreleasepool {
                 do {
                     return try convertFileToUTF8(url, force: force)

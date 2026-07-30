@@ -59,6 +59,9 @@ struct FilePaneView: View {
     @State private var visuallyDeletedSimilarFileURLs: Set<URL> = []
     @State private var fileListKeyboardAnchorURL: URL?
     @State private var fileListSelectionAnchorURL: URL?
+    @State private var immediateFocusWork: DispatchWorkItem?
+    @State private var deferredFocusRestoreWork: DispatchWorkItem?
+    @State private var pendingScrollWork: DispatchWorkItem?
     @State private var toolbarVolumeEntries: [MountedVolumeLocation] = []
     @FocusState private var isFileListFocused: Bool
     @FocusState private var isPathFieldFocused: Bool
@@ -785,7 +788,7 @@ struct FilePaneView: View {
                     }
                     .background {
                         LocalKeyDownMonitor(
-                            isEnabled: isFileListFocused || isSimilarFileNavigatorEnabled,
+                            isEnabled: model.activePaneSide == side,
                             handle: handleFileListKeyDown
                         )
                         .frame(width: 0, height: 0)
@@ -1649,28 +1652,40 @@ struct FilePaneView: View {
         }
 
         let isSimilarReviewArrowKey = isSimilarFileNavigatorEnabled && (event.keyCode == 126 || event.keyCode == 125)
-        guard isFileListFocused || isSimilarReviewArrowKey else {
-            logFileListArrowKeyIgnoredIfNeeded(event, reason: "file-list-not-focused")
-            return false
-        }
-
         let relevantModifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+
+        // Check if another responder has focus (path field, search, terminal, text view)
+        let hasOtherFocus = isPathFieldFocused
+            || isFileSearchFocused
+            || isEmbeddedTerminalFocused(in: event.window)
+            || TextEditingCommandRouter.hasFocusedTextView(in: event.window)
+
         if !isFileListFocused {
-            if let reason = FileListKeyDownFallbackPolicy.ignoreReasonForSimilarReviewArrowFallback(
-                keyCode: event.keyCode,
-                isSimilarFileNavigatorEnabled: isSimilarFileNavigatorEnabled,
-                isFileListFocused: isFileListFocused,
-                activePaneSide: model.activePaneSide,
-                side: side,
-                relevantModifiers: relevantModifiers,
-                isPathFieldFocused: isPathFieldFocused,
-                isFileSearchFocused: isFileSearchFocused,
-                hasTextResponderFocused: TextEditingCommandRouter.hasFocusedTextView(in: event.window),
-                isEmbeddedTerminalFocused: isEmbeddedTerminalFocused(in: event.window)
-            ) {
-                logSimilarFileKeyDownIgnoredIfNeeded(event, reason: reason)
+            if isSimilarReviewArrowKey {
+                // Similar review fallback path — use the existing policy
+                if let reason = FileListKeyDownFallbackPolicy.ignoreReasonForSimilarReviewArrowFallback(
+                    keyCode: event.keyCode,
+                    isSimilarFileNavigatorEnabled: isSimilarFileNavigatorEnabled,
+                    isFileListFocused: isFileListFocused,
+                    activePaneSide: model.activePaneSide,
+                    side: side,
+                    relevantModifiers: relevantModifiers,
+                    isPathFieldFocused: isPathFieldFocused,
+                    isFileSearchFocused: isFileSearchFocused,
+                    hasTextResponderFocused: TextEditingCommandRouter.hasFocusedTextView(in: event.window),
+                    isEmbeddedTerminalFocused: isEmbeddedTerminalFocused(in: event.window)
+                ) {
+                    logSimilarFileKeyDownIgnoredIfNeeded(event, reason: reason)
+                    return false
+                }
+            } else if hasOtherFocus {
+                // Normal mode: another responder genuinely has focus — don't intercept
+                logFileListArrowKeyIgnoredIfNeeded(event, reason: "other-responder-focused")
                 return false
             }
+            // Focus was lost (SwiftUI @FocusState can drop it during rapid body
+            // re-evaluation) but no other responder has it. Recover and continue.
+            restoreFileListFocus(reason: "key-down.focus-recovery")
         }
 
         switch event.keyCode {
@@ -1835,11 +1850,12 @@ struct FilePaneView: View {
             "isSelected": "\(selectionContains(url))",
             "visibleIndex": "\(visibleItems.firstIndex(where: { sameFileIdentity($0.url, revealURL) }) ?? -1)"
         ])
-        DispatchQueue.main.async {
-            withAnimation(.easeInOut(duration: 0.18)) {
-                scrollProxy.scrollTo(revealURL, anchor: .center)
-            }
+        pendingScrollWork?.cancel()
+        let scroll = DispatchWorkItem {
+            scrollProxy.scrollTo(revealURL, anchor: .center)
         }
+        pendingScrollWork = scroll
+        DispatchQueue.main.async(execute: scroll)
     }
 
     private func beginRenaming(_ item: FileItem) {
@@ -2102,21 +2118,31 @@ struct FilePaneView: View {
     }
 
     private func restoreFileListFocus(requestID: String? = nil, reason: String? = nil, revealURL: URL? = nil) {
-        DispatchQueue.main.async {
-            if let revealURL {
-                pendingRevealURL = revealURL
-            }
+        if let revealURL {
+            pendingRevealURL = revealURL
+        }
+
+        // Both focus assertions use cancellable DispatchWorkItems so that rapid
+        // keyboard navigation doesn't pile up dozens of async blocks that fire
+        // at once and confuse SwiftUI's focus engine.
+        immediateFocusWork?.cancel()
+        let immediate = DispatchWorkItem {
             isPathFieldFocused = false
             isFileSearchFocused = false
             isFileListFocused = true
             logFileListFocusRequest(requestID: requestID, reason: reason, revealURL: revealURL)
         }
+        immediateFocusWork = immediate
+        DispatchQueue.main.async(execute: immediate)
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
+        deferredFocusRestoreWork?.cancel()
+        let deferred = DispatchWorkItem {
             isPathFieldFocused = false
             isFileSearchFocused = false
             isFileListFocused = true
         }
+        deferredFocusRestoreWork = deferred
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06, execute: deferred)
     }
 
     private func logFileListFocusRequest(requestID: String?, reason: String?, revealURL: URL?) {

@@ -3,131 +3,6 @@ import Foundation
 import SwiftUI
 import DualFinderCore
 
-struct PathEditRequest: Equatable {
-    let id = UUID()
-    let side: PaneSide
-}
-
-struct PaneFocusRequest: Equatable {
-    let id = UUID()
-    let requestID: String
-    let side: PaneSide
-    let source: String
-    let revealURL: URL?
-}
-
-struct FileSearchRequest: Equatable {
-    let id = UUID()
-    let side: PaneSide
-}
-
-struct NavigationRevealRequest: Equatable {
-    let id = UUID()
-    let side: PaneSide
-    let revealURL: URL
-}
-
-struct SimilarFileDeletionMarkRequest: Equatable {
-    let id = UUID()
-    let side: PaneSide
-    let urls: Set<URL>
-}
-
-struct FolderBookmarkDialogRequest: Identifiable, Equatable {
-    let id = UUID()
-}
-
-struct BatchRenameDialogRequest: Identifiable, Equatable {
-    let id = UUID()
-    let side: PaneSide
-}
-
-struct MergeFilesDialogRequest: Identifiable, Equatable {
-    let id = UUID()
-    let side: PaneSide
-    let sources: [URL]
-    let suggestedName: String
-}
-
-struct SplitFileDialogRequest: Identifiable, Equatable {
-    let id = UUID()
-    let side: PaneSide
-    let preview: TextFileSplitPreview
-}
-
-struct EmptyTrashConfirmationRequest: Identifiable, Equatable {
-    let id = UUID()
-    let summary: TrashContentsSummary
-
-    var formattedTotalSize: String {
-        ByteCountFormatter.string(fromByteCount: summary.totalByteCount, countStyle: .file)
-    }
-
-    var message: String {
-        """
-        This will permanently delete \(summary.topLevelItemCount) item(s) from Trash.
-
-        Contained files/folders: \(summary.containedItemCount)
-        Total size: \(formattedTotalSize)
-        """
-    }
-}
-
-struct MirrorConfirmationRequest: Identifiable, Equatable {
-    let id = UUID()
-    let sourceSide: PaneSide
-    let sources: [URL]
-    let destination: URL
-    let deletionSummary: MirrorDeletionSummary
-
-    var formattedDeletionSize: String {
-        ByteCountFormatter.string(fromByteCount: deletionSummary.totalByteCount, countStyle: .file)
-    }
-}
-
-struct InlineRenameRequest: Equatable {
-    let id = UUID()
-    let side: PaneSide
-    let url: URL
-}
-
-struct ShortcutHelpRequest: Identifiable, Equatable {
-    let id = UUID()
-}
-
-enum FileClipboardOperation: String {
-    case copy
-    case move
-}
-
-private enum AndroidPaneTransferError: LocalizedError {
-    case differentDevices
-
-    var errorDescription: String? {
-        switch self {
-        case .differentDevices:
-            "Android-to-Android transfer currently requires the same device."
-        }
-    }
-}
-
-private final class TextEncodingScanCancellation: @unchecked Sendable {
-    private let lock = NSLock()
-    private var cancelled = false
-
-    var isCancelled: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return cancelled
-    }
-
-    func cancel() {
-        lock.lock()
-        cancelled = true
-        lock.unlock()
-    }
-}
-
 @MainActor
 final class DualFinderViewModel: ObservableObject {
     @Published var leftPane: PaneState
@@ -206,6 +81,21 @@ final class DualFinderViewModel: ObservableObject {
     private var localPaneReturnURLs: [PaneSide: URL] = [:]
     private var androidDevicesLastRefreshedAt: Date?
     private var globalSearchCancellation: FileOperationCancellation?
+    private var directoryComparisonCancellation: FileOperationCancellation?
+    @Published private(set) var isDirectoryComparisonRunning = false
+    private var batchRenameCancellation: FileOperationCancellation?
+    @Published private(set) var isBatchRenameRunning = false
+    private var trashSummaryCancellation: FileOperationCancellation?
+    private var emptyTrashCancellation: FileOperationCancellation?
+    @Published private(set) var isEmptyTrashRunning = false
+    private var splitFileCancellation: FileOperationCancellation?
+    @Published private(set) var isSplitFileRunning = false
+    private var splitPreviewCancellation: FileOperationCancellation?
+    @Published private(set) var isSplitPreviewRunning = false
+    private var contentTitleRenameCancellation: FileOperationCancellation?
+    @Published private(set) var isContentTitleRenameRunning = false
+    private var mirrorPreviewCancellation: FileOperationCancellation?
+    @Published private(set) var isMirrorPreviewRunning = false
     private var archiveCancellation: FileOperationCancellation?
     private var textEncodingScanCancellations: [PaneSide: TextEncodingScanCancellation] = [:]
     private lazy var fileOperationProgressCoalescer = FileOperationProgressCoalescer { [weak self] id in
@@ -222,6 +112,9 @@ final class DualFinderViewModel: ObservableObject {
     private var isArchiveOperationRunning = false
     private var activeTabDrag: (tabID: UUID, sourceSide: PaneSide)?
     @Published private var isTextEncodingConversionRunning = false
+    private var textEncodingConversionCancellation: FileOperationCancellation?
+    private var folderSizeCancellation: FileOperationCancellation?
+    @Published private(set) var isFolderSizeCalculationRunning = false
 
     init(
         initialURL: URL = FileManager.default.homeDirectoryForCurrentUser,
@@ -997,19 +890,41 @@ final class DualFinderViewModel: ObservableObject {
             return
         }
 
-        do {
-            let preview = try TextFileSplitService().previewSplit(for: source)
-            activatePane(side)
-            splitFileDialogRequest = SplitFileDialogRequest(side: side, preview: preview)
-            statusMessage = "Split preview: \(preview.chapters.count) file(s)"
-            logger.info("file-operation", "split-file.dialog.requested", metadata: [
-                "side": side.rawValue,
-                "source": source.path,
-                "count": "\(preview.chapters.count)",
-                "encoding": preview.detectedEncoding
-            ])
-        } catch {
-            reportOperationFailure("split-file.preview.failed", error: error)
+        let cancellation = FileOperationCancellation()
+        splitPreviewCancellation?.cancel()
+        splitPreviewCancellation = cancellation
+        isSplitPreviewRunning = true
+        statusMessage = "Preparing split preview..."
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                let preview = try TextFileSplitService().previewSplit(for: source)
+                Task { @MainActor [weak self] in
+                    guard self?.splitPreviewCancellation === cancellation else { return }
+                    self?.isSplitPreviewRunning = false
+                    self?.activatePane(side)
+                    self?.splitFileDialogRequest = SplitFileDialogRequest(side: side, preview: preview)
+                    self?.statusMessage = "Split preview: \(preview.chapters.count) file(s)"
+                    self?.logger.info("file-operation", "split-file.dialog.requested", metadata: [
+                        "side": side.rawValue,
+                        "source": source.path,
+                        "count": "\(preview.chapters.count)",
+                        "encoding": preview.detectedEncoding
+                    ])
+                }
+            } catch FileOperationError.cancelled {
+                Task { @MainActor [weak self] in
+                    guard self?.splitPreviewCancellation === cancellation else { return }
+                    self?.isSplitPreviewRunning = false
+                    self?.statusMessage = "Split preview cancelled"
+                }
+            } catch {
+                Task { @MainActor [weak self] in
+                    guard self?.splitPreviewCancellation === cancellation else { return }
+                    self?.isSplitPreviewRunning = false
+                    self?.reportOperationFailure("split-file.preview.failed", error: error)
+                }
+            }
         }
     }
 
@@ -2435,19 +2350,57 @@ final class DualFinderViewModel: ObservableObject {
         }
 
         let operations = previews.map { BatchRenameOperation(sourceURL: $0.sourceURL, newName: $0.newName) }
-        do {
-            let renamedURLs = try operationService.batchRename(operations)
-            refresh(side)
-            setSelection(Set(renamedURLs), for: side)
-            let changedCount = previews.filter(\.isChanged).count
-            statusMessage = "Renamed \(changedCount) item(s)"
-            logger.info("batch-rename", "applied", metadata: [
-                "side": side.rawValue,
-                "count": "\(changedCount)"
-            ])
-        } catch {
-            reportOperationFailure("batch-rename.failed", error: error)
+        let cancellation = FileOperationCancellation()
+        batchRenameCancellation?.cancel()
+        batchRenameCancellation = cancellation
+        isBatchRenameRunning = true
+        let total = operations.count
+        let logger = self.logger
+        statusMessage = "Renaming... 0/\(total)"
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                let renamedURLs = try FileOperationService(logger: logger).batchRename(
+                    operations,
+                    cancellation: cancellation,
+                    progress: { completed in
+                        Task { @MainActor [weak self] in
+                            guard self?.batchRenameCancellation === cancellation else { return }
+                            self?.statusMessage = "Renaming... \(completed)/\(total)"
+                        }
+                    }
+                )
+                Task { @MainActor [weak self] in
+                    guard self?.batchRenameCancellation === cancellation else { return }
+                    self?.isBatchRenameRunning = false
+                    self?.refresh(side)
+                    self?.setSelection(Set(renamedURLs), for: side)
+                    let changedCount = previews.filter(\.isChanged).count
+                    self?.statusMessage = "Renamed \(changedCount) item(s)"
+                    self?.logger.info("batch-rename", "applied", metadata: [
+                        "side": side.rawValue,
+                        "count": "\(changedCount)"
+                    ])
+                }
+            } catch FileOperationError.cancelled {
+                Task { @MainActor [weak self] in
+                    guard self?.batchRenameCancellation === cancellation else { return }
+                    self?.isBatchRenameRunning = false
+                    self?.refresh(side)
+                    self?.statusMessage = "Rename cancelled"
+                }
+            } catch {
+                Task { @MainActor [weak self] in
+                    guard self?.batchRenameCancellation === cancellation else { return }
+                    self?.isBatchRenameRunning = false
+                    self?.reportOperationFailure("batch-rename.failed", error: error)
+                }
+            }
         }
+    }
+
+    func cancelBatchRename() {
+        batchRenameCancellation?.cancel()
     }
 
     func extractFilenamesFromContent(on side: PaneSide) {
@@ -2458,33 +2411,77 @@ final class DualFinderViewModel: ObservableObject {
             return
         }
 
-        let plan = ContentTitleRenamePlanner().plan(for: items)
-        guard !plan.operations.isEmpty else {
-            statusMessage = "No extractable filenames found"
-            logger.warning("content-title-rename", "no-operations", metadata: [
-                "side": side.rawValue,
-                "skipped": "\(plan.skipped.count)"
-            ])
-            return
-        }
+        let cancellation = FileOperationCancellation()
+        contentTitleRenameCancellation?.cancel()
+        contentTitleRenameCancellation = cancellation
+        isContentTitleRenameRunning = true
+        let total = items.count
+        statusMessage = "Extracting filenames... 0/\(total)"
 
-        do {
-            let operations = plan.operations
-            let renamedURLs = try operationService.batchRename(operations)
-            refresh(side)
-            setSelection(Set(renamedURLs), for: side)
-            let changedCount = operations.filter { $0.sourceURL.standardizedFileURL != $0.destinationURL }.count
-            statusMessage = plan.skipped.isEmpty
-                ? "Extracted filenames for \(changedCount) item(s)"
-                : "Extracted filenames for \(changedCount) item(s), skipped \(plan.skipped.count)"
-            logger.info("content-title-rename", "applied", metadata: [
-                "side": side.rawValue,
-                "count": "\(changedCount)",
-                "skipped": "\(plan.skipped.count)"
-            ])
-        } catch {
-            reportOperationFailure("content-title-rename.failed", error: error)
+        Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                let plan = try ContentTitleRenamePlanner().plan(
+                    for: items,
+                    cancellation: cancellation,
+                    progress: { scanned in
+                        Task { @MainActor [weak self] in
+                            guard self?.contentTitleRenameCancellation === cancellation else { return }
+                            self?.statusMessage = "Extracting filenames... \(scanned)/\(total)"
+                        }
+                    }
+                )
+                guard !plan.operations.isEmpty else {
+                    Task { @MainActor [weak self] in
+                        guard self?.contentTitleRenameCancellation === cancellation else { return }
+                        self?.isContentTitleRenameRunning = false
+                        self?.statusMessage = "No extractable filenames found"
+                        self?.logger.warning("content-title-rename", "no-operations", metadata: [
+                            "side": side.rawValue,
+                            "skipped": "\(plan.skipped.count)"
+                        ])
+                    }
+                    return
+                }
+
+                let operations = plan.operations
+                let renamedURLs = try FileOperationService(logger: self?.logger).batchRename(
+                    operations,
+                    cancellation: cancellation
+                )
+                Task { @MainActor [weak self] in
+                    guard self?.contentTitleRenameCancellation === cancellation else { return }
+                    self?.isContentTitleRenameRunning = false
+                    self?.refresh(side)
+                    self?.setSelection(Set(renamedURLs), for: side)
+                    let changedCount = operations.filter { $0.sourceURL.standardizedFileURL != $0.destinationURL }.count
+                    self?.statusMessage = plan.skipped.isEmpty
+                        ? "Extracted filenames for \(changedCount) item(s)"
+                        : "Extracted filenames for \(changedCount) item(s), skipped \(plan.skipped.count)"
+                    self?.logger.info("content-title-rename", "applied", metadata: [
+                        "side": side.rawValue,
+                        "count": "\(changedCount)",
+                        "skipped": "\(plan.skipped.count)"
+                    ])
+                }
+            } catch FileOperationError.cancelled {
+                Task { @MainActor [weak self] in
+                    guard self?.contentTitleRenameCancellation === cancellation else { return }
+                    self?.isContentTitleRenameRunning = false
+                    self?.refresh(side)
+                    self?.statusMessage = "Extract filenames cancelled"
+                }
+            } catch {
+                Task { @MainActor [weak self] in
+                    guard self?.contentTitleRenameCancellation === cancellation else { return }
+                    self?.isContentTitleRenameRunning = false
+                    self?.reportOperationFailure("content-title-rename.failed", error: error)
+                }
+            }
         }
+    }
+
+    func cancelContentTitleRename() {
+        contentTitleRenameCancellation?.cancel()
     }
 
     func mergeFiles(_ sources: [URL], named name: String, on side: PaneSide) {
@@ -2520,39 +2517,111 @@ final class DualFinderViewModel: ObservableObject {
 
     func splitFile(_ preview: TextFileSplitPreview, on side: PaneSide) {
         guard !isAndroidPane(side), !isInlineRenaming else { return }
-        do {
-            let created = try TextFileSplitService().split(preview, deleteOriginal: true)
-            refresh(side) { [weak self] in
-                guard let self else { return }
-                self.setSelection(Set(created), for: side)
-                self.requestPaneFocus(side, requestID: UUID().uuidString, source: "split-file.completed")
-                self.statusMessage = "Split \(preview.sourceURL.lastPathComponent) into \(created.count) file(s)"
+        let cancellation = FileOperationCancellation()
+        splitFileCancellation?.cancel()
+        splitFileCancellation = cancellation
+        isSplitFileRunning = true
+        let total = preview.chapters.count
+        statusMessage = "Splitting... 0/\(total)"
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                let created = try TextFileSplitService().split(
+                    preview,
+                    deleteOriginal: true,
+                    cancellation: cancellation,
+                    progress: { completed in
+                        Task { @MainActor [weak self] in
+                            guard self?.splitFileCancellation === cancellation else { return }
+                            self?.statusMessage = "Splitting... \(completed)/\(total)"
+                        }
+                    }
+                )
+                Task { @MainActor [weak self] in
+                    guard self?.splitFileCancellation === cancellation else { return }
+                    self?.isSplitFileRunning = false
+                    self?.refresh(side) { [weak self] in
+                        guard let self else { return }
+                        self.setSelection(Set(created), for: side)
+                        self.requestPaneFocus(side, requestID: UUID().uuidString, source: "split-file.completed")
+                        self.statusMessage = "Split \(preview.sourceURL.lastPathComponent) into \(created.count) file(s)"
+                    }
+                    self?.logger.info("file-operation", "split-file.completed", metadata: [
+                        "side": side.rawValue,
+                        "source": preview.sourceURL.path,
+                        "count": "\(created.count)"
+                    ])
+                }
+            } catch FileOperationError.cancelled {
+                Task { @MainActor [weak self] in
+                    guard self?.splitFileCancellation === cancellation else { return }
+                    self?.isSplitFileRunning = false
+                    self?.refresh(side)
+                    self?.statusMessage = "Split cancelled"
+                }
+            } catch {
+                Task { @MainActor [weak self] in
+                    guard self?.splitFileCancellation === cancellation else { return }
+                    self?.isSplitFileRunning = false
+                    self?.reportOperationFailure("split-file.failed", error: error)
+                }
             }
-            logger.info("file-operation", "split-file.completed", metadata: [
-                "side": side.rawValue,
-                "source": preview.sourceURL.path,
-                "count": "\(created.count)"
-            ])
-        } catch {
-            reportOperationFailure("split-file.failed", error: error)
         }
+    }
+
+    func cancelSplitFile() {
+        splitFileCancellation?.cancel()
     }
 
     func compareDirectories() {
         let left = leftPane.selectedURL
         let right = rightPane.selectedURL
-        do {
-            let results = try DirectoryComparisonService().compare(
-                left: left,
-                right: right,
-                includeHidden: showHiddenFiles
-            )
-            directoryComparisonResults = results
-            let changedCount = results.filter { $0.status != .same }.count
-            statusMessage = "Compared folders: \(changedCount) difference(s)"
-        } catch {
-            reportOperationFailure("directory.compare.failed", error: error)
+        let includeHidden = showHiddenFiles
+        let cancellation = FileOperationCancellation()
+        directoryComparisonCancellation?.cancel()
+        directoryComparisonCancellation = cancellation
+        isDirectoryComparisonRunning = true
+        statusMessage = "Comparing folders..."
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                let results = try DirectoryComparisonService().compare(
+                    left: left,
+                    right: right,
+                    includeHidden: includeHidden,
+                    cancellation: cancellation,
+                    progress: { scannedCount in
+                        Task { @MainActor [weak self] in
+                            guard self?.directoryComparisonCancellation === cancellation else { return }
+                            self?.statusMessage = "Comparing folders... \(scannedCount) scanned"
+                        }
+                    }
+                )
+                Task { @MainActor [weak self] in
+                    guard self?.directoryComparisonCancellation === cancellation else { return }
+                    self?.directoryComparisonResults = results
+                    self?.isDirectoryComparisonRunning = false
+                    let changedCount = results.filter { $0.status != .same }.count
+                    self?.statusMessage = "Compared folders: \(changedCount) difference(s)"
+                }
+            } catch FileOperationError.cancelled {
+                Task { @MainActor [weak self] in
+                    guard self?.directoryComparisonCancellation === cancellation else { return }
+                    self?.isDirectoryComparisonRunning = false
+                    self?.statusMessage = "Folder comparison cancelled"
+                }
+            } catch {
+                Task { @MainActor [weak self] in
+                    guard self?.directoryComparisonCancellation === cancellation else { return }
+                    self?.isDirectoryComparisonRunning = false
+                    self?.reportOperationFailure("directory.compare.failed", error: error)
+                }
+            }
         }
+    }
+
+    func cancelDirectoryComparison() {
+        directoryComparisonCancellation?.cancel()
     }
 
     func syncComparisonEntry(_ entry: DirectoryComparisonEntry, direction: PaneSide) {
@@ -2674,22 +2743,43 @@ final class DualFinderViewModel: ObservableObject {
         ])
 
         let service = operationService
+        let cancellation = FileOperationCancellation()
+        mirrorPreviewCancellation?.cancel()
+        mirrorPreviewCancellation = cancellation
+        isMirrorPreviewRunning = true
+        statusMessage = "Mirror preview..."
         Task {
             do {
                 let summary = try await Task.detached(priority: .userInitiated) {
                     try service.mirrorDeletionSummary(
                         sources: sources,
-                        destinationDirectory: destination
+                        destinationDirectory: destination,
+                        cancellation: cancellation
                     )
                 }.value
-                mirrorConfirmationRequest = MirrorConfirmationRequest(
-                    sourceSide: sourceSide,
-                    sources: sources,
-                    destination: destination,
-                    deletionSummary: summary
-                )
+                Task { @MainActor [weak self] in
+                    guard self?.mirrorPreviewCancellation === cancellation else { return }
+                    self?.isMirrorPreviewRunning = false
+                    self?.mirrorConfirmationRequest = MirrorConfirmationRequest(
+                        sourceSide: sourceSide,
+                        sources: sources,
+                        destination: destination,
+                        deletionSummary: summary
+                    )
+                    self?.statusMessage = "Mirror preview ready"
+                }
+            } catch FileOperationError.cancelled {
+                Task { @MainActor [weak self] in
+                    guard self?.mirrorPreviewCancellation === cancellation else { return }
+                    self?.isMirrorPreviewRunning = false
+                    self?.statusMessage = "Mirror preview cancelled"
+                }
             } catch {
-                reportOperationFailure("mirror.preview.failed", error: error)
+                Task { @MainActor [weak self] in
+                    guard self?.mirrorPreviewCancellation === cancellation else { return }
+                    self?.isMirrorPreviewRunning = false
+                    self?.reportOperationFailure("mirror.preview.failed", error: error)
+                }
             }
         }
     }
@@ -2708,6 +2798,8 @@ final class DualFinderViewModel: ObservableObject {
     }
 
     func cancelMirror() {
+        mirrorPreviewCancellation?.cancel()
+        isMirrorPreviewRunning = false
         guard let request = mirrorConfirmationRequest else { return }
         mirrorConfirmationRequest = nil
         logger.info("file-operation", "mirror.cancelled", metadata: [
@@ -2783,21 +2875,39 @@ final class DualFinderViewModel: ObservableObject {
 
     func emptyTrash() {
         guard !isInlineRenaming else { return }
-        do {
-            let summary = try operationService.trashContentsSummary()
-            guard !summary.isEmpty else {
-                statusMessage = "Trash is already empty"
-                return
+        let cancellation = FileOperationCancellation()
+        trashSummaryCancellation?.cancel()
+        trashSummaryCancellation = cancellation
+        statusMessage = "Scanning Trash..."
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                let summary = try FileOperationService(logger: self?.logger).trashContentsSummary(cancellation: cancellation)
+                Task { @MainActor [weak self] in
+                    guard self?.trashSummaryCancellation === cancellation else { return }
+                    guard !summary.isEmpty else {
+                        self?.statusMessage = "Trash is already empty"
+                        return
+                    }
+                    self?.emptyTrashConfirmationRequest = EmptyTrashConfirmationRequest(summary: summary)
+                    self?.statusMessage = "Confirm Empty Trash: \(summary.containedItemCount) item(s), \(ByteCountFormatter.string(fromByteCount: summary.totalByteCount, countStyle: .file))"
+                    self?.logger.warning("file-operation", "trash.empty.confirmation.requested", metadata: [
+                        "topLevelItemCount": "\(summary.topLevelItemCount)",
+                        "containedItemCount": "\(summary.containedItemCount)",
+                        "totalByteCount": "\(summary.totalByteCount)"
+                    ])
+                }
+            } catch FileOperationError.cancelled {
+                Task { @MainActor [weak self] in
+                    guard self?.trashSummaryCancellation === cancellation else { return }
+                    self?.statusMessage = "Trash scan cancelled"
+                }
+            } catch {
+                Task { @MainActor [weak self] in
+                    guard self?.trashSummaryCancellation === cancellation else { return }
+                    self?.reportOperationFailure("trash.empty.preview.failed", error: error)
+                }
             }
-            emptyTrashConfirmationRequest = EmptyTrashConfirmationRequest(summary: summary)
-            statusMessage = "Confirm Empty Trash: \(summary.containedItemCount) item(s), \(ByteCountFormatter.string(fromByteCount: summary.totalByteCount, countStyle: .file))"
-            logger.warning("file-operation", "trash.empty.confirmation.requested", metadata: [
-                "topLevelItemCount": "\(summary.topLevelItemCount)",
-                "containedItemCount": "\(summary.containedItemCount)",
-                "totalByteCount": "\(summary.totalByteCount)"
-            ])
-        } catch {
-            reportOperationFailure("trash.empty.preview.failed", error: error)
         }
     }
 
@@ -2812,12 +2922,44 @@ final class DualFinderViewModel: ObservableObject {
             "containedItemCount": "\(request.summary.containedItemCount)",
             "totalByteCount": "\(request.summary.totalByteCount)"
         ])
-        do {
-            let removedCount = try operationService.emptyTrash()
-            refreshAll()
-            statusMessage = "Emptied Trash: \(removedCount) item(s)"
-        } catch {
-            reportOperationFailure("trash.empty.failed", error: error)
+        let cancellation = FileOperationCancellation()
+        emptyTrashCancellation?.cancel()
+        emptyTrashCancellation = cancellation
+        isEmptyTrashRunning = true
+        let total = request.summary.topLevelItemCount
+        statusMessage = "Emptying Trash... 0/\(total)"
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                let removedCount = try FileOperationService(logger: self?.logger).emptyTrash(
+                    cancellation: cancellation,
+                    progress: { completed in
+                        Task { @MainActor [weak self] in
+                            guard self?.emptyTrashCancellation === cancellation else { return }
+                            self?.statusMessage = "Emptying Trash... \(completed)/\(total)"
+                        }
+                    }
+                )
+                Task { @MainActor [weak self] in
+                    guard self?.emptyTrashCancellation === cancellation else { return }
+                    self?.isEmptyTrashRunning = false
+                    self?.refreshAll()
+                    self?.statusMessage = "Emptied Trash: \(removedCount) item(s)"
+                }
+            } catch FileOperationError.cancelled {
+                Task { @MainActor [weak self] in
+                    guard self?.emptyTrashCancellation === cancellation else { return }
+                    self?.isEmptyTrashRunning = false
+                    self?.refreshAll()
+                    self?.statusMessage = "Empty Trash cancelled"
+                }
+            } catch {
+                Task { @MainActor [weak self] in
+                    guard self?.emptyTrashCancellation === cancellation else { return }
+                    self?.isEmptyTrashRunning = false
+                    self?.reportOperationFailure("trash.empty.failed", error: error)
+                }
+            }
         }
     }
 
@@ -2846,77 +2988,29 @@ final class DualFinderViewModel: ObservableObject {
     }
 
     func convertSelectedTextEncodingToUTF8(on side: PaneSide) {
-        guard !isInlineRenaming, !isTextEncodingConversionRunning else { return }
-        let sources = orderedSelection(pane(for: side).selectedItemURLs, on: side)
-        guard !sources.isEmpty else { return }
-
-        activatePane(side)
-        isTextEncodingConversionRunning = true
-        statusMessage = "Analyzing text encoding for \(sources.count) item(s)..."
-        logger.info("text-encoding", "selection.convert.requested", metadata: [
-            "side": side.rawValue,
-            "count": "\(sources.count)",
-            "sources": sources.map(\.path).joined(separator: "|")
-        ])
-
-        let conversionLogger = logger
-        let textEncodingCache = textEncodingCache
-        DispatchQueue.global(qos: .userInitiated).async {
-            do {
-                let result = try TextEncodingConversionService(
-                    logger: conversionLogger,
-                    cache: textEncodingCache
-                ).convertFilesToUTF8(sources) { completedCount, totalCount, fileResult in
-                    DispatchQueue.main.async { [weak self] in
-                        guard let self, self.isTextEncodingConversionRunning else { return }
-                        self.statusMessage = self.textEncodingConversionProgress(
-                            completedCount: completedCount,
-                            totalCount: totalCount,
-                            result: fileResult
-                        )
-                    }
-                }
-                DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    self.isTextEncodingConversionRunning = false
-                    self.refresh(side)
-                    let finalSelection = Set(result.results
-                        .filter { $0.status != .skipped }
-                        .map(\.finalURL))
-                    if !finalSelection.isEmpty {
-                        self.setSelection(finalSelection, for: side)
-                    }
-                    let problemReportURL = self.writeTextEncodingProblemReport(for: result)
-                    self.statusMessage = self.textEncodingConversionSummary(result, problemReportURL: problemReportURL)
-                    self.logger.info("text-encoding", "selection.convert.completed", metadata: [
-                        "side": side.rawValue,
-                        "converted": "\(result.convertedCount)",
-                        "utf8": "\(result.alreadyUTF8Count)",
-                        "cachedUTF8": "\(result.cachedUTF8Count)",
-                        "unknownRenamed": "\(result.renamedUnknownCount)",
-                        "skipped": "\(result.skippedCount)",
-                        "failed": "\(result.failedCount)"
-                    ])
-                }
-            } catch {
-                DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    self.isTextEncodingConversionRunning = false
-                    self.reportOperationFailure("text-encoding.convert.failed", error: error)
-                }
-            }
-        }
+        runTextEncodingConversion(on: side, force: false)
     }
 
     func reconvertSelectedTextEncodingToUTF8(on side: PaneSide) {
+        runTextEncodingConversion(on: side, force: true)
+    }
+
+    func cancelTextEncodingConversion() {
+        textEncodingConversionCancellation?.cancel()
+    }
+
+    private func runTextEncodingConversion(on side: PaneSide, force: Bool) {
         guard !isInlineRenaming, !isTextEncodingConversionRunning else { return }
         let sources = orderedSelection(pane(for: side).selectedItemURLs, on: side)
         guard !sources.isEmpty else { return }
 
         activatePane(side)
+        let cancellation = FileOperationCancellation()
+        textEncodingConversionCancellation = cancellation
         isTextEncodingConversionRunning = true
-        statusMessage = "Force re-converting text encoding for \(sources.count) item(s)..."
-        logger.info("text-encoding", "selection.reconvert.requested", metadata: [
+        let action = force ? "Force re-converting" : "Analyzing"
+        statusMessage = "\(action) text encoding for \(sources.count) item(s)..."
+        logger.info("text-encoding", force ? "selection.reconvert.requested" : "selection.convert.requested", metadata: [
             "side": side.rawValue,
             "count": "\(sources.count)",
             "sources": sources.map(\.path).joined(separator: "|")
@@ -2924,14 +3018,18 @@ final class DualFinderViewModel: ObservableObject {
 
         let conversionLogger = logger
         let textEncodingCache = textEncodingCache
-        DispatchQueue.global(qos: .userInitiated).async {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
                 let result = try TextEncodingConversionService(
                     logger: conversionLogger,
                     cache: textEncodingCache
-                ).convertFilesToUTF8(sources, force: true) { completedCount, totalCount, fileResult in
+                ).convertFilesToUTF8(
+                    sources,
+                    force: force,
+                    cancellation: cancellation
+                ) { completedCount, totalCount, fileResult in
                     DispatchQueue.main.async { [weak self] in
-                        guard let self, self.isTextEncodingConversionRunning else { return }
+                        guard let self, self.textEncodingConversionCancellation === cancellation else { return }
                         self.statusMessage = self.textEncodingConversionProgress(
                             completedCount: completedCount,
                             totalCount: totalCount,
@@ -2940,8 +3038,9 @@ final class DualFinderViewModel: ObservableObject {
                     }
                 }
                 DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
+                    guard let self, self.textEncodingConversionCancellation === cancellation else { return }
                     self.isTextEncodingConversionRunning = false
+                    self.textEncodingConversionCancellation = nil
                     self.refresh(side)
                     let finalSelection = Set(result.results
                         .filter { $0.status != .skipped }
@@ -2951,7 +3050,7 @@ final class DualFinderViewModel: ObservableObject {
                     }
                     let problemReportURL = self.writeTextEncodingProblemReport(for: result)
                     self.statusMessage = self.textEncodingConversionSummary(result, problemReportURL: problemReportURL)
-                    self.logger.info("text-encoding", "selection.reconvert.completed", metadata: [
+                    self.logger.info("text-encoding", force ? "selection.reconvert.completed" : "selection.convert.completed", metadata: [
                         "side": side.rawValue,
                         "converted": "\(result.convertedCount)",
                         "utf8": "\(result.alreadyUTF8Count)",
@@ -2963,9 +3062,14 @@ final class DualFinderViewModel: ObservableObject {
                 }
             } catch {
                 DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
+                    guard let self, self.textEncodingConversionCancellation === cancellation else { return }
                     self.isTextEncodingConversionRunning = false
-                    self.reportOperationFailure("text-encoding.reconvert.failed", error: error)
+                    self.textEncodingConversionCancellation = nil
+                    if case FileOperationError.cancelled = error {
+                        self.statusMessage = "Text encoding conversion cancelled"
+                    } else {
+                        self.reportOperationFailure(force ? "text-encoding.reconvert.failed" : "text-encoding.convert.failed", error: error)
+                    }
                 }
             }
         }
@@ -2996,7 +3100,17 @@ final class DualFinderViewModel: ObservableObject {
             do {
                 let successMessage: String
                 if let mode {
-                    try service.extract(archives: sources, mode: mode, cancellation: cancellation)
+                    try service.extract(
+                        archives: sources,
+                        mode: mode,
+                        cancellation: cancellation,
+                        progress: { [weak self] completed, total in
+                            Task { @MainActor [weak self] in
+                                guard self?.archiveCancellation === cancellation else { return }
+                                self?.statusMessage = "\(label)… \(completed)/\(total)"
+                            }
+                        }
+                    )
                     successMessage = mode == .currentDirectory
                         ? "Extracted archive(s) to current folder"
                         : "Extracted archive(s) to subfolder(s)"
@@ -3043,6 +3157,9 @@ final class DualFinderViewModel: ObservableObject {
         let cache = folderSizeCache
         let folderURLs = folders.map(\.url)
         let service = fileSystem
+        let cancellation = FileOperationCancellation()
+        folderSizeCancellation = cancellation
+        isFolderSizeCalculationRunning = true
         statusMessage = "Calculating folder size for \(folders.count) folder(s)..."
 
         DispatchQueue.global(qos: .userInitiated).async {
@@ -3050,10 +3167,20 @@ final class DualFinderViewModel: ObservableObject {
             var computed = 0
             var cached = 0
             var failures = 0
+            var cancelled = false
 
             for folderURL in folderURLs {
+                if cancellation.isCancelled {
+                    cancelled = true
+                    break
+                }
                 do {
-                    let result = try service.calculateFolderSize(at: folderURL, cache: cache, forceRecalculate: true)
+                    let result = try service.calculateFolderSize(
+                        at: folderURL,
+                        cache: cache,
+                        forceRecalculate: true,
+                        cancellation: cancellation
+                    )
                     let source: String
                     switch result {
                     case .cached:
@@ -3097,24 +3224,25 @@ final class DualFinderViewModel: ObservableObject {
 
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
+                self.isFolderSizeCalculationRunning = false
+                self.folderSizeCancellation = nil
+                if cancelled {
+                    self.statusMessage = "Folder size calculation cancelled"
+                }
                 self.refresh(side)
             }
         }
+    }
+
+    func cancelFolderSizeCalculation() {
+        folderSizeCancellation?.cancel()
     }
 
     private func folderSizeProgressMessage(
         _ progress: (completed: Int, computed: Int, cached: Int, failures: Int),
         total: Int
     ) -> String {
-        var parts = [
-            "\(progress.completed)/\(total) done",
-            "\(progress.computed) computed",
-            "\(progress.cached) cached"
-        ]
-        if progress.failures > 0 {
-            parts.append("\(progress.failures) failed")
-        }
-        return "Folder size: " + parts.joined(separator: ", ")
+        ViewModelFormatters.folderSizeProgress(progress, total: total)
     }
 
     func openLogFolder() {
@@ -4195,7 +4323,18 @@ final class DualFinderViewModel: ObservableObject {
                     folderSizeCache: folderSizeCache,
                     textEncodingCache: textEncodingCache,
                     includeTextEncoding: includeTextEncoding,
-                    cancellation: cancellation
+                    cancellation: cancellation,
+                    batchSize: 500,
+                    batchCallback: { [weak self] batch in
+                        Task { @MainActor [weak self] in
+                            guard let self else { return }
+                            guard self.refreshGeneration[side] == generation else { return }
+                            guard self.refreshCancellations[side] === cancellation else { return }
+                            guard self.flatViewRoot(for: side)?.standardizedFileURL == root.standardizedFileURL else { return }
+                            self.appendFlatViewBatch(batch, for: side)
+                            self.statusMessage = "Flat: \(root.path) - loading… \(self.flatViewItemCount(for: side)) file(s)"
+                        }
+                    }
                 )
                 DispatchQueue.main.async { [weak self] in
                     defer { completion?() }
@@ -4243,6 +4382,18 @@ final class DualFinderViewModel: ObservableObject {
         } else {
             rightItems = items
         }
+    }
+
+    private func appendFlatViewBatch(_ batch: [FileItem], for side: PaneSide) {
+        if side == .left {
+            leftItems.append(contentsOf: batch)
+        } else {
+            rightItems.append(contentsOf: batch)
+        }
+    }
+
+    private func flatViewItemCount(for side: PaneSide) -> Int {
+        side == .left ? leftItems.count : rightItems.count
     }
 
     private static let textEncodingScanBatchSize = 200
@@ -4537,19 +4688,7 @@ final class DualFinderViewModel: ObservableObject {
         _ result: TextEncodingBatchConversionResult,
         problemReportURL: URL? = nil
     ) -> String {
-        let parts = [
-            result.convertedCount > 0 ? "\(result.convertedCount) converted to UTF-8" : nil,
-            result.alreadyUTF8Count > 0 ? alreadyUTF8Summary(for: result) : nil,
-            result.renamedUnknownCount > 0 ? "\(result.renamedUnknownCount) moved to unknown_encode" : nil,
-            result.skippedCount > 0 ? "\(result.skippedCount) skipped" : nil,
-            result.failedCount > 0 ? "\(result.failedCount) failed" : nil
-        ].compactMap { $0 }
-
-        var summary = parts.isEmpty ? "No text encoding changes" : "Encoding check complete: \(parts.joined(separator: ", "))"
-        if let problemReportURL {
-            summary += ". Problem list: \(problemReportURL.lastPathComponent)"
-        }
-        return summary
+        TextEncodingReportFormatter.summary(result, problemReportURL: problemReportURL)
     }
 
     private func textEncodingConversionProgress(
@@ -4557,29 +4696,11 @@ final class DualFinderViewModel: ObservableObject {
         totalCount: Int,
         result: TextEncodingConversionResult
     ) -> String {
-        if result.usedCache {
-            return "Encoding \(completedCount)/\(totalCount): skipping cached UTF-8 files (\(completedCount) checked)"
-        }
-        let action = switch result.status {
-        case .alreadyUTF8:
-            "already UTF-8"
-        case .converted:
-            "converted to UTF-8"
-        case .renamedUnknown:
-            "moved to unknown_encode"
-        case .skipped:
-            "skipped"
-        case .failed:
-            "failed"
-        }
-        return "Encoding \(completedCount)/\(totalCount): \(result.finalURL.lastPathComponent) \(action)"
-    }
-
-    private func alreadyUTF8Summary(for result: TextEncodingBatchConversionResult) -> String {
-        guard result.cachedUTF8Count > 0 else {
-            return "\(result.alreadyUTF8Count) already UTF-8"
-        }
-        return "\(result.alreadyUTF8Count) already UTF-8 (\(result.cachedUTF8Count) cached)"
+        TextEncodingReportFormatter.progress(
+            completedCount: completedCount,
+            totalCount: totalCount,
+            result: result
+        )
     }
 
     private func writeTextEncodingProblemReport(for result: TextEncodingBatchConversionResult) -> URL? {
@@ -4588,25 +4709,9 @@ final class DualFinderViewModel: ObservableObject {
             return nil
         }
 
-        let timestamp = Self.textEncodingReportTimestampFormatter.string(from: Date())
+        let timestamp = TextEncodingReportFormatter.timestampFormatter.string(from: Date())
         let reportURL = appLogger.logDirectory.appendingPathComponent("text-encoding-problems-\(timestamp).txt")
-        var lines = [
-            "DualFinder text encoding problem files",
-            "Generated: \(timestamp)",
-            "Unknown: \(result.renamedUnknownCount)",
-            "Failed: \(result.failedCount)",
-            ""
-        ]
-
-        for result in problemResults {
-            lines.append("Status:   \(textEncodingReportStatus(for: result.status))")
-            lines.append("Original: \(result.originalURL.path)")
-            lines.append("Current:  \(result.finalURL.path)")
-            if let diagnostic = result.diagnostic {
-                lines.append("Reason:   \(diagnostic)")
-            }
-            lines.append("")
-        }
+        let lines = TextEncodingReportFormatter.reportLines(for: result, timestamp: timestamp)
 
         do {
             try FileManager.default.createDirectory(at: appLogger.logDirectory, withIntermediateDirectories: true)
@@ -4625,28 +4730,6 @@ final class DualFinderViewModel: ObservableObject {
         }
     }
 
-    private func textEncodingReportStatus(for status: TextEncodingConversionStatus) -> String {
-        switch status {
-        case .alreadyUTF8:
-            "already UTF-8"
-        case .converted:
-            "converted"
-        case .renamedUnknown:
-            "moved to unknown_encode"
-        case .skipped:
-            "skipped"
-        case .failed:
-            "failed"
-        }
-    }
-
-    private static let textEncodingReportTimestampFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyyMMdd-HHmmss"
-        return formatter
-    }()
-
     private func terminalDirectory(for url: URL) -> URL {
         var isDirectory: ObjCBool = false
         if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue {
@@ -4656,91 +4739,15 @@ final class DualFinderViewModel: ObservableObject {
     }
 
     private func openTerminal(at directory: URL) -> Bool {
-        if NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.mitchellh.ghostty") != nil,
-           openGhosttyTab(at: directory) {
-            return true
-        }
-
-        return runOpen(arguments: ["-a", "Terminal", directory.path])
-    }
-
-    private func openGhosttyTab(at directory: URL) -> Bool {
-        let workingDirectory = appleScriptStringLiteral(directory.path)
-        let script = """
-        tell application "Ghostty"
-            set surfaceConfig to new surface configuration from {initial working directory:\(workingDirectory)}
-            if (count of windows) is greater than 0 then
-                set newTab to new tab in front window with configuration surfaceConfig
-                select tab newTab
-            else
-                new window with configuration surfaceConfig
-            end if
-            activate
-        end tell
-        """
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", script]
-
-        let errorPipe = Pipe()
-        process.standardError = errorPipe
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-            if process.terminationStatus == 0 {
-                return true
-            }
-
-            let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-            let errorMessage = String(data: errorData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            logger.error("terminal", "ghostty.applescript.failed", metadata: [
-                "path": directory.path,
-                "error": errorMessage
-            ])
-            return false
-        } catch {
-            logger.error("terminal", "ghostty.applescript.failed", metadata: [
-                "path": directory.path,
-                "error": error.localizedDescription
-            ])
-            return false
-        }
-    }
-
-    private func appleScriptStringLiteral(_ value: String) -> String {
-        let escaped = value
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-        return "\"\(escaped)\""
-    }
-
-    private func runOpen(arguments: [String]) -> Bool {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        process.arguments = arguments
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-            return process.terminationStatus == 0
-        } catch {
-            logger.error("terminal", "open.command.failed", metadata: [
-                "arguments": arguments.joined(separator: " "),
-                "error": error.localizedDescription
-            ])
-            return false
-        }
-    }
-
-    private func opposite(_ side: PaneSide) -> PaneSide {
-        side == .left ? .right : .left
+        TerminalLauncher.openTerminal(at: directory, logger: logger)
     }
 
     private func openInFinder(_ url: URL) {
-        logger.info("navigation", "file.opened.externally", metadata: ["path": url.path])
-        NSWorkspace.shared.open(url)
+        TerminalLauncher.openInFinder(url, logger: logger)
+    }
+
+    private func opposite(_ side: PaneSide) -> PaneSide {
+        ViewModelFormatters.opposite(side)
     }
 
     private func reportOperationFailure(_ message: String, error: Error) {

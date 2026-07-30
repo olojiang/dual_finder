@@ -622,6 +622,57 @@ struct FileOperationServiceTests {
         #expect(try String(contentsOf: root.url.appendingPathComponent("second.txt"), encoding: .utf8) == "one")
     }
 
+    @Test("batch rename aborts and leaves originals in place when pre-cancelled")
+    func batchRenameAbortsWhenPreCancelled() throws {
+        let root = try TemporaryDirectory()
+        let sources = (0..<4).map { index in
+            root.url.appendingPathComponent("item-\(index).txt")
+        }
+        for (index, url) in sources.enumerated() {
+            try "body-\(index)".write(to: url, atomically: true, encoding: .utf8)
+        }
+        let operations = sources.map {
+            BatchRenameOperation(sourceURL: $0, newName: $0.deletingPathExtension().lastPathComponent + "-renamed.txt")
+        }
+        let cancellation = FileOperationCancellation()
+        cancellation.cancel()
+
+        #expect(throws: FileOperationError.cancelled) {
+            try FileOperationService(logger: CapturingLogger()).batchRename(
+                operations,
+                cancellation: cancellation
+            )
+        }
+
+        for url in sources {
+            #expect(FileManager.default.fileExists(atPath: url.path))
+        }
+        #expect(FileManager.default.fileExists(atPath: root.url.appendingPathComponent("item-0-renamed.txt").path) == false)
+    }
+
+    @Test("batch rename reports progress after each committed item")
+    func batchRenameReportsProgress() throws {
+        let root = try TemporaryDirectory()
+        let sources = (0..<3).map { index in
+            root.url.appendingPathComponent("orig-\(index).txt")
+        }
+        for (index, url) in sources.enumerated() {
+            try "body-\(index)".write(to: url, atomically: true, encoding: .utf8)
+        }
+        let operations = sources.map {
+            BatchRenameOperation(sourceURL: $0, newName: $0.deletingPathExtension().lastPathComponent + "-new.txt")
+        }
+
+        var reportedCounts: [Int] = []
+        let results = try FileOperationService(logger: CapturingLogger()).batchRename(
+            operations,
+            progress: { reportedCounts.append($0) }
+        )
+
+        #expect(results.count == 3)
+        #expect(reportedCounts == [1, 2, 3])
+    }
+
     @Test("empties trash directory contents")
     func emptiesTrashDirectoryContents() throws {
         let root = try TemporaryDirectory()
@@ -657,6 +708,62 @@ struct FileOperationServiceTests {
         #expect(summary.containedItemCount == 3)
         #expect(summary.totalByteCount == 13)
         #expect(!summary.isEmpty)
+    }
+
+    @Test("trash summary aborts when pre-cancelled")
+    func trashSummaryAbortsWhenPreCancelled() throws {
+        let root = try TemporaryDirectory()
+        let trash = root.url.appendingPathComponent("Trash", isDirectory: true)
+        try FileManager.default.createDirectory(at: trash, withIntermediateDirectories: true)
+        try "discard".write(to: trash.appendingPathComponent("discard.txt"), atomically: true, encoding: .utf8)
+
+        let cancellation = FileOperationCancellation()
+        cancellation.cancel()
+
+        #expect(throws: FileOperationError.cancelled) {
+            try FileOperationService(logger: CapturingLogger()).trashContentsSummary(at: trash, cancellation: cancellation)
+        }
+    }
+
+    @Test("empty trash reports progress per item and stops when pre-cancelled")
+    func emptyTrashReportsProgressAndCancels() throws {
+        let root = try TemporaryDirectory()
+        let trash = root.url.appendingPathComponent("Trash", isDirectory: true)
+        try FileManager.default.createDirectory(at: trash, withIntermediateDirectories: true)
+        let files = (0..<3).map { trash.appendingPathComponent("item-\($0).txt") }
+        for file in files {
+            try "body".write(to: file, atomically: true, encoding: .utf8)
+        }
+
+        let cancellation = FileOperationCancellation()
+        cancellation.cancel()
+
+        #expect(throws: FileOperationError.cancelled) {
+            try FileOperationService(logger: CapturingLogger()).emptyTrash(at: trash, cancellation: cancellation)
+        }
+        for file in files {
+            #expect(FileManager.default.fileExists(atPath: file.path))
+        }
+    }
+
+    @Test("empty trash invokes progress callback after each removed item")
+    func emptyTrashInvokesProgressPerItem() throws {
+        let root = try TemporaryDirectory()
+        let trash = root.url.appendingPathComponent("Trash", isDirectory: true)
+        try FileManager.default.createDirectory(at: trash, withIntermediateDirectories: true)
+        let files = (0..<3).map { trash.appendingPathComponent("item-\($0).txt") }
+        for file in files {
+            try "body".write(to: file, atomically: true, encoding: .utf8)
+        }
+
+        var reportedCounts: [Int] = []
+        let removedCount = try FileOperationService(logger: CapturingLogger()).emptyTrash(
+            at: trash,
+            progress: { reportedCounts.append($0) }
+        )
+
+        #expect(removedCount == 3)
+        #expect(reportedCounts == [1, 2, 3])
     }
 
     @Test("ignores trash metadata files when summarizing and emptying")
@@ -726,4 +833,33 @@ struct FileOperationServiceTests {
         #expect(logger.messages.contains { $0.contains("trash.completed") })
     }
     #endif
+
+    @Test("uses cached scan plan and skips recursive scan on cache hit")
+    func usesCachedScanPlanOnCacheHit() throws {
+        let root = try TemporaryDirectory()
+        let cacheURL = root.url.appendingPathComponent("scan-cache.json")
+        let sourceFolder = root.url.appendingPathComponent("source", isDirectory: true)
+        try FileManager.default.createDirectory(at: sourceFolder, withIntermediateDirectories: true)
+        try "a".write(to: sourceFolder.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+        try "bb".write(to: sourceFolder.appendingPathComponent("b.txt"), atomically: true, encoding: .utf8)
+        let destination = root.url.appendingPathComponent("destination", isDirectory: true)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+
+        let modifiedAt = try sourceFolder.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+        let cache = OperationScanCache(storageURL: cacheURL)
+        try cache.setPlan(OperationScanPlan(totalBytes: 3, totalItems: 2), for: sourceFolder, modifiedAt: modifiedAt)
+
+        let logger = CapturingLogger()
+        var lastProgress: FileOperationProgress?
+        try FileOperationService(logger: logger, operationScanCache: cache).copy(
+            [sourceFolder],
+            to: destination,
+            progress: { lastProgress = $0 }
+        )
+
+        #expect(logger.messages.contains { $0.contains("scan.cache.hit") })
+        #expect(!logger.messages.contains { $0.contains("scan.completed") })
+        #expect(lastProgress?.totalItems == 2)
+        #expect(lastProgress?.totalBytes == 3)
+    }
 }

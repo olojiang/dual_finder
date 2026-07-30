@@ -22,15 +22,22 @@ public enum MirrorDeletionPlanner {
     public static func deletionSummary(
         sources: [URL],
         destinationDirectory: URL,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        cancellation: FileOperationCancellation? = nil,
+        progress: ((Int) -> Void)? = nil
     ) throws -> MirrorDeletionSummary {
         let extras = try extrasToDelete(
             sources: sources,
             destinationDirectory: destinationDirectory,
-            fileManager: fileManager
+            fileManager: fileManager,
+            cancellation: cancellation,
+            progress: progress
         )
         var totalByteCount: Int64 = 0
         for url in extras {
+            if cancellation?.isCancelled == true {
+                throw FileOperationError.cancelled
+            }
             totalByteCount += try byteCount(of: url, fileManager: fileManager)
         }
         return MirrorDeletionSummary(itemCount: extras.count, totalByteCount: totalByteCount)
@@ -39,18 +46,25 @@ public enum MirrorDeletionPlanner {
     public static func extrasToDelete(
         sources: [URL],
         destinationDirectory: URL,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        cancellation: FileOperationCancellation? = nil,
+        progress: ((Int) -> Void)? = nil
     ) throws -> [URL] {
         var extras: [URL] = []
         for source in sources {
+            if cancellation?.isCancelled == true {
+                throw FileOperationError.cancelled
+            }
             let sourcePaths = try relativePaths(in: source, fileManager: fileManager)
             let destinationRoot = destinationRoot(for: source, in: destinationDirectory)
             extras.append(contentsOf: try extraItems(
                 at: destinationRoot,
                 sourcePaths: sourcePaths,
                 relativePrefix: "",
-                fileManager: fileManager
+                fileManager: fileManager,
+                cancellation: cancellation
             ))
+            progress?(extras.count)
         }
         return extras.sorted { $0.path.count > $1.path.count }
     }
@@ -104,7 +118,8 @@ public enum MirrorDeletionPlanner {
         at destinationRoot: URL,
         sourcePaths: Set<String>,
         relativePrefix: String,
-        fileManager: FileManager
+        fileManager: FileManager,
+        cancellation: FileOperationCancellation?
     ) throws -> [URL] {
         guard fileManager.fileExists(atPath: destinationRoot.path) else { return [] }
 
@@ -119,6 +134,9 @@ public enum MirrorDeletionPlanner {
 
         var result: [URL] = []
         for child in children {
+            if cancellation?.isCancelled == true {
+                throw FileOperationError.cancelled
+            }
             let childName = child.lastPathComponent
             let childRelative = relativePrefix.isEmpty ? childName : "\(relativePrefix)/\(childName)"
             if !sourcePaths.contains(childRelative) {
@@ -132,7 +150,8 @@ public enum MirrorDeletionPlanner {
                     at: child,
                     sourcePaths: sourcePaths,
                     relativePrefix: childRelative,
-                    fileManager: fileManager
+                    fileManager: fileManager,
+                    cancellation: cancellation
                 ))
             }
         }

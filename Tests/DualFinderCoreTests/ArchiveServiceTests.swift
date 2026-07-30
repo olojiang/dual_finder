@@ -77,6 +77,151 @@ struct ArchiveServiceTests {
             try ArchiveService(commandRunner: runner).extract(archives: [archive], mode: .currentDirectory)
         }
     }
+
+    @Test("extract aborts remaining archives after cancellation between files")
+    func extractCancelsBetweenArchives() throws {
+        let root = try TemporaryDirectory()
+        let firstArchive = root.url.appendingPathComponent("first.zip")
+        let secondArchive = root.url.appendingPathComponent("second.zip")
+        try Data().write(to: firstArchive)
+        try Data().write(to: secondArchive)
+
+        let cancellation = FileOperationCancellation()
+        let runner = CancellingStubRunner(onRun: { cancellation.cancel() })
+        let service = ArchiveService(commandRunner: runner)
+
+        #expect(throws: ArchiveError.cancelled) {
+            try service.extract(
+                archives: [firstArchive, secondArchive],
+                mode: .currentDirectory,
+                cancellation: cancellation
+            )
+        }
+
+        #expect(runner.runCount == 1)
+    }
+
+    @Test("extract forwards cancellation to a cancellable runner and aborts")
+    func extractForwardsCancellationToCancellableRunner() throws {
+        let root = try TemporaryDirectory()
+        let archive = root.url.appendingPathComponent("first.zip")
+        try Data().write(to: archive)
+
+        let cancellation = FileOperationCancellation()
+        let runner = CancellableStubRunner(onRun: { cancellation.cancel() })
+        let service = ArchiveService(commandRunner: runner)
+
+        #expect(throws: ArchiveError.cancelled) {
+            try service.extract(
+                archives: [archive],
+                mode: .currentDirectory,
+                cancellation: cancellation
+            )
+        }
+
+        #expect(runner.runCount == 1)
+        #expect(runner.receivedCancellation != nil)
+    }
+
+    @Test("extract reports progress after each archive")
+    func extractReportsProgressPerArchive() throws {
+        let root = try TemporaryDirectory()
+        let archives = (0..<3).map { index in
+            root.url.appendingPathComponent("archive-\(index).zip")
+        }
+        for archive in archives {
+            try Data().write(to: archive)
+        }
+
+        var reported: [(Int, Int)] = []
+        try ArchiveService(commandRunner: StubCommandRunner(results: [
+            CommandResult(exitCode: 0, stdout: "", stderr: ""),
+            CommandResult(exitCode: 0, stdout: "", stderr: ""),
+            CommandResult(exitCode: 0, stdout: "", stderr: "")
+        ])).extract(
+            archives: archives,
+            mode: .currentDirectory,
+            progress: { completed, total in reported.append((completed, total)) }
+        )
+
+        #expect(reported.map { "\($0.0)/\($0.1)" } == ["1/3", "2/3", "3/3"])
+    }
+}
+
+private final class CancellingStubRunner: CommandRunning, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _runCount = 0
+    private let onRun: () -> Void
+
+    init(onRun: @escaping () -> Void) {
+        self.onRun = onRun
+    }
+
+    var runCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return _runCount
+    }
+
+    func run(
+        executable: String,
+        arguments: [String],
+        workingDirectory: URL?
+    ) throws -> CommandResult {
+        lock.lock()
+        _runCount += 1
+        lock.unlock()
+        onRun()
+        return CommandResult(exitCode: 0, stdout: "", stderr: "")
+    }
+}
+
+private final class CancellableStubRunner: CancellableCommandRunning, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _runCount = 0
+    private var _receivedCancellation: FileOperationCancellation?
+    private let onRun: () -> Void
+
+    init(onRun: @escaping () -> Void) {
+        self.onRun = onRun
+    }
+
+    var runCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return _runCount
+    }
+
+    var receivedCancellation: FileOperationCancellation? {
+        lock.lock()
+        defer { lock.unlock() }
+        return _receivedCancellation
+    }
+
+    func run(
+        executable: String,
+        arguments: [String],
+        workingDirectory: URL?
+    ) throws -> CommandResult {
+        CommandResult(exitCode: 0, stdout: "", stderr: "")
+    }
+
+    func run(
+        executable: String,
+        arguments: [String],
+        workingDirectory: URL?,
+        cancellation: FileOperationCancellation?
+    ) throws -> CommandResult {
+        lock.lock()
+        _runCount += 1
+        _receivedCancellation = cancellation
+        lock.unlock()
+        onRun()
+        if cancellation?.isCancelled == true {
+            throw FileOperationError.cancelled
+        }
+        return CommandResult(exitCode: 0, stdout: "", stderr: "")
+    }
 }
 
 private final class StubCommandRunner: CommandRunning, @unchecked Sendable {

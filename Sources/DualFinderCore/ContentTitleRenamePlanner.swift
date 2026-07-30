@@ -53,19 +53,29 @@ public struct ContentTitleRenamePlanner {
         self.fileManager = fileManager
     }
 
-    public func plan(for items: [FileItem]) -> ContentTitleRenamePlan {
+    public func plan(
+        for items: [FileItem],
+        cancellation: FileOperationCancellation? = nil,
+        progress: ((Int) -> Void)? = nil
+    ) throws -> ContentTitleRenamePlan {
         let sourcePaths = Set(items.map { $0.url.standardizedFileURL.path })
         var destinationPaths = Set<String>()
         var operations: [BatchRenameOperation] = []
         var skipped: [ContentTitleRenameSkippedItem] = []
 
+        var scannedCount = 0
         for item in items {
+            if cancellation?.isCancelled == true {
+                throw FileOperationError.cancelled
+            }
             do {
                 let operation = try operation(for: item)
                 let source = operation.sourceURL.standardizedFileURL
 
                 guard source != operation.destinationURL.standardizedFileURL else {
                     skipped.append(ContentTitleRenameSkippedItem(sourceURL: item.url, reason: .unchanged))
+                    scannedCount += 1
+                    progress?(scannedCount)
                     continue
                 }
 
@@ -80,6 +90,8 @@ public struct ContentTitleRenamePlanner {
                         sourceURL: item.url,
                         reason: .duplicateDestination(directory.appendingPathComponent(operation.newName).standardizedFileURL)
                     ))
+                    scannedCount += 1
+                    progress?(scannedCount)
                     continue
                 }
 
@@ -96,6 +108,8 @@ public struct ContentTitleRenamePlanner {
             } catch {
                 skipped.append(ContentTitleRenameSkippedItem(sourceURL: item.url, reason: .unreadableText))
             }
+            scannedCount += 1
+            progress?(scannedCount)
         }
 
         return ContentTitleRenamePlan(operations: operations, skipped: skipped)

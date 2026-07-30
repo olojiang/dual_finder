@@ -1102,6 +1102,9 @@ struct FilePaneInteractionTests {
         await model.refreshAndWait(.left)
         model.replaceSelection([file.standardizedFileURL], on: .left, source: "test")
         model.requestSplitFileDialog(on: .left)
+        for _ in 0..<40 where model.splitFileDialogRequest == nil {
+            try await Task.sleep(nanoseconds: 15_000_000)
+        }
 
         #expect(model.splitFileDialogRequest?.preview.chapters.map(\.outputFileName) == [
             "第一篇.txt",
@@ -1126,6 +1129,9 @@ struct FilePaneInteractionTests {
         await model.refreshAndWait(.left)
         model.replaceSelection([file.standardizedFileURL], on: .left, source: "test")
         model.requestSplitFileDialog(on: .left)
+        for _ in 0..<40 where model.splitFileDialogRequest == nil {
+            try await Task.sleep(nanoseconds: 15_000_000)
+        }
         let preview = try #require(model.splitFileDialogRequest?.preview)
 
         model.splitFile(preview, on: .left)

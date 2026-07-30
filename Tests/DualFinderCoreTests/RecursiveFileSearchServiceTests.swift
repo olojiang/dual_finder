@@ -54,4 +54,44 @@ struct RecursiveFileSearchServiceTests {
 
         #expect(results.map(\.url) == [package.standardizedFileURL])
     }
+
+    @Test("throws cancelled when cancellation token is set before enumeration")
+    func throwsCancelledWhenPreCancelled() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("match.txt")
+        try "content".write(to: file, atomically: true, encoding: .utf8)
+
+        let cancellation = FileOperationCancellation()
+        cancellation.cancel()
+
+        #expect(throws: FileOperationError.cancelled) {
+            try RecursiveFileSearchService().search(
+                root: root.url,
+                query: "match",
+                cancellation: cancellation
+            )
+        }
+    }
+
+    @Test("reports progress at every 100 scanned items and a final trailing count")
+    func reportsProgressAtHundredIntervalsAndTrailingCount() throws {
+        let root = try TemporaryDirectory()
+        let nested = root.url.appendingPathComponent("dir", isDirectory: true)
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        for index in 0..<150 {
+            try "body-\(index)".write(to: nested.appendingPathComponent("file-\(index).txt"), atomically: true, encoding: .utf8)
+        }
+
+        var reportedCounts: [Int] = []
+        let results = try RecursiveFileSearchService().search(
+            root: root.url,
+            query: "file",
+            progress: { reportedCounts.append($0) }
+        )
+
+        #expect(results.count == 150)
+        #expect(reportedCounts.contains(100))
+        // The enumerator also yields the nested directory itself.
+        #expect(reportedCounts.last == 151)
+    }
 }

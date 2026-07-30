@@ -39,9 +39,33 @@ public struct DirectoryComparisonService {
         self.fileManager = fileManager
     }
 
-    public func compare(left: URL, right: URL, includeHidden: Bool = false) throws -> [DirectoryComparisonEntry] {
-        let leftSnapshot = try snapshot(root: left, includeHidden: includeHidden)
-        let rightSnapshot = try snapshot(root: right, includeHidden: includeHidden)
+    public func compare(
+        left: URL,
+        right: URL,
+        includeHidden: Bool = false,
+        cancellation: FileOperationCancellation? = nil,
+        progress: ((Int) -> Void)? = nil
+    ) throws -> [DirectoryComparisonEntry] {
+        var cumulativeScanned = 0
+        let leftSnapshot = try snapshot(
+            root: left,
+            includeHidden: includeHidden,
+            cancellation: cancellation,
+            progress: { scanned in
+                cumulativeScanned += scanned
+                progress?(cumulativeScanned)
+            }
+        )
+        let rightSnapshot = try snapshot(
+            root: right,
+            includeHidden: includeHidden,
+            cancellation: cancellation,
+            progress: { scanned in
+                cumulativeScanned += scanned
+                progress?(cumulativeScanned)
+            }
+        )
+        progress?(cumulativeScanned)
         let paths = Set(leftSnapshot.keys).union(rightSnapshot.keys)
 
         return paths.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
@@ -77,7 +101,12 @@ public struct DirectoryComparisonService {
             }
     }
 
-    private func snapshot(root: URL, includeHidden: Bool) throws -> [String: SnapshotItem] {
+    private func snapshot(
+        root: URL,
+        includeHidden: Bool,
+        cancellation: FileOperationCancellation?,
+        progress: ((Int) -> Void)?
+    ) throws -> [String: SnapshotItem] {
         let resolvedRootPath = root.resolvingSymlinksInPath().path
         let options: FileManager.DirectoryEnumerationOptions = includeHidden ? [] : [.skipsHiddenFiles]
         guard let enumerator = fileManager.enumerator(
@@ -89,7 +118,16 @@ public struct DirectoryComparisonService {
         }
 
         var result: [String: SnapshotItem] = [:]
+        var scannedSinceReport = 0
         for case let url as URL in enumerator {
+            if cancellation?.isCancelled == true {
+                throw FileOperationError.cancelled
+            }
+            scannedSinceReport += 1
+            if scannedSinceReport.isMultiple(of: 100) {
+                progress?(scannedSinceReport)
+                scannedSinceReport = 0
+            }
             let values = try url.resourceValues(forKeys: Self.snapshotResourceKeys)
             guard includeHidden || values.isHidden != true else { continue }
             let resolvedPath = url.resolvingSymlinksInPath().path
@@ -105,6 +143,9 @@ public struct DirectoryComparisonService {
                 size: values.fileSize.map(Int64.init),
                 modifiedAt: values.contentModificationDate
             )
+        }
+        if scannedSinceReport > 0 {
+            progress?(scannedSinceReport)
         }
         return result
     }

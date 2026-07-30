@@ -17,7 +17,7 @@ public enum TextFileSplitError: LocalizedError, Equatable {
     }
 }
 
-public struct TextFileSplitChapterPreview: Identifiable, Equatable {
+public struct TextFileSplitChapterPreview: Identifiable, Equatable, Sendable {
     public let id: UUID
     public let heading: String
     public let outputURL: URL
@@ -37,7 +37,7 @@ public struct TextFileSplitChapterPreview: Identifiable, Equatable {
     }
 }
 
-public struct TextFileSplitPreview: Equatable {
+public struct TextFileSplitPreview: Equatable, Sendable {
     public let sourceURL: URL
     public let detectedEncoding: String
     public let chapters: [TextFileSplitChapterPreview]
@@ -136,18 +136,32 @@ public struct TextFileSplitService {
     }
 
     @discardableResult
-    public func split(_ preview: TextFileSplitPreview, deleteOriginal: Bool = true) throws -> [URL] {
+    public func split(
+        _ preview: TextFileSplitPreview,
+        deleteOriginal: Bool = true,
+        cancellation: FileOperationCancellation? = nil,
+        progress: ((Int) -> Void)? = nil
+    ) throws -> [URL] {
         guard preview.chapters.count >= 2 else {
             throw TextFileSplitError.notEnoughChapters
         }
 
         var created: [URL] = []
         do {
+            var writtenCount = 0
             for chapter in preview.chapters {
+                if cancellation?.isCancelled == true {
+                    throw FileOperationError.cancelled
+                }
                 try chapter.content.write(to: chapter.outputURL, atomically: true, encoding: .utf8)
                 created.append(chapter.outputURL.standardizedFileURL)
+                writtenCount += 1
+                progress?(writtenCount)
             }
 
+            if cancellation?.isCancelled == true {
+                throw FileOperationError.cancelled
+            }
             if deleteOriginal, fileManager.fileExists(atPath: preview.sourceURL.path) {
                 try fileManager.removeItem(at: preview.sourceURL)
             }

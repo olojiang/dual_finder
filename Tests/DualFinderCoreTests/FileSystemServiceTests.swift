@@ -127,6 +127,34 @@ struct FileSystemServiceTests {
         #expect(includingHidden.map(\.name).contains(".hidden.txt"))
     }
 
+    @Test("recursive file contents flushes batches via batchCallback")
+    func recursiveFileContentsFlushesBatches() throws {
+        let root = try TemporaryDirectory()
+        for index in 0..<12 {
+            try "content-\(index)".write(
+                to: root.url.appendingPathComponent("file-\(String(format: "%02d", index)).txt"),
+                atomically: true,
+                encoding: .utf8
+            )
+        }
+
+        var batchSizes: [Int] = []
+        var batchedNames: [String] = []
+        let finalItems = try FileSystemService().recursiveFileContents(
+            of: root.url,
+            sortRule: FileSortRule(field: .name, direction: .ascending),
+            batchSize: 5,
+            batchCallback: { batch in
+                batchSizes.append(batch.count)
+                batchedNames.append(contentsOf: batch.map(\.name))
+            }
+        )
+
+        #expect(finalItems.count == 12)
+        #expect(batchSizes == [5, 5, 2])
+        #expect(Set(batchedNames) == Set(finalItems.map(\.name)))
+    }
+
     @Test("cancels recursive listing before enumerating a directory")
     func cancelsRecursiveListingBeforeEnumeratingDirectory() throws {
         let root = try TemporaryDirectory()
@@ -316,6 +344,21 @@ struct FileSystemServiceTests {
 
         #expect(first == .computed(5))
         #expect(second == .computed(5))
+    }
+
+    @Test("calculateFolderSize aborts when pre-cancelled")
+    func calculateFolderSizeAbortsWhenPreCancelled() throws {
+        let root = try TemporaryDirectory()
+        let folder = root.url.appendingPathComponent("Folder")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data(repeating: 1, count: 5).write(to: folder.appendingPathComponent("a.bin"))
+
+        let cancellation = FileOperationCancellation()
+        cancellation.cancel()
+
+        #expect(throws: FileOperationError.cancelled) {
+            _ = try FileSystemService().calculateFolderSize(at: folder, cancellation: cancellation)
+        }
     }
 
     private func setModificationDate(_ date: Date, for url: URL) throws {
