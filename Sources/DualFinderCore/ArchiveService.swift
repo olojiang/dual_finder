@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 
 public enum ArchiveExtractionMode: Sendable, Equatable {
     case currentDirectory
@@ -135,6 +136,9 @@ public struct ArchiveService {
 
             try throwIfCancelled(cancellation)
             try runExtract(archive: archive, format: format, destination: destinationDirectory, cancellation: cancellation)
+            if format == .zip {
+                repairLegacyZipEntryNames(in: destinationDirectory, archive: archive)
+            }
 
             processed += 1
             progress?(processed, total)
@@ -214,6 +218,52 @@ public struct ArchiveService {
             try extractTarFamily(archive: archive, destination: destination, cancellation: cancellation)
         case .sevenZip, .rar, .iso:
             try extractWithExternalTool(archive: archive, destination: destination, cancellation: cancellation)
+        }
+    }
+
+    /// macOS's ditto decodes ZIP names without the UTF-8 flag as MacRoman. Many
+    /// Windows tools write Chinese names as GBK instead, so repair the extracted
+    /// paths from the original central-directory bytes while that information is
+    /// still available. UTF-8 names and ordinary non-CJK names are left alone.
+    private func repairLegacyZipEntryNames(in destination: URL, archive: URL) {
+        guard let data = try? Data(contentsOf: archive) else { return }
+        let repairs = LegacyZipFilenameRepair.repairs(in: data)
+        guard !repairs.isEmpty else { return }
+
+        for repair in repairs {
+            let target = destination.appendingPathComponent(repair.repaired)
+            guard !fileManager.fileExists(atPath: target.path) else { continue }
+
+            for sourceRelativePath in LegacyZipFilenameRepair.sourceCandidates(for: repair) {
+                let source = destination.appendingPathComponent(sourceRelativePath)
+                guard source != target,
+                      fileManager.fileExists(atPath: source.path) else {
+                    continue
+                }
+
+                do {
+                    try fileManager.moveItem(at: source, to: target)
+                    break
+                } catch {
+                    logger?.warning("archive", "extract.legacy-name-repair-failed", metadata: [
+                        "source": source.path,
+                        "target": target.path,
+                        "error": error.localizedDescription
+                    ])
+                }
+            }
+        }
+
+        let repairedCount = repairs.reduce(into: 0) { count, repair in
+            if fileManager.fileExists(atPath: destination.appendingPathComponent(repair.repaired).path) {
+                count += 1
+            }
+        }
+        if repairedCount > 0 {
+            logger?.info("archive", "extract.legacy-names-repaired", metadata: [
+                "archive": archive.path,
+                "count": "\(repairedCount)"
+            ])
         }
     }
 
@@ -377,5 +427,250 @@ public struct ArchiveService {
                 detail: message.isEmpty ? "No error output." : message
             )
         }
+    }
+}
+
+private enum LegacyZipFilenameRepair {
+    struct PathRepair {
+        let rendered: String
+        let repaired: String
+    }
+
+    private struct EncodingCandidate {
+        let encoding: String.Encoding
+        let priority: Int
+    }
+
+    private static let candidates: [EncodingCandidate] = [
+        encoding(named: "GB18030").map { EncodingCandidate(encoding: $0, priority: 3) },
+        encoding(named: "Big5").map { EncodingCandidate(encoding: $0, priority: 2) },
+        EncodingCandidate(encoding: .shiftJIS, priority: 1)
+    ].compactMap { $0 }
+
+    static func repairs(in archive: Data) -> [PathRepair] {
+        let bytes = [UInt8](archive)
+        guard let endOfCentralDirectory = findEndOfCentralDirectory(in: bytes),
+              let entryCount = readUInt16(bytes, at: endOfCentralDirectory + 10),
+              let centralDirectoryOffset = readUInt32(bytes, at: endOfCentralDirectory + 16) else {
+            return []
+        }
+
+        var offset = Int(centralDirectoryOffset)
+        var pathRepairs: [String: String] = [:]
+        for _ in 0..<entryCount {
+            guard readUInt32(bytes, at: offset) == 0x0201_4B50,
+                  let flags = readUInt16(bytes, at: offset + 8),
+                  let nameLength = readUInt16(bytes, at: offset + 28),
+                  let extraLength = readUInt16(bytes, at: offset + 30),
+                  let commentLength = readUInt16(bytes, at: offset + 32) else {
+                break
+            }
+
+            let nameStart = offset + 46
+            let nameEnd = nameStart + Int(nameLength)
+            guard nameEnd <= bytes.count else { break }
+            let rawName = Array(bytes[nameStart..<nameEnd])
+            if flags & 0x0800 == 0 {
+                let extraStart = nameEnd
+                let extraEnd = extraStart + Int(extraLength)
+                let unicodePath = unicodePath(
+                    in: Array(bytes[extraStart..<extraEnd]),
+                    rawName: rawName
+                )
+                addRepairs(for: rawName, unicodePath: unicodePath, to: &pathRepairs)
+            }
+
+            offset = nameEnd + Int(extraLength) + Int(commentLength)
+            guard offset <= bytes.count else { break }
+        }
+
+        return pathRepairs.map { PathRepair(rendered: $0.key, repaired: $0.value) }.sorted {
+            pathDepth($0.rendered) < pathDepth($1.rendered)
+        }
+    }
+
+    static func sourceCandidates(for repair: PathRepair) -> [String] {
+        let renderedComponents = repair.rendered.split(separator: "/").map(String.init)
+        let repairedComponents = repair.repaired.split(separator: "/").map(String.init)
+        guard renderedComponents.count == repairedComponents.count else {
+            return [repair.rendered]
+        }
+
+        var candidates: [[String]] = [[]]
+        for (rendered, repaired) in zip(renderedComponents, repairedComponents) {
+            candidates = candidates.flatMap { prefix in
+                [prefix + [rendered], prefix + [repaired]]
+            }
+        }
+        return Array(Set(candidates.map { $0.joined(separator: "/") }))
+    }
+
+    private static func addRepairs(
+        for rawName: [UInt8],
+        unicodePath: String?,
+        to repairs: inout [String: String]
+    ) {
+        let rawComponents = rawName
+            .split(separator: 0x2F, omittingEmptySubsequences: true)
+            .map(Array.init)
+            .filter { $0 != [0x2E] }
+        guard !rawComponents.isEmpty,
+              !rawComponents.contains([0x2E, 0x2E]) else { return }
+
+        var macRomanRenderedComponents: [String] = []
+        var extractorRenderedComponents: [String] = []
+        var repairedComponents: [String] = []
+        for rawComponent in rawComponents {
+            // ZIPs produced by some Windows tools can mix UTF-8 and GBK
+            // components in one path while leaving the UTF-8 flag unset.
+            let isUTF8 = String(data: Data(rawComponent), encoding: .utf8) != nil
+            let macRomanRendered = decode(rawComponent, as: .macOSRoman)
+            let extractorRendered = decode(rawComponent, as: isUTF8 ? .utf8 : .macOSRoman)
+            let repaired = isUTF8 ? extractorRendered : (legacyCJKName(for: rawComponent) ?? extractorRendered)
+            macRomanRenderedComponents.append(macRomanRendered)
+            extractorRenderedComponents.append(extractorRendered)
+            repairedComponents.append(repaired)
+        }
+
+        let targetComponents = unicodePath
+            .flatMap(pathComponents)
+            ?? repairedComponents
+        guard targetComponents.count == rawComponents.count else { return }
+
+        addRepairs(
+            renderedComponents: macRomanRenderedComponents,
+            repairedComponents: targetComponents,
+            to: &repairs
+        )
+        if extractorRenderedComponents != macRomanRenderedComponents {
+            addRepairs(
+                renderedComponents: extractorRenderedComponents,
+                repairedComponents: targetComponents,
+                to: &repairs
+            )
+        }
+    }
+
+    private static func addRepairs(
+        renderedComponents: [String],
+        repairedComponents: [String],
+        to repairs: inout [String: String]
+    ) {
+        for depth in 1...renderedComponents.count {
+            let renderedPath = renderedComponents.prefix(depth).joined(separator: "/")
+            let repairedPath = repairedComponents.prefix(depth).joined(separator: "/")
+            if renderedPath != repairedPath {
+                if let existing = repairs[renderedPath], existing != repairedPath {
+                    continue
+                }
+                repairs[renderedPath] = repairedPath
+            }
+        }
+    }
+
+    private static func legacyCJKName(for bytes: [UInt8]) -> String? {
+        guard bytes.contains(where: { $0 >= 0x80 }) else { return nil }
+        return candidates
+            .compactMap { candidate -> (String, Int)? in
+                guard let decoded = String(data: Data(bytes), encoding: candidate.encoding),
+                      !decoded.unicodeScalars.contains(where: { $0.value == 0 || $0.value < 0x20 }) else {
+                    return nil
+                }
+                let cjkCount = decoded.unicodeScalars.filter(isCJK).count
+                guard cjkCount > 0 else { return nil }
+                return (decoded, cjkCount * 10 + candidate.priority)
+            }
+            .max { $0.1 < $1.1 }?.0
+    }
+
+    private static func decode(_ bytes: [UInt8], as encoding: String.Encoding) -> String {
+        String(data: Data(bytes), encoding: encoding) ?? String(decoding: bytes, as: UTF8.self)
+    }
+
+    private static func isCJK(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.value {
+        case 0x2E80...0x2FFF, 0x3400...0x4DBF, 0x4E00...0x9FFF, 0xF900...0xFAFF:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func pathDepth(_ path: String) -> Int {
+        path.split(separator: "/").count
+    }
+
+    private static func pathComponents(_ path: String) -> [String]? {
+        let components = path
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .map(String.init)
+        guard !components.isEmpty,
+              !components.contains("."),
+              !components.contains(".."),
+              !path.hasPrefix("/") else { return nil }
+        return components
+    }
+
+    private static func unicodePath(in extra: [UInt8], rawName: [UInt8]) -> String? {
+        var offset = 0
+        while offset + 4 <= extra.count {
+            guard let tag = readUInt16(extra, at: offset),
+                  let length = readUInt16(extra, at: offset + 2) else { return nil }
+            let valueStart = offset + 4
+            let valueEnd = valueStart + Int(length)
+            guard valueEnd <= extra.count else { return nil }
+            if tag == 0x7075,
+               length >= 5,
+               extra[valueStart] == 1,
+               readUInt32(extra, at: valueStart + 1) == crc32(rawName),
+               let path = String(data: Data(extra[(valueStart + 5)..<valueEnd]), encoding: .utf8) {
+                return path
+            }
+            offset = valueEnd
+        }
+        return nil
+    }
+
+    private static func crc32(_ bytes: [UInt8]) -> UInt32 {
+        var crc: UInt32 = 0xFFFF_FFFF
+        for byte in bytes {
+            crc ^= UInt32(byte)
+            for _ in 0..<8 {
+                crc = (crc >> 1) ^ ((crc & 1) == 1 ? 0xEDB8_8320 : 0)
+            }
+        }
+        return crc ^ 0xFFFF_FFFF
+    }
+
+    private static func findEndOfCentralDirectory(in bytes: [UInt8]) -> Int? {
+        guard !bytes.isEmpty else { return nil }
+        let start = max(0, bytes.count - 65_557)
+        guard bytes.count >= 22 else { return nil }
+        for offset in stride(from: bytes.count - 22, through: start, by: -1) {
+            if readUInt32(bytes, at: offset) == 0x0605_4B50 {
+                return offset
+            }
+        }
+        return nil
+    }
+
+    private static func readUInt16(_ bytes: [UInt8], at offset: Int) -> UInt16? {
+        guard offset >= 0, offset + 2 <= bytes.count else { return nil }
+        return UInt16(bytes[offset]) | UInt16(bytes[offset + 1]) << 8
+    }
+
+    private static func readUInt32(_ bytes: [UInt8], at offset: Int) -> UInt32? {
+        guard offset >= 0, offset + 4 <= bytes.count else { return nil }
+        return UInt32(bytes[offset])
+            | UInt32(bytes[offset + 1]) << 8
+            | UInt32(bytes[offset + 2]) << 16
+            | UInt32(bytes[offset + 3]) << 24
+    }
+
+    private static func encoding(named name: String) -> String.Encoding? {
+        let cfEncoding = CFStringConvertIANACharSetNameToEncoding(name as CFString)
+        guard cfEncoding != kCFStringEncodingInvalidId else { return nil }
+        let nsEncoding = CFStringConvertEncodingToNSStringEncoding(cfEncoding)
+        return String.Encoding(rawValue: nsEncoding)
     }
 }
