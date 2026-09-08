@@ -957,6 +957,177 @@ struct TextEncodingConversionServiceTests {
 
     // MARK: - Fix 3: streaming UTF-8 validation
 
+    @Test("preserves valid UTF-8 files with irreversible mojibake markers")
+    func preservesValidUTF8FilesWithIrreversibleMojibakeMarkers() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("utf8-lossy-content.txt")
+        let sourceText = "正常中文内容\n损坏片段：\u{fffd}\u{e4c6}\n后续内容仍然是 UTF-8。"
+        try sourceText.write(to: file, atomically: true, encoding: .utf8)
+
+        let result = try TextEncodingConversionService(logger: CapturingLogger()).convertFileToUTF8(file)
+
+        #expect(result.status == .alreadyUTF8)
+        #expect(result.detectedEncoding == "utf-8-lossy")
+        #expect(result.finalURL == file.standardizedFileURL)
+        #expect(try String(contentsOf: file, encoding: .utf8) == sourceText)
+    }
+
+    @Test("caches readable lossy UTF-8 classification without rereading the file")
+    func cachesReadableLossyUTF8Classification() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("cached-utf8-lossy-content.txt")
+        let cache = TextEncodingConversionCache(storageURL: root.url.appendingPathComponent("cache.json"))
+        let sourceText = String(repeating: "中文正文可读内容\n", count: 20)
+            + "不可逆：\u{fffd}\u{e4c6}\n"
+        try sourceText.write(to: file, atomically: true, encoding: .utf8)
+        var fullFileLoadCount = 0
+
+        let first = try TextEncodingConversionService(
+            logger: CapturingLogger(),
+            cache: cache,
+            loadFullFileData: { url in
+                fullFileLoadCount += 1
+                return try Data(contentsOf: url)
+            }
+        ).convertFileToUTF8(file)
+        #expect(first.detectedEncoding == "utf-8-lossy")
+
+        fullFileLoadCount = 0
+        let second = try TextEncodingConversionService(
+            logger: CapturingLogger(),
+            cache: cache,
+            loadFullFileData: { url in
+                fullFileLoadCount += 1
+                return try Data(contentsOf: url)
+            }
+        ).convertFileToUTF8(file)
+
+        #expect(second.status == .alreadyUTF8)
+        #expect(second.usedCache)
+        #expect(fullFileLoadCount == 0)
+    }
+
+    @Test("clean UTF-8 conversion does not load the whole file")
+    func cleanUTF8ConversionAvoidsFullFileLoad() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("streamed-utf8.txt")
+        let content = String(repeating: "这是一行干净的 UTF-8 内容。\n", count: 10_000)
+        try content.write(to: file, atomically: true, encoding: .utf8)
+        var fullFileLoadCount = 0
+        let service = TextEncodingConversionService(
+            logger: CapturingLogger(),
+            loadFullFileData: { url in
+                fullFileLoadCount += 1
+                return try Data(contentsOf: url)
+            }
+        )
+
+        let result = try service.convertFileToUTF8(file)
+
+        #expect(result.status == .alreadyUTF8)
+        #expect(result.detectedEncoding == "utf-8")
+        #expect(fullFileLoadCount == 0)
+    }
+
+    @Test("cached clean UTF-8 conversion does not load the whole file")
+    func cachedCleanUTF8ConversionAvoidsFullFileLoad() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("cached-streamed-utf8.txt")
+        let cache = TextEncodingConversionCache(storageURL: root.url.appendingPathComponent("cache.json"))
+        try String(repeating: "cached UTF-8 内容\n", count: 10_000)
+            .write(to: file, atomically: true, encoding: .utf8)
+        _ = try TextEncodingConversionService(logger: CapturingLogger(), cache: cache)
+            .convertFileToUTF8(file)
+        var fullFileLoadCount = 0
+        let service = TextEncodingConversionService(
+            logger: CapturingLogger(),
+            cache: cache,
+            loadFullFileData: { url in
+                fullFileLoadCount += 1
+                return try Data(contentsOf: url)
+            }
+        )
+
+        let result = try service.convertFileToUTF8(file)
+
+        #expect(result.status == .alreadyUTF8)
+        #expect(result.usedCache)
+        #expect(fullFileLoadCount == 0)
+    }
+
+    @Test("suspicious UTF-8 scalar crossing a stream chunk boundary uses full inspection")
+    func suspiciousUTF8ScalarAcrossChunkBoundaryUsesFullInspection() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("chunk-boundary-marker.txt")
+        let content = String(repeating: "a", count: 65_535) + "\u{fffd}\n正常中文内容"
+        try content.write(to: file, atomically: true, encoding: .utf8)
+        var fullFileLoadCount = 0
+        let service = TextEncodingConversionService(
+            logger: CapturingLogger(),
+            loadFullFileData: { url in
+                fullFileLoadCount += 1
+                return try Data(contentsOf: url)
+            }
+        )
+
+        let result = try service.convertFileToUTF8(file)
+
+        #expect(result.status == .alreadyUTF8)
+        #expect(fullFileLoadCount == 1)
+        #expect(try String(contentsOf: file, encoding: .utf8) == content)
+    }
+
+    @Test("control-heavy UTF-8 data does not use the text fast path")
+    func controlHeavyUTF8DataUsesFullInspection() throws {
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("control-heavy.txt")
+        let content = String(repeating: "\u{0001}", count: 100) + "plain text"
+        try content.write(to: file, atomically: true, encoding: .utf8)
+        var fullFileLoadCount = 0
+        let service = TextEncodingConversionService(
+            logger: CapturingLogger(),
+            loadFullFileData: { url in
+                fullFileLoadCount += 1
+                return try Data(contentsOf: url)
+            }
+        )
+
+        let result = try service.convertFileToUTF8(file)
+
+        #expect(fullFileLoadCount == 1)
+        #expect(result.status == .renamedUnknown)
+    }
+
+    @Test("stream read failure falls back to full inspection")
+    func streamReadFailureUsesFullInspection() throws {
+        enum ProbeError: Error { case readFailed }
+
+        let root = try TemporaryDirectory()
+        let file = root.url.appendingPathComponent("read-failure.txt")
+        try String(repeating: "valid UTF-8 中文\n", count: 10_000)
+            .write(to: file, atomically: true, encoding: .utf8)
+        var streamReadCount = 0
+        var fullFileLoadCount = 0
+        let service = TextEncodingConversionService(
+            logger: CapturingLogger(),
+            loadFullFileData: { url in
+                fullFileLoadCount += 1
+                return try Data(contentsOf: url)
+            },
+            readStreamingChunk: { handle, chunkSize in
+                streamReadCount += 1
+                guard streamReadCount == 1 else { throw ProbeError.readFailed }
+                return try handle.read(upToCount: chunkSize) ?? Data()
+            }
+        )
+
+        let result = try service.convertFileToUTF8(file)
+
+        #expect(streamReadCount == 2)
+        #expect(fullFileLoadCount == 1)
+        #expect(result.status == .alreadyUTF8)
+    }
+
     @Test("large UTF-8 file is detected as already UTF-8")
     func largeUTF8FileDetectedAsAlreadyUTF8() throws {
         let root = try TemporaryDirectory()

@@ -3,8 +3,8 @@ set -euo pipefail
 
 APP_NAME="Dual Finder 纪"
 BUNDLE_ID="com.local.dualfinder"
-APP_VERSION="0.1.25"
-APP_BUILD="25"
+APP_VERSION="0.1.26"
+APP_BUILD="26"
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RELEASE_DIR="$ROOT_DIR/release"
 APP_BUNDLE="$RELEASE_DIR/$APP_NAME.app"
@@ -18,6 +18,13 @@ APPLE_KEYS_DIR="${APPLE_KEYS_DIR:-$ROOT_DIR/signing/apple_keys}"
 SIGNING_IDENTITY=""
 SIGNING_KEYCHAIN_PATH=""
 PREPARED_SIGNING_IDENTITY=""
+
+# Non-interactive launches do not read ~/.zshrc. Prefer the Homebrew Swift
+# toolchain so the package tools-version and the installer use the same Swift.
+SWIFT_TOOLCHAIN="/opt/homebrew/opt/swift/bin"
+if [[ -x "$SWIFT_TOOLCHAIN/swift" ]]; then
+    PATH="$SWIFT_TOOLCHAIN:$PATH"
+fi
 
 # Build mode: debug (default, incremental, fast) or release (optimized, slow).
 # SPM automatically falls back to a full rebuild when the incremental cache

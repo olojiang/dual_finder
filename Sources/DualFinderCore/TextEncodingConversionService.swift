@@ -347,6 +347,8 @@ public final class TextEncodingConversionCache: @unchecked Sendable {
 
 public struct TextEncodingConversionService {
     public typealias ProgressHandler = (_ completedCount: Int, _ totalCount: Int, _ result: TextEncodingConversionResult) -> Void
+    typealias FullFileDataLoader = (URL) throws -> Data
+    typealias StreamingChunkReader = (FileHandle, Int) throws -> Data
 
     public static let defaultCacheHitProgressStride = 64
 
@@ -373,6 +375,8 @@ public struct TextEncodingConversionService {
     private let fileManager: FileManager
     private let logger: AppLogging?
     private let cache: TextEncodingConversionCache?
+    private let loadFullFileData: FullFileDataLoader
+    private let readStreamingChunk: StreamingChunkReader
 
     public init(
         fileManager: FileManager = .default,
@@ -382,6 +386,26 @@ public struct TextEncodingConversionService {
         self.fileManager = fileManager
         self.logger = logger
         self.cache = cache
+        self.loadFullFileData = { try Data(contentsOf: $0) }
+        self.readStreamingChunk = { handle, chunkSize in
+            try handle.read(upToCount: chunkSize) ?? Data()
+        }
+    }
+
+    init(
+        fileManager: FileManager = .default,
+        logger: AppLogging?,
+        cache: TextEncodingConversionCache? = nil,
+        loadFullFileData: @escaping FullFileDataLoader,
+        readStreamingChunk: @escaping StreamingChunkReader = { handle, chunkSize in
+            try handle.read(upToCount: chunkSize) ?? Data()
+        }
+    ) {
+        self.fileManager = fileManager
+        self.logger = logger
+        self.cache = cache
+        self.loadFullFileData = loadFullFileData
+        self.readStreamingChunk = readStreamingChunk
     }
 
     public func convertFilesToUTF8(
@@ -481,17 +505,23 @@ public struct TextEncodingConversionService {
             )
         }
 
+        let streamingInspection = streamingUTF8Validation(at: standardizedURL)
+
         if !force, let lookup = cache?.lookupEncoding(
             for: standardizedURL,
             size: initialFingerprint?.size,
             modifiedAt: initialFingerprint?.modifiedAt
-        ), lookup.encoding == "utf-8",
-           let cachedData = try? Data(contentsOf: standardizedURL),
-           !containsEmbeddedMojibakeMarkers(in: cachedData) {
+        ), (lookup.encoding == "utf-8" && streamingInspection.canUseCachedUTF8WithoutEmbeddedMojibakeMarkers)
+            || lookup.encoding == "utf-8-lossy" {
             if needsUnknownEncodingNameRestore(standardizedURL) {
                 let finalURL = try restoreUnknownEncodingNameIfNeeded(standardizedURL)
                 let finalFingerprint = fileFingerprint(for: finalURL)
-                try cache?.markUTF8(for: finalURL, size: finalFingerprint?.size, modifiedAt: finalFingerprint?.modifiedAt)
+                try cache?.markEncoding(
+                    lookup.encoding,
+                    for: finalURL,
+                    size: finalFingerprint?.size,
+                    modifiedAt: finalFingerprint?.modifiedAt
+                )
                 logger?.debug("text-encoding", "file.cache-hit", metadata: [
                     "path": finalURL.path,
                     "encoding": lookup.encoding,
@@ -507,7 +537,8 @@ public struct TextEncodingConversionService {
             }
 
             if lookup.needsMigration {
-                try cache?.markUTF8(
+                try cache?.markEncoding(
+                    lookup.encoding,
                     for: standardizedURL,
                     size: initialFingerprint?.size,
                     modifiedAt: initialFingerprint?.modifiedAt
@@ -522,7 +553,24 @@ public struct TextEncodingConversionService {
             )
         }
 
-        let data = try Data(contentsOf: standardizedURL)
+        if !force, streamingInspection.isCleanUTF8 {
+            let finalURL = try restoreUnknownEncodingNameIfNeeded(standardizedURL)
+            let finalFingerprint = finalURL == standardizedURL ? initialFingerprint : fileFingerprint(for: finalURL)
+            try cache?.markUTF8(
+                for: finalURL,
+                size: finalFingerprint?.size,
+                modifiedAt: finalFingerprint?.modifiedAt
+            )
+            logger?.info("text-encoding", "file.already-utf8", metadata: ["path": finalURL.path])
+            return TextEncodingConversionResult(
+                originalURL: standardizedURL,
+                finalURL: finalURL,
+                detectedEncoding: "utf-8",
+                status: .alreadyUTF8
+            )
+        }
+
+        let data = try loadFullFileData(standardizedURL)
         guard !data.isEmpty else {
             let finalURL = try restoreUnknownEncodingNameIfNeeded(standardizedURL)
             let finalFingerprint = finalURL == standardizedURL ? initialFingerprint : fileFingerprint(for: finalURL)
@@ -535,7 +583,7 @@ public struct TextEncodingConversionService {
             )
         }
 
-        let embeddedRepair = detectEmbeddedMojibakeRepair(for: data)
+        let embeddedRepair = detectEmbeddedMojibakeRepair(for: data, allowIrreversibleMarkers: force)
         if let repaired = (force ? detectMojibakeRepair(for: data) : nil) ?? embeddedRepair {
             let utf8Data = Data(repaired.text.utf8)
             try utf8Data.write(to: standardizedURL, options: .atomic)
@@ -557,9 +605,31 @@ public struct TextEncodingConversionService {
             )
         }
 
+        if !force, readableLossyUTF8Text(in: data, inspection: streamingInspection) != nil {
+            let finalURL = try restoreUnknownEncodingNameIfNeeded(standardizedURL)
+            let finalFingerprint = finalURL == standardizedURL ? initialFingerprint : fileFingerprint(for: finalURL)
+            try cache?.markEncoding(
+                "utf-8-lossy",
+                for: finalURL,
+                size: finalFingerprint?.size,
+                modifiedAt: finalFingerprint?.modifiedAt
+            )
+            logger?.warning("text-encoding", "file.utf8-lossy-preserved", metadata: [
+                "path": finalURL.path,
+                "replacementOrPrivateUse": "true"
+            ])
+            return TextEncodingConversionResult(
+                originalURL: standardizedURL,
+                finalURL: finalURL,
+                detectedEncoding: "utf-8-lossy",
+                status: .alreadyUTF8,
+                diagnostic: "valid UTF-8 preserved; replacement/private-use characters may be irreversible"
+            )
+        }
+
         // Force mode is allowed to repair content, not to reinterpret an otherwise
         // valid UTF-8 document just because no repair candidate was convincing.
-        if force, case .validUTF8(nulCount: 0, _) = streamingUTF8Validation(at: standardizedURL) {
+        if force, streamingInspection.isValidUTF8WithoutNUL {
             let finalURL = try restoreUnknownEncodingNameIfNeeded(standardizedURL)
             let finalFingerprint = finalURL == standardizedURL ? initialFingerprint : fileFingerprint(for: finalURL)
             try cache?.markUTF8(for: finalURL, size: finalFingerprint?.size, modifiedAt: finalFingerprint?.modifiedAt)
@@ -642,21 +712,69 @@ public struct TextEncodingConversionService {
             return cachedEncoding
         }
 
-        if case .validUTF8(nulCount: 0, _) = streamingUTF8Validation(at: standardizedURL) {
+        let streamingInspection = streamingUTF8Validation(at: standardizedURL)
+        if streamingInspection.isCleanUTF8 {
             try cache?.markEncoding("utf-8", for: standardizedURL, size: fingerprint?.size, modifiedAt: fingerprint?.modifiedAt)
             return "utf-8"
         }
 
-        let data = try Data(contentsOf: standardizedURL)
-        let label = data.isEmpty ? "utf-8" : (detectEncoding(for: data)?.label ?? "unknown")
-        try cache?.markEncoding(label, for: standardizedURL, size: fingerprint?.size, modifiedAt: fingerprint?.modifiedAt)
-        return label
+        let data = try loadFullFileData(standardizedURL)
+        let finalLabel: String
+        if readableLossyUTF8Text(in: data, inspection: streamingInspection) != nil {
+            finalLabel = "utf-8-lossy"
+        } else {
+            finalLabel = data.isEmpty ? "utf-8" : (detectEncoding(for: data)?.label ?? "unknown")
+        }
+        try cache?.markEncoding(finalLabel, for: standardizedURL, size: fingerprint?.size, modifiedAt: fingerprint?.modifiedAt)
+        return finalLabel
     }
 
     private enum StreamingUTF8Result {
-        case validUTF8(nulCount: Int, totalBytes: Int)
+        case validUTF8(
+            nulCount: Int,
+            suspiciousControlCount: Int,
+            totalScalarCount: Int,
+            totalBytes: Int,
+            containsEmbeddedMojibakeMarkers: Bool
+        )
         case notUTF8
         case unableToOpen
+
+        var isCleanUTF8: Bool {
+            guard case let .validUTF8(
+                nulCount,
+                suspiciousControlCount,
+                totalScalarCount,
+                _,
+                containsMarkers
+            ) = self else {
+                return false
+            }
+            let suspiciousControlRatio = totalScalarCount == 0
+                ? 0
+                : Double(suspiciousControlCount) / Double(totalScalarCount)
+            return nulCount == 0
+                && suspiciousControlRatio <= 0.02
+                && !containsMarkers
+        }
+
+        var isValidUTF8WithoutNUL: Bool {
+            guard case let .validUTF8(nulCount, _, _, _, _) = self else { return false }
+            return nulCount == 0
+        }
+
+        var canUseCachedUTF8WithoutEmbeddedMojibakeMarkers: Bool {
+            switch self {
+            case let .validUTF8(_, _, _, _, containsMarkers):
+                return !containsMarkers
+            case .notUTF8:
+                // Preserve the fingerprint-cache contract: invalid bytes with an
+                // unchanged size and modification date still use the cached label.
+                return true
+            case .unableToOpen:
+                return false
+            }
+        }
     }
 
     private func streamingUTF8Validation(at url: URL, chunkSize: Int = 64 * 1024) -> StreamingUTF8Result {
@@ -665,10 +783,33 @@ public struct TextEncodingConversionService {
 
         var carryOver = Data()
         var nulCount = 0
+        var suspiciousControlCount = 0
+        var totalScalarCount = 0
         var totalBytes = 0
+        var containsEmbeddedMojibakeMarkers = false
+
+        func inspect(_ text: String) {
+            for scalar in text.unicodeScalars {
+                totalScalarCount += 1
+                if scalar.value == 0 {
+                    nulCount += 1
+                } else if scalar.properties.generalCategory == .control,
+                          scalar != "\n", scalar != "\r", scalar != "\t" {
+                    suspiciousControlCount += 1
+                }
+                if isSuspiciousMojibakeScalar(scalar) {
+                    containsEmbeddedMojibakeMarkers = true
+                }
+            }
+        }
 
         while true {
-            let chunk = (try? handle.read(upToCount: chunkSize)) ?? Data()
+            let chunk: Data
+            do {
+                chunk = try readStreamingChunk(handle, chunkSize)
+            } catch {
+                return .unableToOpen
+            }
             if chunk.isEmpty {
                 if !carryOver.isEmpty {
                     return .notUTF8
@@ -680,15 +821,15 @@ public struct TextEncodingConversionService {
             var data = carryOver + chunk
             carryOver = Data()
 
-            if String(data: data, encoding: .utf8) != nil {
-                nulCount += data.filter { $0 == 0 }.count
+            if let text = String(data: data, encoding: .utf8) {
+                inspect(text)
             } else {
                 var trimmed = 0
                 for trim in 1...3 {
                     if data.count <= trim { break }
                     let prefix = data.prefix(data.count - trim)
-                    if String(data: prefix, encoding: .utf8) != nil {
-                        nulCount += prefix.filter { $0 == 0 }.count
+                    if let text = String(data: prefix, encoding: .utf8) {
+                        inspect(text)
                         carryOver = data.suffix(trim)
                         trimmed = trim
                         break
@@ -701,7 +842,13 @@ public struct TextEncodingConversionService {
             data = Data()
         }
 
-        return .validUTF8(nulCount: nulCount, totalBytes: totalBytes)
+        return .validUTF8(
+            nulCount: nulCount,
+            suspiciousControlCount: suspiciousControlCount,
+            totalScalarCount: totalScalarCount,
+            totalBytes: totalBytes,
+            containsEmbeddedMojibakeMarkers: containsEmbeddedMojibakeMarkers
+        )
     }
 
     private func detectEncoding(for data: Data) -> DetectedTextEncoding? {
@@ -1095,49 +1242,44 @@ public struct TextEncodingConversionService {
     /// the result has fewer private-use/replacement characters. This is deliberately
     /// conservative: valid UTF-8 files with intentional private-use glyphs must remain
     /// unchanged unless the candidate is measurably cleaner.
-    private func detectEmbeddedMojibakeRepair(for data: Data) -> DetectedTextEncoding? {
+    private func detectEmbeddedMojibakeRepair(
+        for data: Data,
+        allowIrreversibleMarkers: Bool = false
+    ) -> DetectedTextEncoding? {
         guard let utf8Text = String(data: data, encoding: .utf8) else { return nil }
 
         let lines = utf8Text.split(separator: "\n", omittingEmptySubsequences: false)
         guard lines.count > 1 else { return nil }
 
-        var repairedLines: [String] = []
-        repairedLines.reserveCapacity(lines.count)
+        var repairedText = ""
+        repairedText.reserveCapacity(utf8Text.utf8.count)
         var changedLineCount = 0
         var lossyByteCount = 0
 
-        for substring in lines {
+        for (index, substring) in lines.enumerated() {
+            if index > 0 {
+                repairedText.append("\n")
+            }
+            guard substring.unicodeScalars.contains(where: isSuspiciousMojibakeScalar) else {
+                repairedText.append(contentsOf: substring)
+                continue
+            }
+
             let line = String(substring)
-            guard line.unicodeScalars.contains(where: isSuspiciousMojibakeScalar) else {
-                repairedLines.append(line)
+            guard let repair = autoreleasepool(invoking: {
+                repairedEmbeddedMojibakeLine(line, allowIrreversibleMarkers: allowIrreversibleMarkers)
+            }) else {
+                repairedText.append(line)
                 continue
             }
 
-            guard let candidate = redecodeGB18030AsGB2312(line) else {
-                repairedLines.append(line)
-                continue
-            }
-
-            guard candidate.text != line,
-                  mojibakeQualityScore(candidate.text) < mojibakeQualityScore(line),
-                  let cleaned = cleanedMojibakeCandidate(candidate.text),
-                  // A short corrupted line can legitimately gain a few replacement
-                  // scalars while removing much more damaging private-use mojibake.
-                  // The quality-score comparison above remains the hard guard.
-                  textLooksReadable(cleaned, replacementThreshold: 0.15),
-                  textHasCJKContent(cleaned) else {
-                repairedLines.append(line)
-                continue
-            }
-
-            repairedLines.append(cleaned)
+            repairedText.append(repair.text)
             changedLineCount += 1
-            lossyByteCount += candidate.replacedBytes
+            lossyByteCount += repair.replacedBytes
         }
 
         guard changedLineCount > 0 else { return nil }
 
-        let repairedText = repairedLines.joined(separator: "\n")
         guard mojibakeQualityScore(repairedText) < mojibakeQualityScore(utf8Text),
               textLooksReadable(repairedText, replacementThreshold: 0.15),
               textHasCJKContent(repairedText) else {
@@ -1149,6 +1291,29 @@ public struct TextEncodingConversionService {
             text: repairedText,
             lossyByteCount: lossyByteCount == 0 ? nil : lossyByteCount
         )
+    }
+
+    private func repairedEmbeddedMojibakeLine(
+        _ line: String,
+        allowIrreversibleMarkers: Bool
+    ) -> (text: String, replacedBytes: Int)? {
+        guard allowIrreversibleMarkers || !line.unicodeScalars.contains(where: { $0 == "\u{fffd}" }) else {
+            // U+FFFD has already discarded the original byte; repairing adjacent
+            // scalars would make the result look cleaner while inventing context.
+            return nil
+        }
+        guard let candidate = redecodeGB18030AsGB2312(line),
+              candidate.text != line,
+              mojibakeQualityScore(candidate.text) < mojibakeQualityScore(line),
+              let cleaned = cleanedMojibakeCandidate(candidate.text),
+              // A short corrupted line can legitimately gain a few replacement
+              // scalars while removing much more damaging private-use mojibake.
+              // The quality-score comparison above remains the hard guard.
+              textLooksReadable(cleaned, replacementThreshold: 0.15),
+              textHasCJKContent(cleaned) else {
+            return nil
+        }
+        return (cleaned, candidate.replacedBytes)
     }
 
     private func cleanedMojibakeCandidate(_ text: String) -> String? {
@@ -1172,6 +1337,10 @@ public struct TextEncodingConversionService {
               let destinationEncoding = EncodingCandidate.legacyCandidates.first(where: { $0.label == "gb2312" })?.encoding,
               !text.isEmpty else {
             return nil
+        }
+
+        if let bytes = text.data(using: sourceEncoding) {
+            return decodeCJKWithReplacement(bytes, encoding: destinationEncoding)
         }
 
         // A replacement character or another unsupported scalar can make the whole
@@ -1214,9 +1383,21 @@ public struct TextEncodingConversionService {
         scalar == "\u{fffd}" || (0xe000...0xf8ff).contains(Int(scalar.value))
     }
 
-    private func containsEmbeddedMojibakeMarkers(in data: Data) -> Bool {
-        guard let text = String(data: data, encoding: .utf8) else { return false }
-        return text.unicodeScalars.contains(where: isSuspiciousMojibakeScalar)
+    private func readableLossyUTF8Text(in data: Data, inspection: StreamingUTF8Result) -> String? {
+        guard inspection.isValidUTF8WithoutNUL,
+              let text = String(data: data, encoding: .utf8),
+              text.unicodeScalars.contains(where: { $0 == "\u{fffd}" }),
+              textLooksReadable(text, replacementThreshold: 0.06),
+              textHasReadableContent(text) else {
+            return nil
+        }
+        return text
+    }
+
+    private func textHasReadableContent(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in
+            scalar.properties.isAlphabetic || (0x30...0x39).contains(Int(scalar.value))
+        }
     }
 
     private func mojibakeQualityScore(_ text: String) -> Int {

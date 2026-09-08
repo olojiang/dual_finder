@@ -76,10 +76,10 @@ enum TextEncodingReportFormatter {
         return lines
     }
 
-    static let timestampFormatter: DateFormatter = {
+    static func timestamp(for date: Date) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyyMMdd-HHmmss"
-        return formatter
-    }()
+        return formatter.string(from: date)
+    }
 }

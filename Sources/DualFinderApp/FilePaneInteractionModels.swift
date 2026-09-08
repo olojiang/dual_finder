@@ -216,6 +216,16 @@ enum FileListFocusRestorePolicy {
     }
 }
 
+enum FileListFocusTransitionPolicy {
+    static func activePaneSide(
+        current: PaneSide,
+        focusedSide: PaneSide,
+        isFocused: Bool
+    ) -> PaneSide {
+        isFocused ? focusedSide : current
+    }
+}
+
 enum FileListKeyDownFallbackPolicy {
     static func ignoreReasonForSimilarReviewArrowFallback(
         keyCode: UInt16,

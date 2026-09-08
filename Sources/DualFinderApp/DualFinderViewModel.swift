@@ -65,6 +65,8 @@ final class DualFinderViewModel: ObservableObject {
     private let folderSizeCache: FolderSizeCache
     private let operationScanCache: OperationScanCache
     private let textEncodingCache: TextEncodingConversionCache
+    private let translationConfigurationStore: TranslationConfigurationStore
+    private let textTranslationService: TextTranslationService
     private let androidFileService: AndroidFileService
     private let uiLayoutPreferencesStore: UILayoutPreferencesStore
     private let permissionGuide: PrivacyPermissionGuide
@@ -113,6 +115,9 @@ final class DualFinderViewModel: ObservableObject {
     private var activeTabDrag: (tabID: UUID, sourceSide: PaneSide)?
     @Published private var isTextEncodingConversionRunning = false
     private var textEncodingConversionCancellation: FileOperationCancellation?
+    @Published private var isTextTranslationRunning = false
+    private var textTranslationCancellation: FileOperationCancellation?
+    private var textTranslationTask: Task<Void, Never>?
     private var folderSizeCancellation: FileOperationCancellation?
     @Published private(set) var isFolderSizeCalculationRunning = false
 
@@ -125,6 +130,8 @@ final class DualFinderViewModel: ObservableObject {
         folderSizeCache: FolderSizeCache = FolderSizeCache(),
         operationScanCache: OperationScanCache = OperationScanCache(),
         textEncodingCache: TextEncodingConversionCache = TextEncodingConversionCache(),
+        translationConfigurationStore: TranslationConfigurationStore = TranslationConfigurationStore(),
+        translationClient: OpenAICompatibleTranslationClient? = nil,
         uiLayoutPreferencesStore: UILayoutPreferencesStore = UILayoutPreferencesStore(),
         androidFileService: AndroidFileService? = nil,
         permissionGuide: PrivacyPermissionGuide = PrivacyPermissionGuide(),
@@ -138,6 +145,22 @@ final class DualFinderViewModel: ObservableObject {
         self.folderSizeCache = folderSizeCache
         self.operationScanCache = operationScanCache
         self.textEncodingCache = textEncodingCache
+        self.translationConfigurationStore = translationConfigurationStore
+        let translationDiagnosticHandler: OpenAICompatibleTranslationClient.DiagnosticHandler = { event, metadata in
+            let level: LogLevel = [
+                "request.retry",
+                "request.failed",
+                "response.http-error",
+                "response.parse-failed",
+                "chunk.refine",
+                "line.plain-fallback"
+            ].contains(event) ? .warning : .debug
+            logger.log(level, "text-translation-llm", event, metadata: metadata)
+        }
+        self.textTranslationService = TextTranslationService(
+            client: translationClient ?? OpenAICompatibleTranslationClient(diagnosticHandler: translationDiagnosticHandler),
+            diagnosticHandler: translationDiagnosticHandler
+        )
         self.androidFileService = androidFileService ?? AndroidFileService(logger: logger)
         self.uiLayoutPreferencesStore = uiLayoutPreferencesStore
         self.permissionGuide = permissionGuide
@@ -218,6 +241,8 @@ final class DualFinderViewModel: ObservableObject {
         context["encodingColumn"] = "\(uiLayoutPreferences.isEncodingColumnVisible)"
         context["encodingScanLeft"] = "\(textEncodingScanCancellations[.left] != nil)"
         context["encodingScanRight"] = "\(textEncodingScanCancellations[.right] != nil)"
+        context["encodingConversionRunning"] = "\(isTextEncodingConversionRunning)"
+        context["textTranslationRunning"] = "\(isTextTranslationRunning)"
         context["iconLoads"] = "\(FinderFileIconCache.shared.iconLoadCount)"
         context["folderSizeCacheEntries"] = "\(folderSizeCache.entryCount)"
         context["textEncodingCacheLoaded"] = "\(textEncodingCache.isLoadedInMemory)"
@@ -521,6 +546,25 @@ final class DualFinderViewModel: ObservableObject {
             && !isInlineRenaming
             && !isArchiveOperationRunning
             && !isTextEncodingConversionRunning
+    }
+
+    var canTranslateActiveSelection: Bool {
+        let side = activePaneSide
+        return canTranslateTextSelection(pane(for: side).selectedItemURLs, on: side)
+    }
+
+    func canTranslateTextSelection(_ selection: Set<URL>, on side: PaneSide) -> Bool {
+        let urls = orderedSelection(selection, on: side)
+        let selectedItems = items(for: side).filter { selection.contains($0.url) }
+        guard selectedItems.count == urls.count,
+              selectedItems.allSatisfy({ !$0.isDirectoryLike })
+        else { return false }
+        return MenuActionAvailability.canTranslateTextSelection(
+            urls: urls,
+            isAndroidPane: isAndroidPane(side),
+            isInlineRenaming: isInlineRenaming,
+            isTranslationRunning: isTextTranslationRunning
+        )
     }
 
     var canMergeActiveSelection: Bool {
@@ -2999,6 +3043,117 @@ final class DualFinderViewModel: ObservableObject {
         textEncodingConversionCancellation?.cancel()
     }
 
+    func translateSelectedToChinese(on side: PaneSide) {
+        runTextTranslation(on: side, mode: .chineseFile)
+    }
+
+    func translateSelectedWithOriginalLines(on side: PaneSide) {
+        runTextTranslation(on: side, mode: .bilingualInPlace)
+    }
+
+    func cancelTextTranslation() {
+        textTranslationCancellation?.cancel()
+        textTranslationTask?.cancel()
+    }
+
+    private func runTextTranslation(on side: PaneSide, mode: TranslationMode) {
+        let sources = orderedSelection(pane(for: side).selectedItemURLs, on: side)
+        guard canTranslateTextSelection(pane(for: side).selectedItemURLs, on: side) else { return }
+
+        activatePane(side)
+        let cancellation = FileOperationCancellation()
+        textTranslationCancellation?.cancel()
+        textTranslationTask?.cancel()
+        textTranslationCancellation = cancellation
+        isTextTranslationRunning = true
+        let total = sources.count
+        statusMessage = mode == .chineseFile
+            ? "Translating to Chinese... 0/\(total)"
+            : "Creating bilingual text... 0/\(total)"
+        let service = textTranslationService
+        let configuration = translationConfigurationStore.load()
+        let logger = self.logger
+        let viewModelReference = WeakDualFinderViewModelReference(self)
+        let startedAt = Date()
+        logger.info("text-translation", "started", metadata: [
+            "side": side.rawValue,
+            "mode": mode.rawValue,
+            "count": "\(sources.count)",
+            "sourceSample": sources.prefix(20).map(\.path).joined(separator: "|"),
+            "sourceSampleTruncated": "\(sources.count > 20)"
+        ])
+
+        textTranslationTask = Task.detached(priority: .userInitiated) {
+            do {
+                let results = try await service.translate(
+                    files: sources,
+                    mode: mode,
+                    configuration: configuration,
+                    cancellation: cancellation,
+                    progress: { completed, total, source in
+                        Task { @MainActor in
+                            guard let self = viewModelReference.value,
+                                  self.textTranslationCancellation === cancellation,
+                                  self.isTextTranslationRunning
+                            else { return }
+                            let verb = mode == .chineseFile ? "Translating" : "Creating bilingual"
+                            self.statusMessage = "\(verb) · files \(completed)/\(total) · \(source.lastPathComponent)"
+                        }
+                    },
+                    detailedProgress: { progress in
+                        Task { @MainActor in
+                            guard let self = viewModelReference.value,
+                                  self.textTranslationCancellation === cancellation,
+                                  self.isTextTranslationRunning
+                            else { return }
+                            let name = progress.sourceURL.lastPathComponent
+                            let phase = progress.isStreaming
+                                ? "streaming"
+                                : (mode == .chineseFile ? "chunk" : "line")
+                            self.statusMessage = mode == .chineseFile
+                                ? "Translating \(name) · \(phase) · chunks \(progress.completedChunks)/\(progress.totalChunks)"
+                                : "Creating bilingual \(name) · \(phase) · lines \(progress.completedChunks)/\(progress.totalChunks)"
+                        }
+                    }
+                )
+                Task { @MainActor in
+                    guard let self = viewModelReference.value, self.textTranslationCancellation === cancellation else { return }
+                    self.isTextTranslationRunning = false
+                    self.textTranslationCancellation = nil
+                    self.textTranslationTask = nil
+                    self.refresh(side)
+                    self.setSelection(Set(results.map(\.destinationURL)), for: side)
+                    self.statusMessage = mode == .chineseFile
+                        ? "Created \(results.count) Chinese file(s)"
+                        : "Updated \(results.count) bilingual file(s)"
+                    logger.info("text-translation", "completed", metadata: [
+                        "side": side.rawValue,
+                        "mode": mode.rawValue,
+                        "count": "\(results.count)",
+                        "duration_ms": "\(Int(Date().timeIntervalSince(startedAt) * 1_000))"
+                    ])
+                }
+            } catch {
+                Task { @MainActor in
+                    guard let self = viewModelReference.value, self.textTranslationCancellation === cancellation else { return }
+                    self.isTextTranslationRunning = false
+                    self.textTranslationCancellation = nil
+                    self.textTranslationTask = nil
+                    if Task.isCancelled || (error as? TranslationError) == .cancelled {
+                        self.statusMessage = "Translation cancelled"
+                    } else {
+                        self.reportOperationFailure("text-translation.failed", error: error)
+                    }
+                    logger.info("text-translation", "finished", metadata: [
+                        "side": side.rawValue,
+                        "mode": mode.rawValue,
+                        "duration_ms": "\(Int(Date().timeIntervalSince(startedAt) * 1_000))"
+                    ])
+                }
+            }
+        }
+    }
+
     private func runTextEncodingConversion(on side: PaneSide, force: Bool) {
         guard !isInlineRenaming, !isTextEncodingConversionRunning else { return }
         let sources = orderedSelection(pane(for: side).selectedItemURLs, on: side)
@@ -3013,7 +3168,8 @@ final class DualFinderViewModel: ObservableObject {
         logger.info("text-encoding", force ? "selection.reconvert.requested" : "selection.convert.requested", metadata: [
             "side": side.rawValue,
             "count": "\(sources.count)",
-            "sources": sources.map(\.path).joined(separator: "|")
+            "sourceSample": sources.prefix(20).map(\.path).joined(separator: "|"),
+            "sourceSampleTruncated": "\(sources.count > 20)"
         ])
 
         let conversionLogger = logger
@@ -4709,7 +4865,7 @@ final class DualFinderViewModel: ObservableObject {
             return nil
         }
 
-        let timestamp = TextEncodingReportFormatter.timestampFormatter.string(from: Date())
+        let timestamp = TextEncodingReportFormatter.timestamp(for: Date())
         let reportURL = appLogger.logDirectory.appendingPathComponent("text-encoding-problems-\(timestamp).txt")
         let lines = TextEncodingReportFormatter.reportLines(for: result, timestamp: timestamp)
 
@@ -4773,5 +4929,13 @@ final class DualFinderViewModel: ObservableObject {
         guard !didAutoOpenDiskAccessSettings else { return }
         didAutoOpenDiskAccessSettings = true
         openFullDiskAccessSettings()
+    }
+}
+
+private final class WeakDualFinderViewModelReference: @unchecked Sendable {
+    weak var value: DualFinderViewModel?
+
+    init(_ value: DualFinderViewModel) {
+        self.value = value
     }
 }

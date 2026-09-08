@@ -11,7 +11,7 @@ Dual Finder 纪 是一个 macOS 双栏文件管理器，把 **Finder 的系统�
 | **Mirror 镜像同步** | 先 Sync 再删除目标侧多余文件，操作前预览将删除的文件数与大小（类 rsync `--delete`，带确认） |
 | **目录对比 + 单项同步** | 递归对比左右差异，支持逐项向左/右同步，保留相对路径 |
 | **macOS 原生集成** | Quick Look、Share/AirDrop、废纸篓、拖放、Ghostty/Terminal、Full Disk Access 引导 |
-| **可观测、可维护** | 状态栏实时内存（footprint/RSS）；持久日志 `~/Library/Logs/DualFinder`；327 项自动化测试 |
+| **可观测、可维护** | 状态栏实时内存（footprint/RSS）；持久日志 `~/Library/Logs/DualFinder`；481 项自动化测试 |
 | **键盘友好** | 可配置 Shortcut Matrix；内嵌 Terminal 多 Tab/分屏；接近 TC 的跨栏快捷键 |
 
 > 平台：**macOS 14+**（当前无 Windows 构建目标）。
@@ -19,10 +19,10 @@ Dual Finder 纪 是一个 macOS 双栏文件管理器，把 **Finder 的系统�
 ## 当前状态
 
 - 平台：macOS 14+
-- Swift：Swift Package，`swift-tools-version: 6.2`
+- Swift：Swift Package，`swift-tools-version: 6.3`（Swift 6.3.3）
 - 入口：`DualFinderApp`
 - 核心模块：`DualFinderCore`
-- 测试：`swift test` 覆盖 Core 与 App 模型（**327** 项全部通过）
+- 测试：`swift test` 覆盖 Core 与 App 模型（**481** 项）
 - 本地安装脚本：`./update_app.sh`
 - 最新发布：[GitHub Releases](https://github.com/olojiang/dual_finder/releases)
 

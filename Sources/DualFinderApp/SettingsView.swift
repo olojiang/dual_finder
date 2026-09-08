@@ -31,8 +31,259 @@ struct SettingsView: View {
                 .tabItem {
                     Label("Shortcuts", systemImage: "keyboard")
                 }
+
+            TranslationSettingsView()
+                .tabItem {
+                    Label("Translation", systemImage: "character.book.closed")
+                }
         }
-        .frame(width: 720, height: 540)
+        .frame(width: 820, height: 640)
+    }
+}
+
+private struct TranslationSettingsView: View {
+    @State private var configuration: TranslationConfiguration
+    @State private var selectedProviderID: UUID?
+    @State private var statusMessage: String?
+    @State private var isTesting = false
+
+    private let store: TranslationConfigurationStore
+
+    init(store: TranslationConfigurationStore = TranslationConfigurationStore()) {
+        self.store = store
+        let configuration = store.load()
+        _configuration = State(initialValue: configuration)
+        _selectedProviderID = State(initialValue: configuration.defaultProviderID ?? configuration.providers.first?.id)
+    }
+
+    var body: some View {
+        HStack(spacing: 16) {
+            providerList
+                .frame(width: 220)
+
+            Divider()
+
+            if let index = selectedProviderIndex {
+                providerEditor(index: index)
+            } else {
+                ContentUnavailableView("No Provider", systemImage: "plus", description: Text("Add an OpenAI-compatible provider to translate files."))
+            }
+        }
+        .padding(20)
+        .onChange(of: selectedProviderID) { _, _ in
+            ensureDefaultModelIsValid()
+        }
+        .onAppear {
+            ensureDefaultModelIsValid()
+            save()
+        }
+    }
+
+    private var providerList: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Providers")
+                .font(.headline)
+            List(selection: $selectedProviderID) {
+                ForEach(configuration.providers) { provider in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(provider.name.isEmpty ? "Unnamed Provider" : provider.name)
+                        Text(provider.models.isEmpty ? "No models" : "\(provider.models.count) model(s)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .tag(provider.id)
+                }
+                .onDelete(perform: deleteProviders)
+            }
+            HStack {
+                Button {
+                    addProvider()
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .help("Add Provider")
+                Button {
+                    deleteSelectedProvider()
+                } label: {
+                    Image(systemName: "minus")
+                }
+                .disabled(selectedProviderIndex == nil)
+                .help("Delete Provider")
+                Spacer()
+            }
+        }
+    }
+
+    private func providerEditor(index: Int) -> some View {
+        let provider = providerBinding(for: index)
+        return Form {
+            Section("OpenAI-Compatible API") {
+                TextField("Provider name", text: provider.name)
+                TextField("API URL", text: provider.baseURL)
+                    .textContentType(.URL)
+                Text("可填写 /v1（使用或测试时自动补齐 /chat/completions），也可以填写完整的 /chat/completions 地址。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                SecureField("Token", text: provider.token)
+                TextField("Model names (comma separated)", text: modelsBinding(for: index))
+
+                Picker("Default model", selection: defaultModelBinding) {
+                    if configuration.providers[index].models.isEmpty {
+                        Text("No models configured").tag("")
+                    } else {
+                        if configuration.defaultProviderID != configuration.providers[index].id {
+                            Text("Not the default provider").tag("")
+                        }
+                        ForEach(configuration.providers[index].models, id: \.self) { model in
+                            Text(model).tag(model)
+                        }
+                    }
+                }
+
+                HStack {
+                    if configuration.defaultProviderID != configuration.providers[index].id {
+                        Button("Use as Default") {
+                            configuration.defaultProviderID = configuration.providers[index].id
+                            configuration.defaultModelName = configuration.providers[index].models.first
+                            save()
+                        }
+                    }
+                    Button(isTesting ? "Testing..." : "Test Connection") {
+                        testConnection(for: configuration.providers[index])
+                    }
+                    .disabled(isTesting || configuration.providers[index].models.isEmpty)
+                    Button("Save") {
+                        save()
+                    }
+                    if let statusMessage {
+                        Text(statusMessage)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            Section {
+                Text("The selected provider and model are used by both translation actions in the file right-click menu.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    private var selectedProviderIndex: Int? {
+        guard let selectedProviderID else { return nil }
+        return configuration.providers.firstIndex { $0.id == selectedProviderID }
+    }
+
+    private var defaultModelBinding: Binding<String> {
+        Binding(
+            get: { configuration.defaultProviderID == selectedProviderID ? (configuration.defaultModelName ?? "") : "" },
+            set: { model in
+                configuration.defaultProviderID = selectedProviderID
+                configuration.defaultModelName = model
+                save()
+            }
+        )
+    }
+
+    private func providerBinding(for index: Int) -> Binding<TranslationProvider> {
+        Binding(
+            get: { configuration.providers[index] },
+            set: { provider in
+                configuration.providers[index] = provider
+                save()
+            }
+        )
+    }
+
+    private func modelsBinding(for index: Int) -> Binding<String> {
+        Binding(
+            get: { configuration.providers[index].models.joined(separator: ", ") },
+            set: { value in
+                configuration.providers[index].models = value
+                    .split(separator: ",")
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                ensureDefaultModelIsValid()
+                save()
+            }
+        )
+    }
+
+    private func addProvider() {
+        let provider = TranslationProvider(
+            name: "New Provider",
+            baseURL: "https://api.openai.com/v1",
+            token: "",
+            models: ["gpt-4o-mini"]
+        )
+        configuration.providers.append(provider)
+        selectedProviderID = provider.id
+        configuration.defaultProviderID = provider.id
+        configuration.defaultModelName = provider.models[0]
+        save()
+    }
+
+    private func deleteProviders(at offsets: IndexSet) {
+        configuration.providers.remove(atOffsets: offsets)
+        if let selectedProviderID, !configuration.providers.contains(where: { $0.id == selectedProviderID }) {
+            self.selectedProviderID = configuration.providers.first?.id
+        }
+        ensureDefaultModelIsValid()
+        save()
+    }
+
+    private func deleteSelectedProvider() {
+        guard let index = selectedProviderIndex else { return }
+        deleteProviders(at: IndexSet(integer: index))
+    }
+
+    private func ensureDefaultModelIsValid() {
+        if let defaultProviderID = configuration.defaultProviderID,
+           let provider = configuration.providers.first(where: { $0.id == defaultProviderID }) {
+            if !provider.models.contains(configuration.defaultModelName ?? "") {
+                configuration.defaultModelName = provider.models.first
+            }
+            return
+        }
+        if let provider = configuration.providers.first {
+            configuration.defaultProviderID = provider.id
+            configuration.defaultModelName = provider.models.first
+            return
+        }
+        configuration.defaultProviderID = nil
+        configuration.defaultModelName = nil
+    }
+
+    private func save() {
+        store.save(configuration)
+    }
+
+    private func testConnection(for provider: TranslationProvider) {
+        guard let modelName = configuration.defaultProviderID == provider.id ? configuration.defaultModelName : provider.models.first,
+              !modelName.isEmpty
+        else {
+            statusMessage = "Select a model first."
+            return
+        }
+        isTesting = true
+        statusMessage = nil
+        Task { @MainActor in
+            do {
+                _ = try await OpenAICompatibleTranslationClient().translateText(
+                    "Hello",
+                    provider: provider,
+                    modelName: modelName
+                )
+                isTesting = false
+                statusMessage = "Connection succeeded."
+            } catch {
+                isTesting = false
+                statusMessage = error.localizedDescription
+            }
+        }
     }
 }
 

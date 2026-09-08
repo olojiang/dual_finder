@@ -50,6 +50,22 @@ public enum MenuActionAvailability {
         hasSelection && !isInlineRenaming
     }
 
+    public static func canTranslateTextSelection(
+        urls: [URL],
+        isAndroidPane: Bool,
+        isInlineRenaming: Bool,
+        isTranslationRunning: Bool
+    ) -> Bool {
+        !urls.isEmpty
+            && !isAndroidPane
+            && !isInlineRenaming
+            && !isTranslationRunning
+            && urls.allSatisfy { url in
+                let ext = url.pathExtension.lowercased()
+                return ext == "txt" || ext == "md"
+            }
+    }
+
     public static func canTransferToOtherPane(
         hasSelection: Bool,
         isInlineRenaming: Bool,

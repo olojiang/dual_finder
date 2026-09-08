@@ -489,6 +489,15 @@ struct FilePaneView: View {
             Button("Re-Convert to UTF-8 (Repair Mojibake)") {
                 model.reconvertSelectedTextEncodingToUTF8(on: side)
             }
+            if model.canTranslateTextSelection(selection, on: side) {
+                Divider()
+                Button("翻译成中文") {
+                    model.translateSelectedToChinese(on: side)
+                }
+                Button("翻译成中文（原文一行，中文一行）") {
+                    model.translateSelectedWithOriginalLines(on: side)
+                }
+            }
             Button("Extract Filename from Content") {
                 model.extractFilenamesFromContent(on: side)
             }
@@ -669,6 +678,14 @@ struct FilePaneView: View {
                     .focusable()
                     .focused($isFileListFocused)
                     .onChange(of: isFileListFocused) { _, isFocused in
+                        let activeSide = FileListFocusTransitionPolicy.activePaneSide(
+                            current: model.activePaneSide,
+                            focusedSide: side,
+                            isFocused: isFocused
+                        )
+                        if activeSide != model.activePaneSide {
+                            model.activatePane(activeSide)
+                        }
                         model.logPaneFocusEvent("file-list.focus-state.changed", metadata: [
                             "side": side.rawValue,
                             "focused": "\(isFocused)"

@@ -232,6 +232,6 @@ flowchart LR
 
 ## 平台说明
 
-- **仅 macOS 14+**，Swift 6.2，SwiftUI + AppKit。
+- **仅 macOS 14+**，Swift 6.3.3，SwiftUI + AppKit。
 - 关闭最后窗口退出；单实例；启动最大化；日志 `~/Library/Logs/DualFinder` 按日轮转保留 7 天。
 - 本地安装：`./update_app.sh`（编译、ad-hoc 签名、复制到 `/Applications` 并启动）。

@@ -1,4 +1,4 @@
-import Darwin.Mach
+@preconcurrency import Darwin.Mach
 import Foundation
 
 public struct ProcessMemorySnapshot: Sendable, Equatable {

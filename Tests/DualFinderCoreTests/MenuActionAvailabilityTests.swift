@@ -72,4 +72,47 @@ final class MenuActionAvailabilityTests: XCTestCase {
             )
         )
     }
+
+    func testTranslationRequiresTextSelectionAndIdleLocalPane() {
+        XCTAssertTrue(
+            MenuActionAvailability.canTranslateTextSelection(
+                urls: [URL(fileURLWithPath: "/tmp/a.txt"), URL(fileURLWithPath: "/tmp/b.MD")],
+                isAndroidPane: false,
+                isInlineRenaming: false,
+                isTranslationRunning: false
+            )
+        )
+        XCTAssertFalse(
+            MenuActionAvailability.canTranslateTextSelection(
+                urls: [URL(fileURLWithPath: "/tmp/a.txt"), URL(fileURLWithPath: "/tmp/image.png")],
+                isAndroidPane: false,
+                isInlineRenaming: false,
+                isTranslationRunning: false
+            )
+        )
+        XCTAssertFalse(
+            MenuActionAvailability.canTranslateTextSelection(
+                urls: [URL(fileURLWithPath: "/tmp/a.txt")],
+                isAndroidPane: true,
+                isInlineRenaming: false,
+                isTranslationRunning: false
+            )
+        )
+        XCTAssertFalse(
+            MenuActionAvailability.canTranslateTextSelection(
+                urls: [URL(fileURLWithPath: "/tmp/a.txt")],
+                isAndroidPane: false,
+                isInlineRenaming: true,
+                isTranslationRunning: false
+            )
+        )
+        XCTAssertFalse(
+            MenuActionAvailability.canTranslateTextSelection(
+                urls: [URL(fileURLWithPath: "/tmp/a.txt")],
+                isAndroidPane: false,
+                isInlineRenaming: false,
+                isTranslationRunning: true
+            )
+        )
+    }
 }

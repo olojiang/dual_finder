@@ -1006,6 +1006,24 @@ struct FilePaneInteractionTests {
         #expect(terminalFocused == false)
     }
 
+    @Test("file-list focus activates the focused pane without switching on focus loss")
+    func fileListFocusActivatesFocusedPaneWithoutSwitchingOnFocusLoss() {
+        #expect(
+            FileListFocusTransitionPolicy.activePaneSide(
+                current: .left,
+                focusedSide: .right,
+                isFocused: true
+            ) == .right
+        )
+        #expect(
+            FileListFocusTransitionPolicy.activePaneSide(
+                current: .right,
+                focusedSide: .left,
+                isFocused: false
+            ) == .right
+        )
+    }
+
     @Test("similar review arrow fallback requires active pane and plain arrows")
     func similarReviewArrowFallbackRequiresActivePaneAndPlainArrows() {
         let inactiveReason = FileListKeyDownFallbackPolicy.ignoreReasonForSimilarReviewArrowFallback(

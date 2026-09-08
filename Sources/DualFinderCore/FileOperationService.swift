@@ -45,7 +45,7 @@ public struct TrashContentsSummary: Equatable, Sendable {
     }
 }
 
-public struct FileOperationService {
+public struct FileOperationService: @unchecked Sendable {
     private let fileManager: FileManager
     private let logger: AppLogging?
     private let operationScanCache: OperationScanCache?
