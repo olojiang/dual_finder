@@ -102,8 +102,8 @@ struct QueuedFileOperation: Identifiable, Equatable {
             }
             if progress.totalBytes > 0 {
                 parts.append("\(Self.formatBytes(progress.completedBytes)) / \(Self.formatBytes(progress.totalBytes))")
-            } else if status == .running, progress.scannedItems == 0 {
-                parts.append("scanning folder")
+            } else if status == .running {
+                parts.append(progress.phase == .scanning ? "scanning folder" : "transferring")
             }
             if progress.copiedItems > 0 || progress.copiedBytes > 0 {
                 parts.append("copied \(progress.copiedItems) (\(Self.formatBytes(progress.copiedBytes)))")

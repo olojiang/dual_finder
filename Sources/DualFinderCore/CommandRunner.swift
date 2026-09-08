@@ -9,6 +9,11 @@ public struct CommandResult: Sendable, Equatable {
     public var succeeded: Bool { exitCode == 0 }
 }
 
+public enum CommandOutputChannel: Sendable {
+    case stdout
+    case stderr
+}
+
 public protocol CommandRunning: Sendable {
     func run(
         executable: String,
@@ -23,6 +28,16 @@ public protocol CancellableCommandRunning: CommandRunning {
         arguments: [String],
         workingDirectory: URL?,
         cancellation: FileOperationCancellation?
+    ) throws -> CommandResult
+}
+
+public protocol StreamingCommandRunning: CommandRunning {
+    func run(
+        executable: String,
+        arguments: [String],
+        workingDirectory: URL?,
+        cancellation: FileOperationCancellation?,
+        output: @escaping @Sendable (CommandOutputChannel, String) -> Void
     ) throws -> CommandResult
 }
 
@@ -47,12 +62,28 @@ public struct ProcessCommandRunner: CommandRunning {
     }
 }
 
-extension ProcessCommandRunner: CancellableCommandRunning {
+extension ProcessCommandRunner: CancellableCommandRunning, StreamingCommandRunning {
     public func run(
         executable: String,
         arguments: [String],
         workingDirectory: URL?,
         cancellation: FileOperationCancellation?
+    ) throws -> CommandResult {
+        try run(
+            executable: executable,
+            arguments: arguments,
+            workingDirectory: workingDirectory,
+            cancellation: cancellation,
+            output: { _, _ in }
+        )
+    }
+
+    public func run(
+        executable: String,
+        arguments: [String],
+        workingDirectory: URL?,
+        cancellation: FileOperationCancellation?,
+        output: @escaping @Sendable (CommandOutputChannel, String) -> Void
     ) throws -> CommandResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
@@ -66,8 +97,12 @@ extension ProcessCommandRunner: CancellableCommandRunning {
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
-        let stdout = PipeOutputCapture(pipe: stdoutPipe, maxBytes: maxCapturedOutputBytes)
-        let stderr = PipeOutputCapture(pipe: stderrPipe, maxBytes: maxCapturedOutputBytes)
+        let stdout = PipeOutputCapture(pipe: stdoutPipe, maxBytes: maxCapturedOutputBytes) { data in
+            output(.stdout, String(decoding: data, as: UTF8.self))
+        }
+        let stderr = PipeOutputCapture(pipe: stderrPipe, maxBytes: maxCapturedOutputBytes) { data in
+            output(.stderr, String(decoding: data, as: UTF8.self))
+        }
         stdout.start()
         stderr.start()
         defer {
@@ -102,13 +137,19 @@ extension ProcessCommandRunner: CancellableCommandRunning {
 private final class PipeOutputCapture: @unchecked Sendable {
     private let pipe: Pipe
     private let maxBytes: Int?
+    private let onChunk: (@Sendable (Data) -> Void)?
     private let lock = NSLock()
     private var data = Data()
     private var isStopped = false
 
-    init(pipe: Pipe, maxBytes: Int? = nil) {
+    init(
+        pipe: Pipe,
+        maxBytes: Int? = nil,
+        onChunk: (@Sendable (Data) -> Void)? = nil
+    ) {
         self.pipe = pipe
         self.maxBytes = maxBytes
+        self.onChunk = onChunk
     }
 
     func start() {
@@ -139,6 +180,7 @@ private final class PipeOutputCapture: @unchecked Sendable {
 
     private func append(_ next: Data) {
         guard !next.isEmpty else { return }
+        onChunk?(next)
         lock.lock()
         defer { lock.unlock() }
         guard let maxBytes else {

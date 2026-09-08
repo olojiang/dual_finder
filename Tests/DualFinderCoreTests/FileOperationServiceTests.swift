@@ -96,6 +96,30 @@ struct FileOperationServiceTests {
         #expect(runner.arguments.contains("--no-whole-file"))
     }
 
+    @Test("sync uses rsync mirror and deletes destination extras")
+    func syncUsesRsyncMirror() throws {
+        let root = try TemporaryDirectory()
+        let sourceFolder = root.url.appendingPathComponent("source", isDirectory: true)
+        let destination = root.url.appendingPathComponent("destination", isDirectory: true)
+        let destinationRoot = destination.appendingPathComponent("source", isDirectory: true)
+        try FileManager.default.createDirectory(at: sourceFolder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destinationRoot, withIntermediateDirectories: true)
+        try "keep".write(to: sourceFolder.appendingPathComponent("keep.txt"), atomically: true, encoding: .utf8)
+        try "remove".write(to: destinationRoot.appendingPathComponent("extra.txt"), atomically: true, encoding: .utf8)
+        let logger = CapturingLogger()
+
+        try FileOperationService(
+            logger: logger,
+            commandRunner: ProcessCommandRunner(maxCapturedOutputBytes: 1_048_576)
+        ).sync([sourceFolder], to: destination)
+
+        #expect(FileManager.default.fileExists(atPath: sourceFolder.appendingPathComponent("keep.txt").path))
+        #expect(FileManager.default.fileExists(atPath: destinationRoot.appendingPathComponent("keep.txt").path))
+        #expect(!FileManager.default.fileExists(atPath: destinationRoot.appendingPathComponent("extra.txt").path))
+        #expect(logger.messages.contains { $0.contains("sync.rsync.started") })
+        #expect(logger.messages.contains { $0.contains("sync.rsync.completed") })
+    }
+
     @Test("move without destination conflict does not ask resolver")
     func moveWithoutDestinationConflictDoesNotAskResolver() throws {
         let root = try TemporaryDirectory()

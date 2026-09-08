@@ -3638,6 +3638,7 @@ final class DualFinderViewModel: ObservableObject {
         ])
         recordFileOperationProgress(
             FileOperationProgress(
+                phase: .preparing,
                 completedBytes: 0,
                 totalBytes: 0,
                 completedItems: 0,
@@ -3704,15 +3705,13 @@ final class DualFinderViewModel: ObservableObject {
                         )
                     case .sync:
                         guard let destination else { throw FileOperationError.invalidDestination }
-                        try service.copy(
+                        try service.sync(
                             sources,
                             to: destination,
-                            options: FileOperationOptions(syncMode: true),
                             cancellation: cancellation,
                             progress: { progress in
                                 progressCoalescer.record(progress, for: id)
-                            },
-                            conflictResolver: resolveConflict
+                            }
                         )
                     case .mirror:
                         guard let destination else { throw FileOperationError.invalidDestination }
