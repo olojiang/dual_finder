@@ -4,20 +4,20 @@ import Testing
 
 @Suite("FileSelectionResolver")
 struct FileSelectionResolverTests {
-    @Test("prefers previous item after removing selected file")
-    func prefersPreviousItem() {
+    @Test("prefers next item after removing selected file")
+    func prefersNextItem() {
         let urls = fileURLs(["a.txt", "b.txt", "c.txt"])
 
         let replacement = FileSelectionResolver.replacementAfterRemoving([urls[1]], from: urls)
 
-        #expect(replacement == urls[0])
+        #expect(replacement == urls[2])
     }
 
-    @Test("falls back to next item when removed file has no previous item")
-    func fallsBackToNextItem() {
+    @Test("falls back to previous item when removed file has no next item")
+    func fallsBackToPreviousItem() {
         let urls = fileURLs(["a.txt", "b.txt", "c.txt"])
 
-        let replacement = FileSelectionResolver.replacementAfterRemoving([urls[0]], from: urls)
+        let replacement = FileSelectionResolver.replacementAfterRemoving([urls[2]], from: urls)
 
         #expect(replacement == urls[1])
     }
@@ -31,13 +31,13 @@ struct FileSelectionResolverTests {
         #expect(replacement == nil)
     }
 
-    @Test("uses previous before removed range for multi-selection")
-    func usesPreviousBeforeRemovedRange() {
+    @Test("prefers next item after a removed range")
+    func prefersNextAfterRemovedRange() {
         let urls = fileURLs(["a.txt", "b.txt", "c.txt", "d.txt"])
 
         let replacement = FileSelectionResolver.replacementAfterRemoving([urls[1], urls[2]], from: urls)
 
-        #expect(replacement == urls[0])
+        #expect(replacement == urls[3])
     }
 
     private func fileURLs(_ names: [String]) -> [URL] {

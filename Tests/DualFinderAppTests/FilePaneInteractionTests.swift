@@ -710,6 +710,45 @@ struct FilePaneInteractionTests {
         #expect(model.volumeRevision == initial + 2)
     }
 
+    @MainActor
+    @Test("refresh revision changes on pane refresh so refresh-dependent values are re-read")
+    func refreshRevisionChangesOnPaneRefresh() async throws {
+        let root = try AppTestTemporaryDirectory()
+        let model = makeLocalModel(initialURL: root.url)
+
+        let initial = model.refreshRevision
+        await model.refreshAndWait(.left)
+
+        #expect(model.refreshRevision == initial + 1)
+    }
+
+    @Test("footer summary includes known folder sizes")
+    func footerSummaryIncludesKnownFolderSizes() {
+        let folder = FileItem(
+            url: URL(fileURLWithPath: "/tmp/folder"),
+            name: "folder",
+            kind: .folder,
+            type: "Folder",
+            size: 2_000,
+            modifiedAt: nil,
+            isHidden: false
+        )
+        let file = FileItem(
+            url: URL(fileURLWithPath: "/tmp/file.txt"),
+            name: "file.txt",
+            kind: .file,
+            type: "TXT",
+            size: 500,
+            modifiedAt: nil,
+            isHidden: false
+        )
+        let summary = FilePaneSummary(items: [folder, file])
+
+        #expect(summary.fileCount == 1)
+        #expect(summary.folderCount == 1)
+        #expect(summary.totalSize == 2_500)
+    }
+
     @Test("formats file sizes with three fractional digits")
     func formatsFileSizesWithThreeFractionalDigits() {
         #expect(FileSizeText.format(1_234_567) == "1.235 MB")

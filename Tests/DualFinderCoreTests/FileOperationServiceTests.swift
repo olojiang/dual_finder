@@ -1,5 +1,8 @@
 import Foundation
 import Testing
+#if os(macOS)
+import Darwin
+#endif
 @testable import DualFinderCore
 
 @Suite("FileOperationService")
@@ -35,6 +38,62 @@ struct FileOperationServiceTests {
         #expect(logger.messages.contains { $0.contains("move.completed") })
         #expect(logger.messages.contains { $0.contains("move.item.renamed") })
         #expect(!logger.messages.contains { $0.contains("copy.item.completed") })
+    }
+
+    #if os(macOS)
+    @Test("cross-volume move uses rsync and removes only empty source directories")
+    func crossVolumeMoveUsesRsync() throws {
+        let root = try TemporaryDirectory()
+        let sourceFolder = root.url.appendingPathComponent("source", isDirectory: true)
+        let destination = root.url.appendingPathComponent("destination", isDirectory: true)
+        let nested = sourceFolder.appendingPathComponent("nested", isDirectory: true)
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        try "one".write(to: sourceFolder.appendingPathComponent("one.txt"), atomically: true, encoding: .utf8)
+        try "two".write(to: nested.appendingPathComponent("two.txt"), atomically: true, encoding: .utf8)
+        let logger = CapturingLogger()
+
+        try FileOperationService(
+            logger: logger,
+            commandRunner: ProcessCommandRunner(maxCapturedOutputBytes: 1_048_576),
+            moveCapability: { _, _ in false }
+        ).move([sourceFolder], to: destination)
+
+        #expect(!FileManager.default.fileExists(atPath: sourceFolder.path))
+        #expect(try String(contentsOf: destination.appendingPathComponent("source/one.txt"), encoding: .utf8) == "one")
+        #expect(try String(contentsOf: destination.appendingPathComponent("source/nested/two.txt"), encoding: .utf8) == "two")
+        #expect(logger.messages.contains { $0.contains("move.rsync.started") })
+        #expect(logger.messages.contains { $0.contains("move.rsync.completed") })
+    }
+
+    @Test("cross-volume rsync failure leaves source items available for retry")
+    func crossVolumeRsyncFailureLeavesSourcesAvailable() throws {
+        let root = try TemporaryDirectory()
+        let source = root.url.appendingPathComponent("source.txt")
+        let destination = root.url.appendingPathComponent("destination", isDirectory: true)
+        try "payload".write(to: source, atomically: true, encoding: .utf8)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        let runner = FailingCommandRunner()
+
+        do {
+            try FileOperationService(
+                logger: CapturingLogger(),
+                commandRunner: runner,
+                moveCapability: { _, _ in false }
+            ).move([source], to: destination)
+            Issue.record("Expected rsync failure")
+        } catch let error as FileOperationError {
+            guard case let .commandFailed(_, exitCode, _) = error else {
+                Issue.record("Unexpected file operation error: \(error)")
+                return
+            }
+            #expect(exitCode == 23)
+        }
+
+        #expect(FileManager.default.fileExists(atPath: source.path))
+        #expect(runner.arguments.contains("--remove-source-files"))
+        #expect(runner.arguments.contains("--partial"))
+        #expect(runner.arguments.contains("--no-whole-file"))
     }
 
     @Test("move without destination conflict does not ask resolver")
@@ -788,6 +847,36 @@ struct FileOperationServiceTests {
         #expect(FileManager.default.fileExists(atPath: metadata.path))
     }
 
+    #if os(macOS)
+    @Test("scans and empties trash directories on mounted volumes")
+    func scansAndEmptiesMountedVolumeTrashDirectories() throws {
+        let root = try TemporaryDirectory()
+        let standardTrash = root.url.appendingPathComponent("home-trash", isDirectory: true)
+        let volumeTrash = root.url
+            .appendingPathComponent("volume", isDirectory: true)
+            .appendingPathComponent(".Trashes", isDirectory: true)
+            .appendingPathComponent("\(getuid())", isDirectory: true)
+        try FileManager.default.createDirectory(at: standardTrash, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: volumeTrash, withIntermediateDirectories: true)
+        try "home".write(to: standardTrash.appendingPathComponent("home.txt"), atomically: true, encoding: .utf8)
+        try "volume".write(to: volumeTrash.appendingPathComponent("volume.txt"), atomically: true, encoding: .utf8)
+
+        let service = FileOperationService(
+            logger: CapturingLogger(),
+            trashDirectoriesProvider: { [standardTrash, volumeTrash] }
+        )
+        let summary = try service.trashContentsSummary()
+
+        #expect(summary.topLevelItemCount == 2)
+        #expect(summary.containedItemCount == 2)
+        #expect(summary.totalByteCount == 11)
+
+        #expect(try service.emptyTrash() == 2)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: standardTrash.path).isEmpty)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: volumeTrash.path).isEmpty)
+    }
+    #endif
+
     @Test("cancelled copy removes partial destination file")
     func cancelledCopyRemovesPartialDestination() async throws {
         let root = try TemporaryDirectory()
@@ -863,3 +952,18 @@ struct FileOperationServiceTests {
         #expect(lastProgress?.totalBytes == 3)
     }
 }
+
+#if os(macOS)
+private final class FailingCommandRunner: CommandRunning, @unchecked Sendable {
+    private(set) var arguments: [String] = []
+
+    func run(
+        executable: String,
+        arguments: [String],
+        workingDirectory: URL?
+    ) throws -> CommandResult {
+        self.arguments = arguments
+        return CommandResult(exitCode: 23, stdout: "", stderr: "simulated rsync failure")
+    }
+}
+#endif

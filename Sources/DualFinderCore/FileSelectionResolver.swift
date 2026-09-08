@@ -12,15 +12,17 @@ public enum FileSelectionResolver {
             return nil
         }
 
-        if firstRemovedIndex > orderedURLs.startIndex {
-            let previousRange = orderedURLs[..<firstRemovedIndex]
-            if let previous = previousRange.reversed().first(where: { !removed.contains($0) }) {
-                return previous
-            }
+        let nextStartIndex = orderedURLs.index(after: lastRemovedIndex)
+        if nextStartIndex < orderedURLs.endIndex,
+           let next = orderedURLs[nextStartIndex...].first(where: { !removed.contains($0) }) {
+            return next
         }
 
-        let nextStartIndex = orderedURLs.index(after: lastRemovedIndex)
-        guard nextStartIndex < orderedURLs.endIndex else { return nil }
-        return orderedURLs[nextStartIndex...].first(where: { !removed.contains($0) })
+        if firstRemovedIndex > orderedURLs.startIndex {
+            let previousRange = orderedURLs[..<firstRemovedIndex]
+            return previousRange.reversed().first(where: { !removed.contains($0) })
+        }
+
+        return nil
     }
 }

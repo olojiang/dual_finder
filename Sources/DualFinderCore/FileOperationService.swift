@@ -1,7 +1,12 @@
 import Foundation
+#if os(macOS)
+import Darwin
+#endif
 
 public enum FileOperationError: LocalizedError, Equatable {
     case trashUnsupported
+    case toolNotFound(String)
+    case commandFailed(command: String, exitCode: Int32, detail: String)
     case emptyName
     case invalidName
     case cancelled
@@ -13,6 +18,10 @@ public enum FileOperationError: LocalizedError, Equatable {
         switch self {
         case .trashUnsupported:
             "Moving files to Trash is only supported on macOS."
+        case let .toolNotFound(tool):
+            "Required tool not found: \(tool)."
+        case let .commandFailed(command, exitCode, detail):
+            "Command failed (\(exitCode)): \(command). \(detail)"
         case .emptyName:
             "Name cannot be empty."
         case .invalidName:
@@ -47,17 +56,47 @@ public struct TrashContentsSummary: Equatable, Sendable {
 
 public struct FileOperationService: @unchecked Sendable {
     private let fileManager: FileManager
+    private let commandRunner: any CommandRunning
     private let logger: AppLogging?
     private let operationScanCache: OperationScanCache?
+    private let trashDirectoriesProvider: () -> [URL]
+    private let canRenameMove: @Sendable ([URL], URL) -> Bool
 
     public init(
         fileManager: FileManager = .default,
         logger: AppLogging?,
-        operationScanCache: OperationScanCache? = nil
+        operationScanCache: OperationScanCache? = nil,
+        trashDirectoriesProvider: (() -> [URL])? = nil,
+        commandRunner: any CommandRunning = ProcessCommandRunner(maxCapturedOutputBytes: 1_048_576)
     ) {
         self.fileManager = fileManager
+        self.commandRunner = commandRunner
         self.logger = logger
         self.operationScanCache = operationScanCache
+        self.trashDirectoriesProvider = trashDirectoriesProvider ?? {
+            Self.defaultTrashDirectories(fileManager: fileManager)
+        }
+        self.canRenameMove = { sources, destination in
+            FileOperationVolume.canRenameMove(sources: sources, to: destination)
+        }
+    }
+
+    init(
+        fileManager: FileManager = .default,
+        logger: AppLogging?,
+        operationScanCache: OperationScanCache? = nil,
+        trashDirectoriesProvider: (() -> [URL])? = nil,
+        commandRunner: any CommandRunning,
+        moveCapability: @escaping @Sendable ([URL], URL) -> Bool
+    ) {
+        self.fileManager = fileManager
+        self.commandRunner = commandRunner
+        self.logger = logger
+        self.operationScanCache = operationScanCache
+        self.trashDirectoriesProvider = trashDirectoriesProvider ?? {
+            Self.defaultTrashDirectories(fileManager: fileManager)
+        }
+        self.canRenameMove = moveCapability
     }
 
     public func copy(
@@ -156,7 +195,7 @@ public struct FileOperationService: @unchecked Sendable {
         conflictResolver: ((FileOperationConflict) -> FileOperationConflictResolution)? = nil
     ) throws {
         logger?.info("file-operation", "move.started", metadata: operationMetadata(sources, destinationDirectory))
-        if FileOperationVolume.canRenameMove(sources: sources, to: destinationDirectory) {
+        if canRenameMove(sources, destinationDirectory) {
             do {
                 try moveSourcesByRename(
                     sources,
@@ -176,7 +215,7 @@ public struct FileOperationService: @unchecked Sendable {
                 throw error
             }
         } else {
-            logger?.info("file-operation", "move.using-copy-delete", metadata: [
+            logger?.info("file-operation", "move.using-rsync", metadata: [
                 "reason": "cross-volume",
                 "count": "\(sources.count)",
                 "destination": destinationDirectory.path,
@@ -184,52 +223,12 @@ public struct FileOperationService: @unchecked Sendable {
             ])
         }
 
-        var copiedRoots: [CopiedRoot] = []
-        do {
-            try processRootSources(
-                sources,
-                cancellation: cancellation,
-                progress: progress
-            ) { source, index, total in
-                let context = try OperationContext(
-                    sources: [source],
-                    fileManager: fileManager,
-                    cancellation: cancellation,
-                    progress: progress,
-                    operationScanCache: operationScanCache,
-                    logger: logger,
-                    rootCompletedItems: index,
-                    rootTotalItems: total
-                )
-                let copied = try copySources(
-                    [source],
-                    to: destinationDirectory,
-                    options: options,
-                    context: context,
-                    conflictResolver: conflictResolver
-                )
-                copiedRoots.append(contentsOf: copied)
-                for copiedRoot in copied {
-                    try context.checkCancellation()
-                    if copiedRoot.mergedIntoExistingDirectory {
-                        logger?.info("file-operation", "move.merge.source-kept", metadata: [
-                            "source": copiedRoot.source.path,
-                            "destination": copiedRoot.destination.path,
-                            "reason": "merged-into-existing-directory"
-                        ])
-                        continue
-                    }
-                    if fileManager.fileExists(atPath: copiedRoot.source.path) {
-                        try fileManager.removeItem(at: copiedRoot.source)
-                    }
-                }
-            }
-        } catch {
-            for copiedRoot in copiedRoots where fileManager.fileExists(atPath: copiedRoot.destination.path) {
-                try? fileManager.removeItem(at: copiedRoot.destination)
-            }
-            throw error
-        }
+        try moveSourcesByRsync(
+            sources,
+            to: destinationDirectory,
+            cancellation: cancellation,
+            progress: progress
+        )
         logger?.info("file-operation", "move.completed", metadata: operationMetadata(sources, destinationDirectory))
     }
 
@@ -478,6 +477,124 @@ public struct FileOperationService: @unchecked Sendable {
         }
     }
 
+    private func moveSourcesByRsync(
+        _ sources: [URL],
+        to destinationDirectory: URL,
+        cancellation: FileOperationCancellation?,
+        progress: ((FileOperationProgress) -> Void)?
+    ) throws {
+        guard let executable = Self.rsyncExecutable(fileManager: fileManager) else {
+            throw FileOperationError.toolNotFound("rsync")
+        }
+
+        let operationStart = Date()
+        progress?(FileOperationProgress(
+            completedBytes: 0,
+            totalBytes: 0,
+            completedItems: 0,
+            totalItems: sources.count,
+            currentItem: sources.first,
+            rootCompletedItems: 0,
+            rootTotalItems: sources.count,
+            elapsedSeconds: 0
+        ))
+
+        // --no-whole-file keeps rsync's rolling-checksum delta algorithm enabled
+        // for local disk-to-disk transfers. --partial preserves an interrupted
+        // destination so a later Move/Retry can continue from it.
+        let arguments = [
+            "--archive",
+            "--remove-source-files",
+            "--partial",
+            "--no-whole-file",
+            "--stats",
+            "--"
+        ] + sources.map(\.path) + [destinationDirectory.path + "/"]
+
+        logger?.info("file-operation", "move.rsync.started", metadata: [
+            "executable": executable,
+            "arguments": arguments.joined(separator: " "),
+            "count": "\(sources.count)",
+            "destination": destinationDirectory.path
+        ])
+
+        let result: CommandResult
+        if let cancellableRunner = commandRunner as? any CancellableCommandRunning {
+            result = try cancellableRunner.run(
+                executable: executable,
+                arguments: arguments,
+                workingDirectory: nil,
+                cancellation: cancellation
+            )
+        } else {
+            result = try commandRunner.run(
+                executable: executable,
+                arguments: arguments,
+                workingDirectory: nil
+            )
+        }
+
+        guard result.succeeded else {
+            let detail = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            let fallback = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw FileOperationError.commandFailed(
+                command: ([executable] + arguments).joined(separator: " "),
+                exitCode: result.exitCode,
+                detail: detail.isEmpty ? (fallback.isEmpty ? "No error output." : fallback) : detail
+            )
+        }
+
+        for source in sources {
+            try removeEmptyDirectories(at: source)
+        }
+
+        progress?(FileOperationProgress(
+            completedBytes: 0,
+            totalBytes: 0,
+            completedItems: sources.count,
+            totalItems: sources.count,
+            currentItem: nil,
+            rootCompletedItems: sources.count,
+            rootTotalItems: sources.count,
+            elapsedSeconds: Date().timeIntervalSince(operationStart)
+        ))
+        logger?.info("file-operation", "move.rsync.completed", metadata: [
+            "count": "\(sources.count)",
+            "destination": destinationDirectory.path
+        ])
+    }
+
+    private func removeEmptyDirectories(at url: URL) throws {
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            return
+        }
+
+        let values = try url.resourceValues(forKeys: [.isSymbolicLinkKey])
+        guard values.isSymbolicLink != true else { return }
+
+        let children = try fileManager.contentsOfDirectory(
+            at: url,
+            includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
+            options: []
+        )
+        for child in children {
+            try removeEmptyDirectories(at: child)
+        }
+
+        guard (try fileManager.contentsOfDirectory(atPath: url.path)).isEmpty else { return }
+        try fileManager.removeItem(at: url)
+    }
+
+    private static func rsyncExecutable(fileManager: FileManager) -> String? {
+        [
+            "/opt/homebrew/bin/rsync",
+            "/usr/local/bin/rsync",
+            "/usr/bin/rsync"
+        ].first(where: { fileManager.isExecutableFile(atPath: $0) })
+    }
+
 
     private func processRootSources(
         _ sources: [URL],
@@ -717,7 +834,7 @@ public struct FileOperationService: @unchecked Sendable {
     }
 
     public func trashContentsSummary(
-        at trashDirectory: URL = .trashDirectory,
+        at trashDirectory: URL? = nil,
         cancellation: FileOperationCancellation? = nil
     ) throws -> TrashContentsSummary {
         let resourceKeys: [URLResourceKey] = [
@@ -726,10 +843,14 @@ public struct FileOperationService: @unchecked Sendable {
             .isSymbolicLinkKey,
             .fileSizeKey
         ]
-        let trashedItems = try userVisibleTrashItems(
-            at: trashDirectory,
-            includingPropertiesForKeys: resourceKeys
-        )
+        let directories = trashDirectories(at: trashDirectory)
+        let trashedItems = try directories.flatMap {
+            try userVisibleTrashItems(
+                at: $0,
+                includingPropertiesForKeys: resourceKeys,
+                ignoringMissingDirectory: trashDirectory == nil
+            )
+        }
 
         var containedItemCount = 0
         var totalByteCount: Int64 = 0
@@ -750,17 +871,21 @@ public struct FileOperationService: @unchecked Sendable {
     }
 
     public func emptyTrash(
-        at trashDirectory: URL = .trashDirectory,
+        at trashDirectory: URL? = nil,
         cancellation: FileOperationCancellation? = nil,
         progress: ((Int) -> Void)? = nil
     ) throws -> Int {
-        let trashedItems = try userVisibleTrashItems(
-            at: trashDirectory,
-            includingPropertiesForKeys: nil
-        )
+        let directories = trashDirectories(at: trashDirectory)
+        let trashedItems = try directories.flatMap {
+            try userVisibleTrashItems(
+                at: $0,
+                includingPropertiesForKeys: nil,
+                ignoringMissingDirectory: trashDirectory == nil
+            )
+        }
 
         logger?.warning("file-operation", "trash.empty.started", metadata: [
-            "path": trashDirectory.path,
+            "path": directories.map(\.path).joined(separator: "|"),
             "count": "\(trashedItems.count)"
         ])
         var removedCount = 0
@@ -776,7 +901,7 @@ public struct FileOperationService: @unchecked Sendable {
             ])
         }
         logger?.warning("file-operation", "trash.empty.completed", metadata: [
-            "path": trashDirectory.path,
+            "path": directories.map(\.path).joined(separator: "|"),
             "count": "\(removedCount)"
         ])
         return removedCount
@@ -784,13 +909,47 @@ public struct FileOperationService: @unchecked Sendable {
 
     private func userVisibleTrashItems(
         at trashDirectory: URL,
-        includingPropertiesForKeys keys: [URLResourceKey]?
+        includingPropertiesForKeys keys: [URLResourceKey]?,
+        ignoringMissingDirectory: Bool = false
     ) throws -> [URL] {
-        try fileManager.contentsOfDirectory(
-            at: trashDirectory,
-            includingPropertiesForKeys: keys
-        )
-        .filter { !Self.isTrashMetadataItem($0) }
+        do {
+            return try fileManager.contentsOfDirectory(
+                at: trashDirectory,
+                includingPropertiesForKeys: keys
+            )
+            .filter { !Self.isTrashMetadataItem($0) }
+        } catch let error as NSError
+            where ignoringMissingDirectory && error.domain == NSCocoaErrorDomain && error.code == CocoaError.fileNoSuchFile.rawValue {
+            return []
+        }
+    }
+
+    private func trashDirectories(at explicitDirectory: URL?) -> [URL] {
+        guard explicitDirectory == nil else { return [explicitDirectory!] }
+        return trashDirectoriesProvider()
+    }
+
+    private static func defaultTrashDirectories(fileManager: FileManager) -> [URL] {
+        var directories = [URL.trashDirectory.standardizedFileURL]
+        #if os(macOS)
+        let userID = getuid()
+        let mountedVolumes = fileManager.mountedVolumeURLs(
+            includingResourceValuesForKeys: nil,
+            options: []
+        ) ?? []
+        for volume in mountedVolumes {
+            let volumeTrash = volume
+                .appendingPathComponent(".Trashes", isDirectory: true)
+                .appendingPathComponent("\(userID)", isDirectory: true)
+                .standardizedFileURL
+            guard volumeTrash != directories[0],
+                  fileManager.fileExists(atPath: volumeTrash.path) else {
+                continue
+            }
+            directories.append(volumeTrash)
+        }
+        #endif
+        return directories
     }
 
     private static func isTrashMetadataItem(_ url: URL) -> Bool {

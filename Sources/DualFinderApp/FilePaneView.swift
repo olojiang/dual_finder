@@ -122,6 +122,9 @@ struct FilePaneView: View {
         .task(id: model.pane(for: side).selectedURL) {
             refreshFreeSpace()
         }
+        .onChange(of: model.refreshRevision) { _, _ in
+            refreshFreeSpace()
+        }
         .onAppear(perform: refreshToolbarVolumeEntries)
         .onAppear {
             model.refreshAndroidDevicesForToolbar()
@@ -2231,9 +2234,9 @@ struct FilePaneView: View {
     }
 }
 
-private struct FilePaneSummary {
+struct FilePaneSummary {
     let fileCount: Int
-    let fileTotalSize: Int64
+    let totalSize: Int64
     let folderCount: Int
 
     init(items: [FileItem]) {
@@ -2243,6 +2246,9 @@ private struct FilePaneSummary {
         for item in items {
             if item.isDirectoryLike {
                 folders += 1
+                if let size = item.size {
+                    totalSize += size
+                }
             } else {
                 files += 1
                 if let size = item.size {
@@ -2252,11 +2258,11 @@ private struct FilePaneSummary {
         }
         fileCount = files
         folderCount = folders
-        fileTotalSize = totalSize
+        self.totalSize = totalSize
     }
 
     var formattedFileSize: String {
-        ByteCountFormatter.string(fromByteCount: fileTotalSize, countStyle: .file)
+        ByteCountFormatter.string(fromByteCount: totalSize, countStyle: .file)
     }
 }
 

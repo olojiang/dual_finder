@@ -29,6 +29,7 @@ final class DualFinderViewModel: ObservableObject {
     @Published var navigationRevealRequest: NavigationRevealRequest?
     @Published private(set) var pasteboardRevision = 0
     @Published private(set) var volumeRevision = 0
+    @Published private(set) var refreshRevision = 0
     @Published private(set) var lastListingDuration: TimeInterval? = nil
     @Published private(set) var fileOperationQueue: [QueuedFileOperation] = []
     @Published var fileConflictDialogRequest: FileConflictDialogRequest? {
@@ -1316,6 +1317,7 @@ final class DualFinderViewModel: ObservableObject {
     }
 
     func refresh(_ side: PaneSide, completion: (@MainActor () -> Void)? = nil) {
+        refreshRevision &+= 1
         refreshCancellations[side]?.cancel()
         refreshCancellations[side] = nil
 
