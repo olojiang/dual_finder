@@ -13,6 +13,7 @@ final class DualFinderViewModel: ObservableObject {
     @Published private(set) var rightFlatViewRootURL: URL?
     @Published var statusMessage: String = ""
     @Published var diskAccessPrompt: DiskAccessPrompt?
+    @Published var unmountFailurePrompt: UnmountFailurePrompt?
     @Published var showWindowHotkeyPrompt: ShowWindowHotkeyPrompt?
     @Published private(set) var activePaneSide: PaneSide = .left
     @Published var pathEditRequest: PathEditRequest?
@@ -72,6 +73,7 @@ final class DualFinderViewModel: ObservableObject {
     private let uiLayoutPreferencesStore: UILayoutPreferencesStore
     private let permissionGuide: PrivacyPermissionGuide
     private let quickLookPreviewService: QuickLookPreviewService
+    private let unmountProcessInspector: UnmountProcessInspector
     private let logger: AppLogging
     private var didAutoOpenDiskAccessSettings = false
     private var pendingOperationRequests: [QueuedFileOperationRequest] = []
@@ -137,6 +139,7 @@ final class DualFinderViewModel: ObservableObject {
         androidFileService: AndroidFileService? = nil,
         permissionGuide: PrivacyPermissionGuide = PrivacyPermissionGuide(),
         quickLookPreviewService: QuickLookPreviewService = QuickLookPreviewService(),
+        unmountProcessInspector: UnmountProcessInspector = UnmountProcessInspector(),
         logger: AppLogging
     ) {
         self.fileSystem = fileSystem
@@ -166,6 +169,7 @@ final class DualFinderViewModel: ObservableObject {
         self.uiLayoutPreferencesStore = uiLayoutPreferencesStore
         self.permissionGuide = permissionGuide
         self.quickLookPreviewService = quickLookPreviewService
+        self.unmountProcessInspector = unmountProcessInspector
         self.logger = logger
         let restoredPanes = paneSessionStore.load(fallbackURL: initialURL)
         leftPane = restoredPanes.left
@@ -1163,11 +1167,17 @@ final class DualFinderViewModel: ObservableObject {
         logger.info("volume", "unmount.requested", metadata: [
             "path": url.path
         ])
+        let inspector = unmountProcessInspector
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let result = Result {
                 try NSWorkspace.shared.unmountAndEjectDevice(at: url)
             }
+            let inspection = Self.inspectUnmountBlockers(
+                after: result,
+                at: url,
+                inspector: inspector
+            )
             DispatchQueue.main.async {
                 guard let self else { return }
                 switch result {
@@ -1177,13 +1187,38 @@ final class DualFinderViewModel: ObservableObject {
                         "path": url.path
                     ])
                 case .failure(let error):
-                    self.statusMessage = "Could not unmount \(displayName)"
+                    let blockers = inspection.blockers
+                    self.statusMessage = blockers.isEmpty
+                        ? "Could not unmount \(displayName)"
+                        : "Could not unmount \(displayName): \(blockers.count) process(es) using it"
+                    self.unmountFailurePrompt = UnmountFailurePrompt(
+                        volumeName: displayName,
+                        mountPath: url.path,
+                        failureReason: error.localizedDescription,
+                        blockers: blockers,
+                        inspectionError: inspection.error
+                    )
                     self.logger.error("volume", "unmount.failed", metadata: [
                         "path": url.path,
-                        "error": error.localizedDescription
+                        "error": error.localizedDescription,
+                        "blockerCount": "\(blockers.count)",
+                        "blockers": blockers.map { "\($0.processName):\($0.processID)" }.joined(separator: ",")
                     ])
                 }
             }
+        }
+    }
+
+    nonisolated private static func inspectUnmountBlockers(
+        after result: Result<Void, Error>,
+        at url: URL,
+        inspector: UnmountProcessInspector
+    ) -> (blockers: [UnmountProcessBlocker], error: String?) {
+        guard case .failure = result else { return ([], nil) }
+        do {
+            return (try inspector.inspect(mountPoint: url), nil)
+        } catch {
+            return ([], error.localizedDescription)
         }
     }
 

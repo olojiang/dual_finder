@@ -95,6 +95,37 @@ struct ShortcutHelpRequest: Identifiable, Equatable {
     let id = UUID()
 }
 
+struct UnmountFailurePrompt: Identifiable {
+    let id = UUID()
+    let volumeName: String
+    let mountPath: String
+    let failureReason: String
+    let blockers: [UnmountProcessBlocker]
+    let inspectionError: String?
+
+    var message: String {
+        var sections = ["Location: \(mountPath)", "Reason: \(failureReason)"]
+        if blockers.isEmpty {
+            sections.append("No open-file processes were identified on this volume.")
+        } else {
+            let visibleBlockers = blockers.prefix(8)
+            let processDetails = visibleBlockers.map { blocker in
+                let paths = blocker.openPaths.prefix(3).joined(separator: "\n    ")
+                let extraCount = blocker.openPaths.count - min(blocker.openPaths.count, 3)
+                let extra = extraCount > 0 ? "\n    and \(extraCount) more file(s)" : ""
+                return "\(blocker.processName) (PID \(blocker.processID))\n    \(paths)\(extra)"
+            }
+            let hiddenCount = blockers.count - visibleBlockers.count
+            let more = hiddenCount > 0 ? "\n\nAnd \(hiddenCount) more process(es)." : ""
+            sections.append("Processes using this volume:\n" + processDetails.joined(separator: "\n\n") + more)
+        }
+        if let inspectionError {
+            sections.append("Process inspection failed: \(inspectionError)")
+        }
+        return sections.joined(separator: "\n\n")
+    }
+}
+
 enum FileClipboardOperation: String {
     case copy
     case move
