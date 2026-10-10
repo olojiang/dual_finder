@@ -102,6 +102,7 @@ struct UnmountFailurePrompt: Identifiable {
     let failureReason: String
     let blockers: [UnmountProcessBlocker]
     let inspectionError: String?
+    var terminationMessages: [Int: String] = [:]
 
     var message: String {
         var sections = ["Location: \(mountPath)", "Reason: \(failureReason)"]

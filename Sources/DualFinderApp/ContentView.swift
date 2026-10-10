@@ -110,12 +110,8 @@ struct ContentView: View {
                 }
             )
         }
-        .alert(item: $model.unmountFailurePrompt) { prompt in
-            Alert(
-                title: Text("Could Not Unmount \(prompt.volumeName)"),
-                message: Text(prompt.message),
-                dismissButton: .default(Text("OK"))
-            )
+        .sheet(item: $model.unmountFailurePrompt) { prompt in
+            UnmountFailureDialog(model: model, prompt: prompt)
         }
         .alert("Enable Global \(ShowWindowHotkeyStore().binding().displayLabel)", isPresented: showWindowHotkeyAlertBinding) {
             Button("Open Login Items") {

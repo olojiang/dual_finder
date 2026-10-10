@@ -14,6 +14,7 @@ final class DualFinderViewModel: ObservableObject {
     @Published var statusMessage: String = ""
     @Published var diskAccessPrompt: DiskAccessPrompt?
     @Published var unmountFailurePrompt: UnmountFailurePrompt?
+    @Published private(set) var terminatingUnmountProcessIDs: Set<Int> = []
     @Published var showWindowHotkeyPrompt: ShowWindowHotkeyPrompt?
     @Published private(set) var activePaneSide: PaneSide = .left
     @Published var pathEditRequest: PathEditRequest?
@@ -74,6 +75,7 @@ final class DualFinderViewModel: ObservableObject {
     private let permissionGuide: PrivacyPermissionGuide
     private let quickLookPreviewService: QuickLookPreviewService
     private let unmountProcessInspector: UnmountProcessInspector
+    private let unmountProcessTerminator: UnmountProcessTerminator
     private let logger: AppLogging
     private var didAutoOpenDiskAccessSettings = false
     private var pendingOperationRequests: [QueuedFileOperationRequest] = []
@@ -140,6 +142,7 @@ final class DualFinderViewModel: ObservableObject {
         permissionGuide: PrivacyPermissionGuide = PrivacyPermissionGuide(),
         quickLookPreviewService: QuickLookPreviewService = QuickLookPreviewService(),
         unmountProcessInspector: UnmountProcessInspector = UnmountProcessInspector(),
+        unmountProcessTerminator: UnmountProcessTerminator = UnmountProcessTerminator(),
         logger: AppLogging
     ) {
         self.fileSystem = fileSystem
@@ -170,6 +173,7 @@ final class DualFinderViewModel: ObservableObject {
         self.permissionGuide = permissionGuide
         self.quickLookPreviewService = quickLookPreviewService
         self.unmountProcessInspector = unmountProcessInspector
+        self.unmountProcessTerminator = unmountProcessTerminator
         self.logger = logger
         let restoredPanes = paneSessionStore.load(fallbackURL: initialURL)
         leftPane = restoredPanes.left
@@ -1219,6 +1223,44 @@ final class DualFinderViewModel: ObservableObject {
             return (try inspector.inspect(mountPoint: url), nil)
         } catch {
             return ([], error.localizedDescription)
+        }
+    }
+
+    func forceTerminateUnmountBlocker(_ blocker: UnmountProcessBlocker) {
+        guard let prompt = unmountFailurePrompt,
+              prompt.blockers.contains(where: { $0.processID == blocker.processID }),
+              !terminatingUnmountProcessIDs.contains(blocker.processID) else { return }
+
+        let processID = blocker.processID
+        let mountPoint = URL(fileURLWithPath: prompt.mountPath)
+        let terminator = unmountProcessTerminator
+        terminatingUnmountProcessIDs.insert(processID)
+        unmountFailurePrompt?.terminationMessages[processID] = "Force terminating…"
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = Result { try terminator.terminate(blocker, on: mountPoint) }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.terminatingUnmountProcessIDs.remove(processID)
+                switch result {
+                case .success:
+                    self.unmountFailurePrompt?.terminationMessages[processID] = "Ended. Retry unmount when ready."
+                    self.statusMessage = "Force terminated \(blocker.processName) (PID \(processID))"
+                    self.logger.warning("volume", "unmount.blocker-force-terminated", metadata: [
+                        "path": mountPoint.path,
+                        "process": blocker.processName,
+                        "pid": "\(processID)"
+                    ])
+                case .failure(let error):
+                    self.unmountFailurePrompt?.terminationMessages[processID] = error.localizedDescription
+                    self.logger.error("volume", "unmount.blocker-termination-failed", metadata: [
+                        "path": mountPoint.path,
+                        "process": blocker.processName,
+                        "pid": "\(processID)",
+                        "error": error.localizedDescription
+                    ])
+                }
+            }
         }
     }
 
