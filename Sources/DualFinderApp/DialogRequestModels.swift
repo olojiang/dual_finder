@@ -113,7 +113,9 @@ struct UnmountFailurePrompt: Identifiable {
                 let paths = blocker.openPaths.prefix(3).joined(separator: "\n    ")
                 let extraCount = blocker.openPaths.count - min(blocker.openPaths.count, 3)
                 let extra = extraCount > 0 ? "\n    and \(extraCount) more file(s)" : ""
-                return "\(blocker.processName) (PID \(blocker.processID))\n    \(paths)\(extra)"
+                let executable = blocker.executablePath.map { "\n    Executable: \($0)" } ?? ""
+                let user = blocker.userName.map { "\n    User: \($0)" } ?? ""
+                return "\(blocker.processName) (PID \(blocker.processID))\(executable)\(user)\n    \(paths)\(extra)"
             }
             let hiddenCount = blockers.count - visibleBlockers.count
             let more = hiddenCount > 0 ? "\n\nAnd \(hiddenCount) more process(es)." : ""
