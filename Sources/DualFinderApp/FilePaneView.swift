@@ -35,9 +35,11 @@ struct FilePaneView: View {
     let onToggleTerminalMaximized: (PaneSide) -> Void
     @State private var renamingURL: URL?
     @State private var pendingRenameURL: URL?
+    @State private var renameClickCandidateURL: URL?
     @State private var pendingRevealURL: URL?
     @State private var pendingNewFolderMoveSources: [URL]?
     @State private var renameText = ""
+    @State private var pendingRenameClickWork: DispatchWorkItem?
     @State private var isEditingPath = false
     @State private var pathText = ""
     @State private var isFileSearchPresented = false
@@ -111,6 +113,9 @@ struct FilePaneView: View {
             pendingRevealURL = request.revealURL
         }
         .onChange(of: model.pane(for: side).selectedURL) { _, url in
+            if renamingURL != nil {
+                cancelRename(restoringFocus: false)
+            }
             if !isEditingPath {
                 pathText = model.isAndroidPane(side)
                     ? (AndroidFileURL.parse(url)?.path ?? "/sdcard")
@@ -118,6 +123,11 @@ struct FilePaneView: View {
             }
             resetSimilarFileNavigator()
             dismissFileSearch(restoreFocus: false)
+        }
+        .onChange(of: model.pane(for: side).selectedTabID) { _, _ in
+            if renamingURL != nil {
+                cancelRename(restoringFocus: false)
+            }
         }
         .task(id: model.pane(for: side).selectedURL) {
             refreshFreeSpace()
@@ -135,6 +145,12 @@ struct FilePaneView: View {
         }
         .onChange(of: model.volumeRevision) { _, _ in
             refreshToolbarVolumeEntries()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
+            cancelRenameWhenFocusLeaves(clickedURL: nil, isAppActive: false, isWindowKey: false)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in
+            cancelRenameWhenFocusLeaves(clickedURL: nil, isAppActive: NSApp.isActive, isWindowKey: false)
         }
     }
 
@@ -637,13 +653,19 @@ struct FilePaneView: View {
                                                         modifierFlags: modifierFlags
                                                     )
                                                 },
-                                                mouseUp: { modifierFlags in
+                                                mouseUp: { modifierFlags, clickLocation, rowWidth, clickCount in
                                                     selectItemFromRowMouseUp(
                                                         item.url,
-                                                        modifierFlags: modifierFlags
+                                                        modifierFlags: modifierFlags,
+                                                        clickCount: clickCount,
+                                                        isInNameColumn: isInNameColumn(
+                                                            x: clickLocation,
+                                                            rowWidth: rowWidth
+                                                        )
                                                     )
                                                 },
                                                 doubleClick: {
+                                                    cancelPendingRenameClick()
                                                     activateItem(item.url)
                                                 },
                                                 dragURLsProvider: {
@@ -1925,6 +1947,11 @@ struct FilePaneView: View {
     }
 
     private func cancelRename() {
+        cancelRename(restoringFocus: true)
+    }
+
+    private func cancelRename(restoringFocus: Bool) {
+        cancelPendingRenameClick()
         if let moveSources = pendingNewFolderMoveSources, let folderURL = renamingURL {
             pendingNewFolderMoveSources = nil
             clearRenameState()
@@ -1933,15 +1960,16 @@ struct FilePaneView: View {
                 restoringSelection: moveSources,
                 on: side
             )
-            restoreFileListFocus()
+            if restoringFocus { restoreFileListFocus() }
             return
         }
 
         clearRenameState()
-        restoreFileListFocus()
+        if restoringFocus { restoreFileListFocus() }
     }
 
     private func clearRenameState() {
+        cancelPendingRenameClick()
         renamingURL = nil
         pendingRenameURL = nil
         pendingRevealURL = nil
@@ -1992,7 +2020,16 @@ struct FilePaneView: View {
         _ url: URL,
         modifierFlags: NSEvent.ModifierFlags
     ) {
-        guard renamingURL == nil else { return }
+        if InlineRenameInteractionPolicy.shouldCancel(
+            renamingURL: renamingURL,
+            clickedURL: url,
+            isAppActive: NSApp.isActive,
+            isWindowKey: true
+        ) {
+            cancelRename(restoringFocus: false)
+        }
+        cancelPendingRenameClick()
+        renameClickCandidateURL = model.pane(for: side).selectedItemURLs.contains(url) ? url : nil
 
         let startedAt = Date()
         if !modifierFlags.contains(.shift) {
@@ -2023,7 +2060,9 @@ struct FilePaneView: View {
 
     private func selectItemFromRowMouseUp(
         _ url: URL,
-        modifierFlags: NSEvent.ModifierFlags
+        modifierFlags: NSEvent.ModifierFlags,
+        clickCount: Int,
+        isInNameColumn: Bool
     ) {
         guard renamingURL == nil else { return }
 
@@ -2044,6 +2083,53 @@ struct FilePaneView: View {
         )
         logRowSelectionApplyTiming(source: "file-row.mouse-up", url: url, visibleCount: visibleCount, startedAt: startedAt)
         logRowSelectionTiming(source: "file-row.mouse-up", url: url, visibleCount: visibleCount, startedAt: startedAt)
+        guard InlineRenameInteractionPolicy.shouldBeginOnClick(
+            isSelected: renameClickCandidateURL == url,
+            isInNameColumn: isInNameColumn,
+            clickCount: clickCount,
+            modifiers: modifierFlags
+        ) else { return }
+        renameClickCandidateURL = nil
+        scheduleRenameAfterSingleClick(for: url)
+    }
+
+    private func isInNameColumn(x: CGFloat, rowWidth: CGFloat) -> Bool {
+        let widths = model.columnWidths(for: side)
+        let trailingColumns = widths.width(for: .modified)
+            + widths.width(for: .size)
+            + widths.width(for: .type)
+            + (model.isEncodingColumnVisible ? widths.width(for: .encoding) : 0)
+            + 5 * (model.isEncodingColumnVisible ? 4 : 3)
+        let nameStart = FileListMetrics.horizontalPadding
+            + FileListMetrics.iconColumnWidth
+            + FileListMetrics.iconColumnSpacing
+        let nameEnd = rowWidth - FileListMetrics.horizontalPadding - trailingColumns
+        return x >= nameStart && x <= nameEnd
+    }
+
+    private func scheduleRenameAfterSingleClick(for url: URL) {
+        cancelPendingRenameClick()
+        let work = DispatchWorkItem {
+            guard model.pane(for: side).selectedItemURLs.contains(url), renamingURL == nil else { return }
+            beginRenaming(url)
+        }
+        pendingRenameClickWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
+    }
+
+    private func cancelPendingRenameClick() {
+        pendingRenameClickWork?.cancel()
+        pendingRenameClickWork = nil
+    }
+
+    private func cancelRenameWhenFocusLeaves(clickedURL: URL?, isAppActive: Bool, isWindowKey: Bool) {
+        guard InlineRenameInteractionPolicy.shouldCancel(
+            renamingURL: renamingURL,
+            clickedURL: clickedURL,
+            isAppActive: isAppActive,
+            isWindowKey: isWindowKey
+        ) else { return }
+        cancelRename(restoringFocus: false)
     }
 
     private func applyRowSelection(_ selection: Set<URL>?, source: String) {
@@ -2269,7 +2355,7 @@ struct FilePaneSummary {
 private struct RowMouseHandler: NSViewRepresentable {
     let toolTip: String?
     let mouseDown: (NSEvent.ModifierFlags) -> Void
-    let mouseUp: (NSEvent.ModifierFlags) -> Void
+    let mouseUp: (NSEvent.ModifierFlags, CGFloat, CGFloat, Int) -> Void
     let doubleClick: () -> Void
     let dragURLsProvider: () -> [URL]
     let onDragStarted: ([URL]) -> Void
@@ -2296,7 +2382,7 @@ private struct RowMouseHandler: NSViewRepresentable {
 
     final class MouseHandlingView: NSView, NSDraggingSource {
         var mouseDownAction: ((NSEvent.ModifierFlags) -> Void)?
-        var mouseUpAction: ((NSEvent.ModifierFlags) -> Void)?
+        var mouseUpAction: ((NSEvent.ModifierFlags, CGFloat, CGFloat, Int) -> Void)?
         var doubleClickAction: (() -> Void)?
         var dragURLsProvider: (() -> [URL])?
         var onDragStarted: (([URL]) -> Void)?
@@ -2347,7 +2433,8 @@ private struct RowMouseHandler: NSViewRepresentable {
         override func mouseUp(with event: NSEvent) {
             guard event.clickCount < 2, !didStartDrag else { return }
             mouseDownEvent = nil
-            mouseUpAction?(event.modifierFlags)
+            let location = convert(event.locationInWindow, from: nil)
+            mouseUpAction?(event.modifierFlags, location.x, bounds.width, event.clickCount)
         }
 
         override func rightMouseDown(with event: NSEvent) {

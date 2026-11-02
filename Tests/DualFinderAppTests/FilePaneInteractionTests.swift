@@ -7,6 +7,65 @@ import Testing
 
 @Suite("FilePane interactions")
 struct FilePaneInteractionTests {
+    @Test("inline rename starts only on an unmodified single click in the selected name column")
+    func inlineRenameClickPolicy() {
+        #expect(InlineRenameInteractionPolicy.shouldBeginOnClick(
+            isSelected: true,
+            isInNameColumn: true,
+            clickCount: 1,
+            modifiers: []
+        ))
+        #expect(!InlineRenameInteractionPolicy.shouldBeginOnClick(
+            isSelected: false,
+            isInNameColumn: true,
+            clickCount: 1,
+            modifiers: []
+        ))
+        #expect(!InlineRenameInteractionPolicy.shouldBeginOnClick(
+            isSelected: true,
+            isInNameColumn: false,
+            clickCount: 1,
+            modifiers: []
+        ))
+        #expect(!InlineRenameInteractionPolicy.shouldBeginOnClick(
+            isSelected: true,
+            isInNameColumn: true,
+            clickCount: 2,
+            modifiers: []
+        ))
+        #expect(!InlineRenameInteractionPolicy.shouldBeginOnClick(
+            isSelected: true,
+            isInNameColumn: true,
+            clickCount: 1,
+            modifiers: [.command]
+        ))
+    }
+
+    @Test("inline rename cancels when focus leaves the app or click targets another row")
+    func inlineRenameCancellationPolicy() {
+        let renamingURL = URL(fileURLWithPath: "/tmp/renaming.txt")
+        let otherURL = URL(fileURLWithPath: "/tmp/other.txt")
+
+        #expect(InlineRenameInteractionPolicy.shouldCancel(
+            renamingURL: renamingURL,
+            clickedURL: otherURL,
+            isAppActive: true,
+            isWindowKey: true
+        ))
+        #expect(InlineRenameInteractionPolicy.shouldCancel(
+            renamingURL: renamingURL,
+            clickedURL: nil,
+            isAppActive: false,
+            isWindowKey: false
+        ))
+        #expect(!InlineRenameInteractionPolicy.shouldCancel(
+            renamingURL: renamingURL,
+            clickedURL: renamingURL,
+            isAppActive: true,
+            isWindowKey: true
+        ))
+    }
+
     @MainActor
     @Test("new folder shortcut path creates a folder and requests inline rename")
     func newFolderShortcutPathCreatesFolderAndRequestsInlineRename() throws {

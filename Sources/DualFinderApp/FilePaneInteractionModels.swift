@@ -159,6 +159,27 @@ enum FileRowSelectionReducer {
     }
 }
 
+enum InlineRenameInteractionPolicy {
+    static func shouldBeginOnClick(
+        isSelected: Bool,
+        isInNameColumn: Bool,
+        clickCount: Int,
+        modifiers: NSEvent.ModifierFlags
+    ) -> Bool {
+        isSelected && isInNameColumn && clickCount == 1 && modifiers.isEmpty
+    }
+
+    static func shouldCancel(
+        renamingURL: URL?,
+        clickedURL: URL?,
+        isAppActive: Bool,
+        isWindowKey: Bool
+    ) -> Bool {
+        guard let renamingURL else { return false }
+        return !isAppActive || !isWindowKey || (clickedURL != nil && clickedURL != renamingURL)
+    }
+}
+
 enum FileKeyboardSelectionNavigator {
     static func selectionAfterMove(
         anchorURL: URL?,
