@@ -26,6 +26,14 @@ struct AppMenuCommands: Commands {
             editSelectionCommands
         }
 
+        CommandGroup(replacing: .help) {
+            Button("Keyboard Shortcuts…") {
+                model.requestShortcutHelp()
+            }
+            .keyboardShortcut("/", modifiers: [.command, .shift])
+            .disabled(model.isInlineRenaming)
+        }
+
         CommandMenu("View") {
             viewDisplayCommands
             Divider()
@@ -304,12 +312,6 @@ struct AppMenuCommands: Commands {
 
     @ViewBuilder
     private var viewToolCommands: some View {
-        Button("Keyboard Shortcuts…") {
-            model.requestShortcutHelp()
-        }
-        .keyboardShortcut("/", modifiers: [.command, .shift])
-        .disabled(model.isInlineRenaming)
-
         Divider()
 
         Button("Filter Current Folder") {
