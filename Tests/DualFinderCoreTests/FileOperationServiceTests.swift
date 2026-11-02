@@ -40,86 +40,27 @@ struct FileOperationServiceTests {
         #expect(!logger.messages.contains { $0.contains("copy.item.completed") })
     }
 
-    #if os(macOS)
-    @Test("cross-volume move uses rsync and removes only empty source directories")
-    func crossVolumeMoveUsesRsync() throws {
-        let root = try TemporaryDirectory()
-        let sourceFolder = root.url.appendingPathComponent("source", isDirectory: true)
-        let destination = root.url.appendingPathComponent("destination", isDirectory: true)
-        let nested = sourceFolder.appendingPathComponent("nested", isDirectory: true)
-        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
-        try "one".write(to: sourceFolder.appendingPathComponent("one.txt"), atomically: true, encoding: .utf8)
-        try "two".write(to: nested.appendingPathComponent("two.txt"), atomically: true, encoding: .utf8)
-        let logger = CapturingLogger()
-
-        try FileOperationService(
-            logger: logger,
-            commandRunner: ProcessCommandRunner(maxCapturedOutputBytes: 1_048_576),
-            moveCapability: { _, _ in false }
-        ).move([sourceFolder], to: destination)
-
-        #expect(!FileManager.default.fileExists(atPath: sourceFolder.path))
-        #expect(try String(contentsOf: destination.appendingPathComponent("source/one.txt"), encoding: .utf8) == "one")
-        #expect(try String(contentsOf: destination.appendingPathComponent("source/nested/two.txt"), encoding: .utf8) == "two")
-        #expect(logger.messages.contains { $0.contains("move.rsync.started") })
-        #expect(logger.messages.contains { $0.contains("move.rsync.completed") })
-    }
-
-    @Test("cross-volume rsync failure leaves source items available for retry")
-    func crossVolumeRsyncFailureLeavesSourcesAvailable() throws {
+    @Test("cross-volume move uses copy-delete instead of rsync")
+    func crossVolumeMoveUsesCopyDelete() throws {
         let root = try TemporaryDirectory()
         let source = root.url.appendingPathComponent("source.txt")
         let destination = root.url.appendingPathComponent("destination", isDirectory: true)
         try "payload".write(to: source, atomically: true, encoding: .utf8)
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
-        let runner = FailingCommandRunner()
-
-        do {
-            try FileOperationService(
-                logger: CapturingLogger(),
-                commandRunner: runner,
-                moveCapability: { _, _ in false }
-            ).move([source], to: destination)
-            Issue.record("Expected rsync failure")
-        } catch let error as FileOperationError {
-            guard case let .commandFailed(_, exitCode, _) = error else {
-                Issue.record("Unexpected file operation error: \(error)")
-                return
-            }
-            #expect(exitCode == 23)
-        }
-
-        #expect(FileManager.default.fileExists(atPath: source.path))
-        #expect(runner.arguments.contains("--remove-source-files"))
-        #expect(runner.arguments.contains("--partial"))
-        #expect(runner.arguments.contains("--no-whole-file"))
-    }
-
-    @Test("sync uses rsync mirror and deletes destination extras")
-    func syncUsesRsyncMirror() throws {
-        let root = try TemporaryDirectory()
-        let sourceFolder = root.url.appendingPathComponent("source", isDirectory: true)
-        let destination = root.url.appendingPathComponent("destination", isDirectory: true)
-        let destinationRoot = destination.appendingPathComponent("source", isDirectory: true)
-        try FileManager.default.createDirectory(at: sourceFolder, withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: destinationRoot, withIntermediateDirectories: true)
-        try "keep".write(to: sourceFolder.appendingPathComponent("keep.txt"), atomically: true, encoding: .utf8)
-        try "remove".write(to: destinationRoot.appendingPathComponent("extra.txt"), atomically: true, encoding: .utf8)
         let logger = CapturingLogger()
 
         try FileOperationService(
             logger: logger,
-            commandRunner: ProcessCommandRunner(maxCapturedOutputBytes: 1_048_576)
-        ).sync([sourceFolder], to: destination)
+            moveCapability: { _, _ in false }
+        ).move([source], to: destination)
 
-        #expect(FileManager.default.fileExists(atPath: sourceFolder.appendingPathComponent("keep.txt").path))
-        #expect(FileManager.default.fileExists(atPath: destinationRoot.appendingPathComponent("keep.txt").path))
-        #expect(!FileManager.default.fileExists(atPath: destinationRoot.appendingPathComponent("extra.txt").path))
-        #expect(logger.messages.contains { $0.contains("sync.rsync.started") })
-        #expect(logger.messages.contains { $0.contains("sync.rsync.completed") })
+        #expect(!FileManager.default.fileExists(atPath: source.path))
+        #expect(FileManager.default.fileExists(atPath: destination.appendingPathComponent("source.txt").path))
+        #expect(logger.messages.contains { $0.contains("move.using-copy-delete") })
+        #expect(!logger.messages.contains { $0.contains("rsync") })
     }
 
+    #if os(macOS)
     @Test("move without destination conflict does not ask resolver")
     func moveWithoutDestinationConflictDoesNotAskResolver() throws {
         let root = try TemporaryDirectory()
@@ -142,6 +83,7 @@ struct FileOperationServiceTests {
         #expect(!FileManager.default.fileExists(atPath: source.path))
         #expect(FileManager.default.fileExists(atPath: destination.appendingPathComponent("source.txt").path))
     }
+    #endif
 
     @Test("move skip conflict keeps original source")
     func moveSkipConflictKeepsOriginalSource() throws {
@@ -976,18 +918,3 @@ struct FileOperationServiceTests {
         #expect(lastProgress?.totalBytes == 3)
     }
 }
-
-#if os(macOS)
-private final class FailingCommandRunner: CommandRunning, @unchecked Sendable {
-    private(set) var arguments: [String] = []
-
-    func run(
-        executable: String,
-        arguments: [String],
-        workingDirectory: URL?
-    ) throws -> CommandResult {
-        self.arguments = arguments
-        return CommandResult(exitCode: 23, stdout: "", stderr: "simulated rsync failure")
-    }
-}
-#endif

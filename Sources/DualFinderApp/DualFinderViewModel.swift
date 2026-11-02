@@ -2837,6 +2837,69 @@ final class DualFinderViewModel: ObservableObject {
         performSelectionOperation(from: sourceSide, operation: .sync)
     }
 
+    func copyMoveRsyncCommand(from sourceSide: PaneSide) {
+        copyRsyncCommand(kind: .move, from: sourceSide)
+    }
+
+    func copySyncRsyncCommand(from sourceSide: PaneSide) {
+        copyRsyncCommand(kind: .sync, from: sourceSide)
+    }
+
+    private func copyRsyncCommand(kind: QueuedFileOperationKind, from sourceSide: PaneSide) {
+        let destinationSide = opposite(sourceSide)
+        guard !isAndroidPane(sourceSide), !isAndroidPane(destinationSide) else {
+            statusMessage = "rsync commands are only supported between local folders"
+            return
+        }
+
+        let sources = orderedSelection(pane(for: sourceSide).selectedItemURLs, on: sourceSide)
+        guard !sources.isEmpty else {
+            statusMessage = "Select at least one item"
+            return
+        }
+
+        let destination = pane(for: destinationSide).selectedURL
+        let command = Self.rsyncCommand(kind: kind, sources: sources, destination: destination)
+
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(command, forType: .string)
+        lastPasteboardChangeCount = NSPasteboard.general.changeCount
+        pasteboardRevision &+= 1
+        statusMessage = "Copied \(kind.displayName) rsync command to clipboard"
+        logger.info("clipboard", "rsync-command.copied", metadata: [
+            "kind": kind.rawValue,
+            "sourceSide": sourceSide.rawValue,
+            "destination": destination.path,
+            "sources": sources.map(\.path).joined(separator: "|")
+        ])
+    }
+
+    nonisolated static func rsyncCommand(
+        kind: QueuedFileOperationKind,
+        sources: [URL],
+        destination: URL
+    ) -> String {
+        let modeArguments = kind == .sync
+            ? ["--archive", "--delete"]
+            : ["--archive", "--remove-source-files"]
+        let arguments = modeArguments + [
+            "--exclude",
+            shellQuote("._*"),
+            "--exclude",
+            shellQuote(".DS_Store"),
+            "--partial",
+            "--no-whole-file",
+            "--progress",
+            "--stats",
+            "--"
+        ] + sources.map { shellQuote($0.path) } + [shellQuote(destination.path + "/")]
+        return (["rsync"] + arguments).joined(separator: " ")
+    }
+
+    nonisolated private static func shellQuote(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
+    }
+
     func mirrorSelection(from sourceSide: PaneSide) {
         guard !isAndroidPane(sourceSide), !isAndroidPane(opposite(sourceSide)) else {
             reportOperationFailure(
@@ -3715,7 +3778,6 @@ final class DualFinderViewModel: ObservableObject {
         ])
         recordFileOperationProgress(
             FileOperationProgress(
-                phase: .preparing,
                 completedBytes: 0,
                 totalBytes: 0,
                 completedItems: 0,
@@ -3735,9 +3797,6 @@ final class DualFinderViewModel: ObservableObject {
         let execution = request.execution
         let cancellation = request.cancellation
         let refreshPolicy = request.refreshPolicy
-        let conflictPreviews = destination.map {
-            Self.fileConflictPreviews(for: sources, destinationDirectory: $0)
-        } ?? []
         let androidFileService = androidFileService
         let operationLogger = logger
         let scanCache = operationScanCache
@@ -3745,6 +3804,13 @@ final class DualFinderViewModel: ObservableObject {
 
         Task.detached(priority: .userInitiated) { [weak self] in
             let service = FileOperationService(logger: operationLogger, operationScanCache: scanCache)
+            let conflictPreviews = destination.map {
+                Self.fileConflictPreviews(
+                    for: sources,
+                    destinationDirectory: $0,
+                    syncMode: kind == .sync || kind == .mirror
+                )
+            } ?? []
             var applyAllResolution: FileOperationConflictResolution?
 
             func resolveConflict(_ conflict: FileOperationConflict) -> FileOperationConflictResolution {
@@ -3782,13 +3848,15 @@ final class DualFinderViewModel: ObservableObject {
                         )
                     case .sync:
                         guard let destination else { throw FileOperationError.invalidDestination }
-                        try service.sync(
+                        try service.copy(
                             sources,
                             to: destination,
+                            options: FileOperationOptions(syncMode: true),
                             cancellation: cancellation,
                             progress: { progress in
                                 progressCoalescer.record(progress, for: id)
-                            }
+                            },
+                            conflictResolver: resolveConflict
                         )
                     case .mirror:
                         guard let destination else { throw FileOperationError.invalidDestination }
@@ -4448,9 +4516,20 @@ final class DualFinderViewModel: ObservableObject {
     nonisolated static func fileConflictPreviews(
         for sources: [URL],
         destinationDirectory: URL,
+        syncMode: Bool = false,
         fileManager: FileManager = .default
     ) -> [FileConflictPreview] {
-        sources.compactMap { source in
+        if syncMode {
+            return sources.flatMap { source in
+                syncFileConflictPreviews(
+                    source: source,
+                    destination: destinationDirectory.appendingPathComponent(source.lastPathComponent),
+                    fileManager: fileManager
+                )
+            }
+        }
+
+        return sources.compactMap { (source: URL) -> FileConflictPreview? in
             let destination = destinationDirectory.appendingPathComponent(source.lastPathComponent)
             guard fileManager.fileExists(atPath: destination.path) else { return nil }
             return FileConflictPreview(
@@ -4463,6 +4542,47 @@ final class DualFinderViewModel: ObservableObject {
                 )
             )
         }
+    }
+
+    private nonisolated static func syncFileConflictPreviews(
+        source: URL,
+        destination: URL,
+        fileManager: FileManager
+    ) -> [FileConflictPreview] {
+        guard fileManager.fileExists(atPath: destination.path) else { return [] }
+
+        let sourceValues = try? source.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey])
+        let destinationValues = try? destination.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey])
+
+        if sourceValues?.isDirectory == true, destinationValues?.isDirectory == true {
+            let children = (try? fileManager.contentsOfDirectory(
+                at: source,
+                includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey],
+                options: []
+            )) ?? []
+            return children.flatMap { child in
+                syncFileConflictPreviews(
+                    source: child,
+                    destination: destination.appendingPathComponent(child.lastPathComponent),
+                    fileManager: fileManager
+                )
+            }
+        }
+
+        guard sourceValues?.isRegularFile == true,
+              destinationValues?.isRegularFile == true
+        else {
+            return []
+        }
+
+        let conflict = FileOperationConflict(source: source, destination: destination)
+        return [FileConflictPreview(
+            source: source,
+            destination: destination,
+            sourceSize: regularFileSize(at: source),
+            destinationSize: regularFileSize(at: destination),
+            largerWinsResolution: FileOperationService.largerWinsResolution(for: conflict)
+        )]
     }
 
     private nonisolated static func conflictPreviews(

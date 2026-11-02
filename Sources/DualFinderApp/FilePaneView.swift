@@ -537,6 +537,13 @@ struct FilePaneView: View {
         Button("Sync to Other Pane") {
             model.syncSelection(from: side)
         }
+        Divider()
+        Button("Copy Move to Other Pane rsync Command") {
+            model.copyMoveRsyncCommand(from: side)
+        }
+        Button("Copy Sync to Other Pane rsync Command") {
+            model.copySyncRsyncCommand(from: side)
+        }
         Button("Mirror to Other Pane") {
             model.mirrorSelection(from: side)
         }

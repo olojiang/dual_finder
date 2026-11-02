@@ -7,13 +7,6 @@ public enum FileOperationConflictResolution: String, Sendable, CaseIterable {
     case largerWins
 }
 
-public enum FileOperationPhase: String, Sendable, Equatable {
-    case preparing
-    case scanning
-    case transferring
-    case finalizing
-}
-
 public struct FileOperationOptions: Sendable {
     public var defaultConflictResolution: FileOperationConflictResolution
     public var syncMode: Bool
@@ -38,7 +31,6 @@ public struct FileOperationConflict: Sendable, Equatable {
 }
 
 public struct FileOperationProgress: Sendable, Equatable {
-    public let phase: FileOperationPhase
     public let completedBytes: Int64
     public let totalBytes: Int64
     public let completedItems: Int
@@ -55,7 +47,6 @@ public struct FileOperationProgress: Sendable, Equatable {
     public let elapsedSeconds: TimeInterval?
 
     public init(
-        phase: FileOperationPhase = .transferring,
         completedBytes: Int64,
         totalBytes: Int64,
         completedItems: Int,
@@ -71,7 +62,6 @@ public struct FileOperationProgress: Sendable, Equatable {
         rootTotalItems: Int = 0,
         elapsedSeconds: TimeInterval? = nil
     ) {
-        self.phase = phase
         self.completedBytes = completedBytes
         self.totalBytes = totalBytes
         self.completedItems = completedItems

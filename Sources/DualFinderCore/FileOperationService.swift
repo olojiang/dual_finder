@@ -5,8 +5,6 @@ import Darwin
 
 public enum FileOperationError: LocalizedError, Equatable {
     case trashUnsupported
-    case toolNotFound(String)
-    case commandFailed(command: String, exitCode: Int32, detail: String)
     case emptyName
     case invalidName
     case cancelled
@@ -18,10 +16,6 @@ public enum FileOperationError: LocalizedError, Equatable {
         switch self {
         case .trashUnsupported:
             "Moving files to Trash is only supported on macOS."
-        case let .toolNotFound(tool):
-            "Required tool not found: \(tool)."
-        case let .commandFailed(command, exitCode, detail):
-            "Command failed (\(exitCode)): \(command). \(detail)"
         case .emptyName:
             "Name cannot be empty."
         case .invalidName:
@@ -56,7 +50,6 @@ public struct TrashContentsSummary: Equatable, Sendable {
 
 public struct FileOperationService: @unchecked Sendable {
     private let fileManager: FileManager
-    private let commandRunner: any CommandRunning
     private let logger: AppLogging?
     private let operationScanCache: OperationScanCache?
     private let trashDirectoriesProvider: () -> [URL]
@@ -66,11 +59,9 @@ public struct FileOperationService: @unchecked Sendable {
         fileManager: FileManager = .default,
         logger: AppLogging?,
         operationScanCache: OperationScanCache? = nil,
-        trashDirectoriesProvider: (() -> [URL])? = nil,
-        commandRunner: any CommandRunning = ProcessCommandRunner(maxCapturedOutputBytes: 1_048_576)
+        trashDirectoriesProvider: (() -> [URL])? = nil
     ) {
         self.fileManager = fileManager
-        self.commandRunner = commandRunner
         self.logger = logger
         self.operationScanCache = operationScanCache
         self.trashDirectoriesProvider = trashDirectoriesProvider ?? {
@@ -86,11 +77,9 @@ public struct FileOperationService: @unchecked Sendable {
         logger: AppLogging?,
         operationScanCache: OperationScanCache? = nil,
         trashDirectoriesProvider: (() -> [URL])? = nil,
-        commandRunner: any CommandRunning,
         moveCapability: @escaping @Sendable ([URL], URL) -> Bool
     ) {
         self.fileManager = fileManager
-        self.commandRunner = commandRunner
         self.logger = logger
         self.operationScanCache = operationScanCache
         self.trashDirectoriesProvider = trashDirectoriesProvider ?? {
@@ -215,7 +204,7 @@ public struct FileOperationService: @unchecked Sendable {
                 throw error
             }
         } else {
-            logger?.info("file-operation", "move.using-rsync", metadata: [
+            logger?.info("file-operation", "move.using-copy-delete", metadata: [
                 "reason": "cross-volume",
                 "count": "\(sources.count)",
                 "destination": destinationDirectory.path,
@@ -223,35 +212,53 @@ public struct FileOperationService: @unchecked Sendable {
             ])
         }
 
-        try moveSourcesByRsync(
-            sources,
-            to: destinationDirectory,
-            cancellation: cancellation,
-            progress: progress,
-            removeSourceFiles: true,
-            deleteExtraneous: false,
-            operationLabel: "move"
-        )
+        var copiedRoots: [CopiedRoot] = []
+        do {
+            try processRootSources(
+                sources,
+                cancellation: cancellation,
+                progress: progress
+            ) { source, index, total in
+                let context = try OperationContext(
+                    sources: [source],
+                    fileManager: fileManager,
+                    cancellation: cancellation,
+                    progress: progress,
+                    operationScanCache: operationScanCache,
+                    logger: logger,
+                    rootCompletedItems: index,
+                    rootTotalItems: total
+                )
+                let copied = try copySources(
+                    [source],
+                    to: destinationDirectory,
+                    options: options,
+                    context: context,
+                    conflictResolver: conflictResolver
+                )
+                copiedRoots.append(contentsOf: copied)
+                for copiedRoot in copied {
+                    try context.checkCancellation()
+                    if copiedRoot.mergedIntoExistingDirectory {
+                        logger?.info("file-operation", "move.merge.source-kept", metadata: [
+                            "source": copiedRoot.source.path,
+                            "destination": copiedRoot.destination.path,
+                            "reason": "merged-into-existing-directory"
+                        ])
+                        continue
+                    }
+                    if fileManager.fileExists(atPath: copiedRoot.source.path) {
+                        try fileManager.removeItem(at: copiedRoot.source)
+                    }
+                }
+            }
+        } catch {
+            for copiedRoot in copiedRoots where fileManager.fileExists(atPath: copiedRoot.destination.path) {
+                try? fileManager.removeItem(at: copiedRoot.destination)
+            }
+            throw error
+        }
         logger?.info("file-operation", "move.completed", metadata: operationMetadata(sources, destinationDirectory))
-    }
-
-    public func sync(
-        _ sources: [URL],
-        to destinationDirectory: URL,
-        cancellation: FileOperationCancellation? = nil,
-        progress: ((FileOperationProgress) -> Void)? = nil
-    ) throws {
-        logger?.info("file-operation", "sync.started", metadata: operationMetadata(sources, destinationDirectory))
-        try moveSourcesByRsync(
-            sources,
-            to: destinationDirectory,
-            cancellation: cancellation,
-            progress: progress,
-            removeSourceFiles: false,
-            deleteExtraneous: true,
-            operationLabel: "sync"
-        )
-        logger?.info("file-operation", "sync.completed", metadata: operationMetadata(sources, destinationDirectory))
     }
 
     public func createFolder(named name: String, in directory: URL) throws -> URL {
@@ -499,150 +506,6 @@ public struct FileOperationService: @unchecked Sendable {
         }
     }
 
-    private func moveSourcesByRsync(
-        _ sources: [URL],
-        to destinationDirectory: URL,
-        cancellation: FileOperationCancellation?,
-        progress: ((FileOperationProgress) -> Void)?,
-        removeSourceFiles: Bool,
-        deleteExtraneous: Bool,
-        operationLabel: String
-    ) throws {
-        guard let executable = Self.rsyncExecutable(fileManager: fileManager) else {
-            throw FileOperationError.toolNotFound("rsync")
-        }
-
-        let operationStart = Date()
-        progress?(FileOperationProgress(
-            phase: .transferring,
-            completedBytes: 0,
-            totalBytes: 0,
-            completedItems: 0,
-            totalItems: 0,
-            currentItem: sources.first,
-            rootCompletedItems: 0,
-            rootTotalItems: sources.count,
-            elapsedSeconds: 0
-        ))
-
-        // --no-whole-file keeps rsync's rolling-checksum delta algorithm enabled
-        // for local disk-to-disk transfers. --partial preserves an interrupted
-        // destination so a later Move/Retry can continue from it.
-        var arguments = ["--archive"]
-        if removeSourceFiles {
-            arguments.append("--remove-source-files")
-        }
-        if deleteExtraneous {
-            arguments.append("--delete")
-        }
-        arguments += [
-            "--partial",
-            "--no-whole-file",
-            "--info=progress2",
-            "--stats",
-            "--"
-        ] + sources.map(\.path) + [destinationDirectory.path + "/"]
-
-        logger?.info("file-operation", "\(operationLabel).rsync.started", metadata: [
-            "executable": executable,
-            "arguments": arguments.joined(separator: " "),
-            "count": "\(sources.count)",
-            "destination": destinationDirectory.path
-        ])
-
-        let result: CommandResult
-        if let streamingRunner = commandRunner as? any StreamingCommandRunning {
-            let reporter = RsyncProgressReporter(sources: sources, progress: progress)
-            result = try streamingRunner.run(
-                executable: executable,
-                arguments: arguments,
-                workingDirectory: nil,
-                cancellation: cancellation,
-                output: { channel, chunk in
-                    guard channel == .stderr else { return }
-                    reporter.consume(chunk)
-                }
-            )
-        } else if let cancellableRunner = commandRunner as? any CancellableCommandRunning {
-            result = try cancellableRunner.run(
-                executable: executable,
-                arguments: arguments,
-                workingDirectory: nil,
-                cancellation: cancellation
-            )
-        } else {
-            result = try commandRunner.run(
-                executable: executable,
-                arguments: arguments,
-                workingDirectory: nil
-            )
-        }
-
-        guard result.succeeded else {
-            let detail = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-            let fallback = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-            throw FileOperationError.commandFailed(
-                command: ([executable] + arguments).joined(separator: " "),
-                exitCode: result.exitCode,
-                detail: detail.isEmpty ? (fallback.isEmpty ? "No error output." : fallback) : detail
-            )
-        }
-
-        if removeSourceFiles {
-            for source in sources {
-                try removeEmptyDirectories(at: source)
-            }
-        }
-
-        progress?(FileOperationProgress(
-            phase: .finalizing,
-            completedBytes: 0,
-            totalBytes: 0,
-            completedItems: sources.count,
-            totalItems: sources.count,
-            currentItem: nil,
-            rootCompletedItems: sources.count,
-            rootTotalItems: sources.count,
-            elapsedSeconds: Date().timeIntervalSince(operationStart)
-        ))
-        logger?.info("file-operation", "\(operationLabel).rsync.completed", metadata: [
-            "count": "\(sources.count)",
-            "destination": destinationDirectory.path
-        ])
-    }
-
-    private func removeEmptyDirectories(at url: URL) throws {
-        var isDirectory: ObjCBool = false
-        guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory),
-              isDirectory.boolValue else {
-            return
-        }
-
-        let values = try url.resourceValues(forKeys: [.isSymbolicLinkKey])
-        guard values.isSymbolicLink != true else { return }
-
-        let children = try fileManager.contentsOfDirectory(
-            at: url,
-            includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
-            options: []
-        )
-        for child in children {
-            try removeEmptyDirectories(at: child)
-        }
-
-        guard (try fileManager.contentsOfDirectory(atPath: url.path)).isEmpty else { return }
-        try fileManager.removeItem(at: url)
-    }
-
-    private static func rsyncExecutable(fileManager: FileManager) -> String? {
-        [
-            "/opt/homebrew/bin/rsync",
-            "/usr/local/bin/rsync",
-            "/usr/bin/rsync"
-        ].first(where: { fileManager.isExecutableFile(atPath: $0) })
-    }
-
-
     private func processRootSources(
         _ sources: [URL],
         cancellation: FileOperationCancellation?,
@@ -655,7 +518,6 @@ public struct FileOperationService: @unchecked Sendable {
                 throw FileOperationError.cancelled
             }
             progress?(FileOperationProgress(
-                phase: .preparing,
                 completedBytes: 0,
                 totalBytes: 0,
                 completedItems: 0,
@@ -1137,80 +999,6 @@ public struct FileOperationService: @unchecked Sendable {
         ]
     }
 
-    private final class RsyncProgressReporter: @unchecked Sendable {
-        private let sources: [URL]
-        private let progress: ((FileOperationProgress) -> Void)?
-        private let lock = NSLock()
-        private var bufferedOutput = ""
-        private var totalBytes: Int64 = 0
-        private var lastCompletedBytes: Int64 = 0
-        private var lastPublishedAt = Date.distantPast
-
-        init(sources: [URL], progress: ((FileOperationProgress) -> Void)?) {
-            self.sources = sources
-            self.progress = progress
-        }
-
-        func consume(_ chunk: String) {
-            guard !chunk.isEmpty else { return }
-
-            lock.lock()
-            bufferedOutput.append(chunk)
-            let parts = bufferedOutput.split(whereSeparator: { $0 == "\r" || $0 == "\n" })
-            if bufferedOutput.last == "\r" || bufferedOutput.last == "\n" {
-                bufferedOutput = ""
-            } else {
-                bufferedOutput = String(parts.last ?? "")
-            }
-            let completeLines = parts.dropLast(bufferedOutput.isEmpty ? 0 : 1).map(String.init)
-            lock.unlock()
-
-            for line in completeLines {
-                publishIfNeeded(for: line)
-            }
-        }
-
-        private func publishIfNeeded(for line: String) {
-            let tokens = line.split(whereSeparator: \.isWhitespace)
-            guard let byteToken = tokens.first,
-                  byteToken.allSatisfy({ $0.isNumber || $0 == "," }),
-                  let completedBytes = Int64(String(byteToken).replacingOccurrences(of: ",", with: "")),
-                  let percentToken = tokens.first(where: { $0.hasSuffix("%") }),
-                  let percent = Double(percentToken.dropLast()),
-                  percent >= 0, percent <= 100 else {
-                return
-            }
-
-            lock.lock()
-            if percent > 0 {
-                let estimatedTotal = Int64((Double(completedBytes) * 100 / percent).rounded(.up))
-                totalBytes = max(totalBytes, estimatedTotal)
-            }
-            let now = Date()
-            let shouldPublish = completedBytes > lastCompletedBytes
-                && (now.timeIntervalSince(lastPublishedAt) >= 0.25 || percent >= 100)
-            if shouldPublish {
-                lastCompletedBytes = completedBytes
-                lastPublishedAt = now
-            }
-            let currentTotalBytes = totalBytes
-            lock.unlock()
-
-            guard shouldPublish else { return }
-            progress?(FileOperationProgress(
-                phase: .transferring,
-                completedBytes: completedBytes,
-                totalBytes: currentTotalBytes,
-                completedItems: 0,
-                totalItems: 0,
-                currentItem: sources.first,
-                rootCompletedItems: 0,
-                rootTotalItems: sources.count,
-                elapsedSeconds: nil
-            ))
-        }
-    }
-
     private final class OperationContext {
         private let cancellation: FileOperationCancellation?
         private let progress: ((FileOperationProgress) -> Void)?
@@ -1253,7 +1041,6 @@ public struct FileOperationService: @unchecked Sendable {
             let startedAt = Date()
             func reportScanning(_ count: Int, currentItem: URL?) {
                 progress?(FileOperationProgress(
-                    phase: .scanning,
                     completedBytes: 0,
                     totalBytes: 0,
                     completedItems: 0,
@@ -1397,7 +1184,6 @@ public struct FileOperationService: @unchecked Sendable {
 
         private func publish(currentItem: URL?) {
             progress?(FileOperationProgress(
-                phase: .transferring,
                 completedBytes: completedBytes,
                 totalBytes: totalBytes,
                 completedItems: completedItems,

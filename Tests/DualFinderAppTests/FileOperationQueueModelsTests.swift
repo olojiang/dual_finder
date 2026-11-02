@@ -126,6 +126,43 @@ struct FileOperationQueueModelsTests {
         #expect(previews[1].largerWinsResolution == .skip)
     }
 
+    @Test("generated rsync commands exclude macOS metadata files")
+    func generatedRsyncCommandsExcludeMacOSMetadataFiles() {
+        let command = DualFinderViewModel.rsyncCommand(
+            kind: .sync,
+            sources: [URL(fileURLWithPath: "/tmp/source")],
+            destination: URL(fileURLWithPath: "/tmp/destination", isDirectory: true)
+        )
+
+        #expect(command.contains("--exclude '._*'"))
+        #expect(command.contains("--exclude '.DS_Store'"))
+    }
+
+    @Test("sync conflict previews compare nested files instead of selected folders")
+    func syncConflictPreviewsCompareNestedFiles() throws {
+        let root = try AppTemporaryDirectory()
+        let destination = root.url.appendingPathComponent("destination", isDirectory: true)
+        let sourceFolder = root.url.appendingPathComponent("Switch", isDirectory: true)
+        let destinationFolder = destination.appendingPathComponent("Switch", isDirectory: true)
+        try FileManager.default.createDirectory(at: sourceFolder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destinationFolder, withIntermediateDirectories: true)
+
+        let sourceFile = sourceFolder.appendingPathComponent(".DS_Store")
+        let destinationFile = destinationFolder.appendingPathComponent(".DS_Store")
+        try Data(repeating: 1, count: 128).write(to: sourceFile)
+        try Data(repeating: 2, count: 64).write(to: destinationFile)
+
+        let previews = DualFinderViewModel.fileConflictPreviews(
+            for: [sourceFolder],
+            destinationDirectory: destination,
+            syncMode: true
+        )
+
+        #expect(previews.count == 1)
+        #expect(previews[0].source.standardizedFileURL == sourceFile.standardizedFileURL)
+        #expect(previews[0].destination.standardizedFileURL == destinationFile.standardizedFileURL)
+    }
+
     @Test("scanning progress shows scanned item count")
     func scanningProgressShowsScannedItemCount() {
         let operation = QueuedFileOperation(
