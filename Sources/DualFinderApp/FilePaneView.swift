@@ -1852,7 +1852,13 @@ struct FilePaneView: View {
     }
 
     private func beginRenaming(_ url: URL) {
-        pendingRevealURL = url
+        beginRenaming(url, isNewlyCreated: false)
+    }
+
+    private func beginRenaming(_ url: URL, isNewlyCreated: Bool) {
+        if InlineRenameInteractionPolicy.shouldRevealBeforeEditing(isNewlyCreated: isNewlyCreated) {
+            pendingRevealURL = url
+        }
         if let item = model.items(for: side).first(where: { $0.url == url }) {
             beginRenaming(item)
         } else {
@@ -1876,7 +1882,7 @@ struct FilePaneView: View {
             return
         }
         self.pendingRenameURL = nil
-        beginRenaming(item.url)
+        beginRenaming(item.url, isNewlyCreated: true)
     }
 
     private func revealPendingItemIfReady(with scrollProxy: ScrollViewProxy) {

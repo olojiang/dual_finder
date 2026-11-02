@@ -41,6 +41,12 @@ struct FilePaneInteractionTests {
         ))
     }
 
+    @Test("inline rename reveals only items created by the create-and-rename flow")
+    func inlineRenameRevealPolicy() {
+        #expect(InlineRenameInteractionPolicy.shouldRevealBeforeEditing(isNewlyCreated: true))
+        #expect(!InlineRenameInteractionPolicy.shouldRevealBeforeEditing(isNewlyCreated: false))
+    }
+
     @Test("inline rename cancels when focus leaves the app or click targets another row")
     func inlineRenameCancellationPolicy() {
         let renamingURL = URL(fileURLWithPath: "/tmp/renaming.txt")

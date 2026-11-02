@@ -160,6 +160,10 @@ enum FileRowSelectionReducer {
 }
 
 enum InlineRenameInteractionPolicy {
+    static func shouldRevealBeforeEditing(isNewlyCreated: Bool) -> Bool {
+        isNewlyCreated
+    }
+
     static func shouldBeginOnClick(
         isSelected: Bool,
         isInNameColumn: Bool,
