@@ -50,19 +50,29 @@ struct FilePaneInteractionTests {
             renamingURL: renamingURL,
             clickedURL: otherURL,
             isAppActive: true,
-            isWindowKey: true
+            isWindowKey: true,
+            isPaneActive: true
         ))
         #expect(InlineRenameInteractionPolicy.shouldCancel(
             renamingURL: renamingURL,
             clickedURL: nil,
             isAppActive: false,
-            isWindowKey: false
+            isWindowKey: false,
+            isPaneActive: true
+        ))
+        #expect(InlineRenameInteractionPolicy.shouldCancel(
+            renamingURL: renamingURL,
+            clickedURL: nil,
+            isAppActive: true,
+            isWindowKey: true,
+            isPaneActive: false
         ))
         #expect(!InlineRenameInteractionPolicy.shouldCancel(
             renamingURL: renamingURL,
             clickedURL: renamingURL,
             isAppActive: true,
-            isWindowKey: true
+            isWindowKey: true,
+            isPaneActive: true
         ))
     }
 

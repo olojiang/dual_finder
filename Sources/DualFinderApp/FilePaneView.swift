@@ -129,6 +129,10 @@ struct FilePaneView: View {
                 cancelRename(restoringFocus: false)
             }
         }
+        .onChange(of: model.activePaneSide) { _, activeSide in
+            guard activeSide != side else { return }
+            cancelRenameWhenFocusLeaves(clickedURL: nil, isAppActive: NSApp.isActive, isWindowKey: true)
+        }
         .task(id: model.pane(for: side).selectedURL) {
             refreshFreeSpace()
         }
@@ -2024,7 +2028,8 @@ struct FilePaneView: View {
             renamingURL: renamingURL,
             clickedURL: url,
             isAppActive: NSApp.isActive,
-            isWindowKey: true
+            isWindowKey: true,
+            isPaneActive: model.activePaneSide == side
         ) {
             cancelRename(restoringFocus: false)
         }
@@ -2127,7 +2132,8 @@ struct FilePaneView: View {
             renamingURL: renamingURL,
             clickedURL: clickedURL,
             isAppActive: isAppActive,
-            isWindowKey: isWindowKey
+            isWindowKey: isWindowKey,
+            isPaneActive: model.activePaneSide == side
         ) else { return }
         cancelRename(restoringFocus: false)
     }

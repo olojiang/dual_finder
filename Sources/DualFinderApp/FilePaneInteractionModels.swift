@@ -173,10 +173,14 @@ enum InlineRenameInteractionPolicy {
         renamingURL: URL?,
         clickedURL: URL?,
         isAppActive: Bool,
-        isWindowKey: Bool
+        isWindowKey: Bool,
+        isPaneActive: Bool
     ) -> Bool {
         guard let renamingURL else { return false }
-        return !isAppActive || !isWindowKey || (clickedURL != nil && clickedURL != renamingURL)
+        return !isAppActive
+            || !isWindowKey
+            || !isPaneActive
+            || (clickedURL != nil && clickedURL != renamingURL)
     }
 }
 
