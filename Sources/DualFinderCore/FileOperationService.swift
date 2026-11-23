@@ -1118,7 +1118,7 @@ public struct FileOperationService: @unchecked Sendable {
             completedBytes += bytes
             let now = Date()
             let byteDelta = completedBytes - lastPublishedBytes
-            if byteDelta >= 8 * 1024 * 1024 || now.timeIntervalSince(lastPublishedAt) >= 0.5 {
+            if byteDelta >= 1024 * 1024 || now.timeIntervalSince(lastPublishedAt) >= 0.5 {
                 lastPublishedBytes = completedBytes
                 lastPublishedAt = now
                 publish(currentItem: currentItem)

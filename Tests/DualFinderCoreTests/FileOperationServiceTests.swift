@@ -22,6 +22,23 @@ struct FileOperationServiceTests {
         #expect(logger.messages.contains { $0.contains("copy.completed") })
     }
 
+    @Test("publishes byte progress before a large file finishes copying")
+    func publishesIntermediateByteProgress() throws {
+        let root = try TemporaryDirectory()
+        let source = root.url.appendingPathComponent("large.bin")
+        let destination = root.url.appendingPathComponent("destination", isDirectory: true)
+        let payload = Data(repeating: 0x5A, count: 4 * 1024 * 1024)
+        try payload.write(to: source)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        var progressEvents: [FileOperationProgress] = []
+
+        try FileOperationService(logger: CapturingLogger()).copy([source], to: destination) {
+            progressEvents.append($0)
+        }
+
+        #expect(progressEvents.contains { $0.completedBytes > 0 && $0.completedBytes < Int64(payload.count) })
+    }
+
     @Test("moves files into destination directory")
     func movesFiles() throws {
         let root = try TemporaryDirectory()
