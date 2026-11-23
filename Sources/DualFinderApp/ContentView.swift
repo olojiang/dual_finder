@@ -450,7 +450,7 @@ private struct CommonLocationRow: View {
             }
             if isRecent {
                 Button("Remove from Recent", role: .destructive) {
-                    isRemoveConfirmationPresented = true
+                    removeRecent()
                 }
             }
             if let unmount {
@@ -458,14 +458,14 @@ private struct CommonLocationRow: View {
             }
         }
         .confirmationDialog(
-            isRecent ? "Remove from Recent?" : "Remove from Favorites?",
+            "Remove from Favorites?",
             isPresented: $isRemoveConfirmationPresented,
             titleVisibility: .visible
         ) {
-            Button("Remove", role: .destructive, action: isRecent ? removeRecent : removeFavorite)
+            Button("Remove", role: .destructive, action: removeFavorite)
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text(isRecent ? "Remove \"\(displayName)\" from Recent?" : "Remove \"\(displayName)\" from your favorites?")
+            Text("Remove \"\(displayName)\" from your favorites?")
         }
     }
 
@@ -475,7 +475,7 @@ private struct CommonLocationRow: View {
             rowLabel
             if isRecent {
                 IconButton(systemName: "xmark", help: "Remove from Recent") {
-                    isRemoveConfirmationPresented = true
+                    removeRecent()
                 }
                 .opacity(isHovered ? 1 : 0)
                 .accessibilityHidden(!isHovered)
