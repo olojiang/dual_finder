@@ -71,4 +71,19 @@ struct FolderBookmarkStoreTests {
             FolderBookmarkEntry(url: folder, isFavorite: false)
         ])
     }
+
+    @Test("removing a recent folder removes only its bookmark")
+    func removingRecentFolder() {
+        let suiteName = "FolderBookmarkStoreTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = FolderBookmarkStore(defaults: defaults)
+        let folder = URL(fileURLWithPath: "/tmp/recent-folder")
+
+        store.recordRecentFolder(folder)
+        store.removeRecentFolder(folder)
+
+        #expect(store.entries().isEmpty)
+        #expect(FileManager.default.fileExists(atPath: folder.path) == false)
+    }
 }

@@ -370,11 +370,15 @@ private struct CommonLocationsSidebar: View {
                     entry: entry,
                     isActive: isActive(entry.url),
                     isCollapsed: isCollapsed,
+                    isRecent: !entry.isFavorite && recents.contains(entry),
                     open: {
                         model.navigateToBookmarkedFolder(entry.url)
                     },
                     removeFavorite: {
                         model.removeFolderFavorite(entry.url)
+                    },
+                    removeRecent: {
+                        model.removeRecentFolder(entry.url)
                     }
                 )
             }
@@ -420,11 +424,14 @@ private struct CommonLocationRow: View {
     let entry: FolderBookmarkEntry
     let isActive: Bool
     let isCollapsed: Bool
+    var isRecent = false
     var overrideIconName: String?
     let open: () -> Void
     let removeFavorite: () -> Void
+    var removeRecent: () -> Void = {}
     var unmount: (() -> Void)?
     @State private var isRemoveConfirmationPresented = false
+    @State private var isHovered = false
 
     var body: some View {
         Group {
@@ -441,19 +448,24 @@ private struct CommonLocationRow: View {
                     isRemoveConfirmationPresented = true
                 }
             }
+            if isRecent {
+                Button("Remove from Recent", role: .destructive) {
+                    isRemoveConfirmationPresented = true
+                }
+            }
             if let unmount {
                 Button("Unmount", role: .destructive, action: unmount)
             }
         }
         .confirmationDialog(
-            "Remove from Favorites?",
+            isRecent ? "Remove from Recent?" : "Remove from Favorites?",
             isPresented: $isRemoveConfirmationPresented,
             titleVisibility: .visible
         ) {
-            Button("Remove", role: .destructive, action: removeFavorite)
+            Button("Remove", role: .destructive, action: isRecent ? removeRecent : removeFavorite)
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Remove \"\(displayName)\" from your favorites?")
+            Text(isRecent ? "Remove \"\(displayName)\" from Recent?" : "Remove \"\(displayName)\" from your favorites?")
         }
     }
 
@@ -461,6 +473,13 @@ private struct CommonLocationRow: View {
         HStack(spacing: 8) {
             favoriteStarButton
             rowLabel
+            if isRecent {
+                IconButton(systemName: "xmark", help: "Remove from Recent") {
+                    isRemoveConfirmationPresented = true
+                }
+                .opacity(isHovered ? 1 : 0)
+                .accessibilityHidden(!isHovered)
+            }
         }
         .font(.callout)
         .padding(.horizontal, 8)
@@ -470,6 +489,7 @@ private struct CommonLocationRow: View {
         .clipShape(RoundedRectangle(cornerRadius: 6))
         .contentShape(Rectangle())
         .onTapGesture(perform: open)
+        .onHover { isHovered = $0 }
     }
 
     private var collapsedRow: some View {

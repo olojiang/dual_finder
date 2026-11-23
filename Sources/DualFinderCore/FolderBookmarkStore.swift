@@ -80,6 +80,13 @@ public final class FolderBookmarkStore {
         save(snapshot)
     }
 
+    public func removeRecentFolder(_ url: URL) {
+        var snapshot = loadSnapshot()
+        let path = normalizedPath(for: url)
+        snapshot.recentPaths.removeAll { $0 == path }
+        save(snapshot)
+    }
+
     private func loadSnapshot() -> Snapshot {
         guard let data = defaults.data(forKey: key),
               let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data)

@@ -1161,6 +1161,12 @@ final class DualFinderViewModel: ObservableObject {
         ])
     }
 
+    func removeRecentFolder(_ url: URL) {
+        folderBookmarkStore.removeRecentFolder(url)
+        folderBookmarkRevision += 1
+        statusMessage = "Removed from Recent: \(url.path)"
+    }
+
     func navigateToBookmarkedFolder(_ url: URL) {
         navigate(activePaneSide, to: url)
     }
